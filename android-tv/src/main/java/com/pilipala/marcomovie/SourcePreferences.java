@@ -61,9 +61,20 @@ final class SourcePreferences {
             if (video.lines.get(i).name.equals(preferred) && !video.lines.get(i).episodes.isEmpty())
                 return i;
         }
-        for (int i = 0; i < video.lines.size(); i++)
-            if (!video.lines.get(i).episodes.isEmpty()) return i;
-        return 0;
+        // No explicit preference: take the line that actually carries the whole season. Netdisk
+        // sources often list one file per "line", so the first non-empty line is usually a single
+        // episode; picking the richest one makes plain "play" advance through the show.
+        int richest = -1;
+        int richestEpisodes = 0;
+        for (int i = 0; i < video.lines.size(); i++) {
+            Cms.Line line = video.lines.get(i);
+            if (line == null || line.episodes == null) continue;
+            if (line.episodes.size() > richestEpisodes) {
+                richestEpisodes = line.episodes.size();
+                richest = i;
+            }
+        }
+        return richest >= 0 ? richest : 0;
     }
 
     static List<Cms.Site> prioritized(MainActivity a, List<Cms.Site> sites) {
