@@ -101,10 +101,40 @@ final class PlaybackController {
     static void resolveWebPage(
             MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode ep, String prefix) {
         String address = (prefix == null ? "" : prefix) + ep.url;
+        startWebResolver(a, s, v, ep, address, null, null);
+    }
+
+    /**
+     * Opens one WebView resolver. With a null {@code chain} this keeps the original single-page
+     * behaviour (live channels, direct web pages, {@code webview://} episodes). With a chain it
+     * reports the sniff result back to the chain so the next parse interface can be tried without
+     * showing a failure to the user.
+     */
+    private static void startWebResolver(
+            MainActivity a,
+            Cms.Site s,
+            Cms.Video v,
+            Cms.Episode ep,
+            String address,
+            ParseChain chain,
+            ParseChainResolver.Candidate candidate) {
+        final boolean chained = chain != null;
+        if (chained) {
+            if (chain.ticket != a.generation
+                    || chain.serial != a.playbackResolveSerial
+                    || a.isFinishing()) return;
+            chain.webAttempts++;
+        }
         if (!Cms.isHttp(address)) {
-            a.changingMiniEpisode = false;
-            clearPlaybackLoading(a);
-            failInPlaceSwitch(a, "解析页面地址不受支持。");
+            if (chained) {
+                ParseChainResolver.logAttempt(
+                        candidate == null ? "原页面" : candidate.name, false, "页面地址无效");
+                startParseChain(a, s, v, ep, chain);
+            } else {
+                a.changingMiniEpisode = false;
+                clearPlaybackLoading(a);
+                failInPlaceSwitch(a, "解析页面地址不受支持。");
+            }
             return;
         }
         final int ticket = a.generation;
@@ -115,11 +145,13 @@ final class PlaybackController {
             List<String> adHosts =
                     a.config != null ? a.config.ads : java.util.Collections.emptyList();
             String clickJs = ep.media != null ? ep.media.optString("click", "") : "";
-            a.webResolver =
+            Map<String, String> webHeaders = new LinkedHashMap<>(ep.headers);
+            if (candidate != null) webHeaders.putAll(candidate.headers);
+            final WebResolver resolver =
                     new WebResolver(
                             a,
                             address,
-                            ep.headers,
+                            webHeaders,
                             sniffRules,
                             adHosts,
                             clickJs,
@@ -128,6 +160,13 @@ final class PlaybackController {
                                     if (ticket != a.generation || serial != a.playbackResolveSerial)
                                         return;
                                     a.webResolver = null;
+                                    if (chained && candidate != null) {
+                                        ParseChainResolver.logAttempt(
+                                                candidate.name, true, "网页嗅探到播放地址");
+                                        if (candidate.fromConfig) {
+                                            ParseChainResolver.remember(a, candidate.name);
+                                        }
+                                    }
                                     clearPlaybackLoading(a);
                                     Cms.Episode resolved = new Cms.Episode();
                                     resolved.name = ep.name;
@@ -138,23 +177,68 @@ final class PlaybackController {
                                 }
 
                                 public void failed(String reason) {
-                                    if (ticket == a.generation
-                                            && serial == a.playbackResolveSerial) {
-                                        a.changingMiniEpisode = false;
-                                        clearPlaybackLoading(a);
+                                    if (ticket != a.generation || serial != a.playbackResolveSerial)
+                                        return;
+                                    if (chained) {
                                         stopWeb(a);
-                                        failInPlaceSwitch(a, reason);
+                                        ParseChainResolver.logAttempt(
+                                                candidate == null ? "原页面" : candidate.name,
+                                                false,
+                                                reason);
+                                        startParseChain(a, s, v, ep, chain);
+                                        return;
                                     }
+                                    a.changingMiniEpisode = false;
+                                    clearPlaybackLoading(a);
+                                    stopWeb(a);
+                                    failInPlaceSwitch(a, reason);
                                 }
                             });
-            if (a.webResolver.view() != null) {
-                a.playbackLoading.addView(a.webResolver.view(), new FrameLayout.LayoutParams(1, 1));
+            a.webResolver = resolver;
+            if (resolver.view() != null) {
+                a.playbackLoading.addView(resolver.view(), new FrameLayout.LayoutParams(1, 1));
+            }
+            if (chained) {
+                // WebResolver's built-in timeout is 30s; the chain needs its own shorter budget so
+                // one silent page cannot stall the remaining candidates. The HTTP probe already
+                // spent part of this interface's 8s slot, so only the remainder is available.
+                final long remaining = chain.deadline - SystemClock.elapsedRealtime();
+                final long perCandidate =
+                        chain.candidateStarted <= 0
+                                ? ParseChainResolver.PER_ATTEMPT_TIMEOUT_MS
+                                : ParseChainResolver.PER_ATTEMPT_TIMEOUT_MS
+                                        - Math.max(
+                                                0L,
+                                                SystemClock.elapsedRealtime()
+                                                        - chain.candidateStarted);
+                final long wait = Math.max(1L, Math.min(perCandidate, remaining));
+                a.ui.postDelayed(
+                        () -> {
+                            if (a.webResolver != resolver) return;
+                            if (ticket != a.generation
+                                    || serial != a.playbackResolveSerial
+                                    || a.isFinishing()) return;
+                            stopWeb(a);
+                            ParseChainResolver.logAttempt(
+                                    candidate == null ? "原页面" : candidate.name,
+                                    false,
+                                    "网页嗅探超时");
+                            startParseChain(a, s, v, ep, chain);
+                        },
+                        wait);
             }
         } catch (Exception error) {
             AppLog.w("PlaybackController", "WebResolver init failed", error);
-            a.changingMiniEpisode = false;
-            clearPlaybackLoading(a);
-            failInPlaceSwitch(a, "这台设备无法打开网页播放组件。");
+            if (chained) {
+                stopWeb(a);
+                ParseChainResolver.logAttempt(
+                        candidate == null ? "原页面" : candidate.name, false, "网页组件不可用");
+                startParseChain(a, s, v, ep, chain);
+            } else {
+                a.changingMiniEpisode = false;
+                clearPlaybackLoading(a);
+                failInPlaceSwitch(a, "这台设备无法打开网页播放组件。");
+            }
         }
     }
 
@@ -549,11 +633,20 @@ final class PlaybackController {
                                                     String playPrefix =
                                                             finalResult.optString(
                                                                     "playUrl", s.playUrl);
-                                                    if ((playPrefix == null || playPrefix.isEmpty())
-                                                            && a.config != null
-                                                            && !a.config.parses.isEmpty()) {
+                                                    boolean hasParses =
+                                                            a.config != null
+                                                                    && !a.config.parses.isEmpty();
+                                                    if (hasParses) {
+                                                        // Parse interfaces are available: run the
+                                                        // ordered chain, starting with the source's
+                                                        // own prefix when it has one.
                                                         clearPlaybackLoading(a);
-                                                        resolveCmsWithParser(a, s, v, resolved, "");
+                                                        resolveCmsWithParser(
+                                                                a,
+                                                                s,
+                                                                v,
+                                                                resolved,
+                                                                playPrefix == null ? "" : playPrefix);
                                                         return;
                                                     }
                                                     resolveWebPage(a, s, v, resolved, playPrefix);
@@ -677,34 +770,6 @@ final class PlaybackController {
         return null;
     }
 
-    private static String extractEmbeddedStreamUrl(String baseUrl, String body) {
-        if (body == null || body.isEmpty()) return "";
-        java.util.regex.Matcher m =
-                java.util.regex.Pattern.compile(
-                                "(?:const|var|let)?\\s*(?:url|main|playurl|src|vid)\\s*[:=]\\s*[\"']([^\"']+\\.(?:m3u8|mp4)(?:\\?[^\"']*)?)[\"']",
-                                java.util.regex.Pattern.CASE_INSENSITIVE)
-                        .matcher(body);
-        if (!m.find()) {
-            m =
-                    java.util.regex.Pattern.compile(
-                                    "[\"']((?:https?:)?//[^\"']+\\.(?:m3u8|mp4)(?:\\?[^\"']*)?|/[^\"'\\s<>]+\\.(?:m3u8|mp4)(?:\\?[^\"'\\s<>]*)?)[\"']",
-                                    java.util.regex.Pattern.CASE_INSENSITIVE)
-                            .matcher(body);
-            if (!m.find()) return "";
-        }
-        String found = m.group(1).trim().replace("\\/", "/");
-        if (found.isEmpty()) return "";
-        try {
-            if (found.startsWith("//")) return "https:" + found;
-            if (Cms.isHttp(found)) return found;
-            if (baseUrl != null && Cms.isHttp(baseUrl)) {
-                return new java.net.URI(baseUrl).resolve(found).toString();
-            }
-        } catch (Exception ignored) {
-        }
-        return "";
-    }
-
     static void resolveCmsWithParser(
             MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode ep, String preferredPrefix) {
         if (a.playbackLoading != null) return;
@@ -720,7 +785,9 @@ final class PlaybackController {
                             if (ep.url != null && Cms.isHttp(ep.url)) {
                                 try {
                                     String html = Cms.fetch(ep.url, s.headers);
-                                    String embedded = extractEmbeddedStreamUrl(ep.url, html);
+                                    String embedded =
+                                            ParseChainResolver.extractEmbeddedStreamUrl(
+                                                    ep.url, html);
                                     if (Cms.isDirectStreamUrl(embedded)) {
                                         final Cms.Episode directEp = new Cms.Episode();
                                         directEp.name = ep.name;
@@ -740,74 +807,153 @@ final class PlaybackController {
                                 } catch (Exception ignored) {
                                 }
                             }
-                            // 1. Try preferredPrefix or JSON parsers in config.parses
-                            List<Cms.Parse> candidates = new java.util.ArrayList<>();
-                            if (preferredPrefix != null && Cms.isHttp(preferredPrefix)) {
-                                Cms.Parse direct = new Cms.Parse();
-                                direct.name = s.name;
-                                direct.url = preferredPrefix;
-                                direct.type = 1;
-                                direct.headers.putAll(s.headers);
-                                candidates.add(direct);
-                            }
-                            if (a.config != null && a.config.parses != null) {
-                                for (Cms.Parse p : a.config.parses) {
-                                    if (p != null && Cms.isHttp(p.url)) candidates.add(p);
-                                }
-                            }
-                            String webFallbackPrefix =
-                                    preferredPrefix != null ? preferredPrefix : "";
-                            for (int i = 0; i < Math.min(4, candidates.size()); i++) {
-                                if (Thread.currentThread().isInterrupted()) return;
-                                Cms.Parse p = candidates.get(i);
-                                if (p.type == 0 && webFallbackPrefix.isEmpty()) {
-                                    webFallbackPrefix = p.url;
-                                }
-                                if (p.type == 1 || p.type == 2 || p.type == 3 || i == 0) {
-                                    try {
-                                        String targetUrl =
-                                                p.url + java.net.URLEncoder.encode(ep.url, "UTF-8");
-                                        String resp = Cms.fetch(targetUrl, p.headers);
-                                        if (resp != null && resp.trim().startsWith("{")) {
-                                            JSONObject jo = new JSONObject(resp.trim());
-                                            String mediaUrl = jo.optString("url", "").trim();
-                                            if (Cms.isMedia(mediaUrl)) {
-                                                final Cms.Episode resolved =
-                                                        MediaOptions.episode(s, ep, jo);
-                                                a.ui.post(
-                                                        () -> {
-                                                            if (serial != a.playbackResolveSerial
-                                                                    || ticket != a.generation
-                                                                    || a.isFinishing()) return;
-                                                            clearPlaybackLoading(a);
-                                                            openPlayer(a, s, v, resolved);
-                                                        });
-                                                return;
-                                            }
-                                        }
-                                    } catch (Exception ignored) {
-                                    }
-                                }
-                            }
-                            final String finalPrefix = webFallbackPrefix;
+                            // 1. Prepare the ordered parse chain off the UI thread. Every later
+                            // step hops back to the UI thread because WebView work requires it.
+                            final List<ParseChainResolver.Candidate> candidates =
+                                    ParseChainResolver.candidates(a, s, preferredPrefix);
                             a.ui.post(
                                     () -> {
                                         if (serial != a.playbackResolveSerial
                                                 || ticket != a.generation
                                                 || a.isFinishing()) return;
-                                        if (Cms.isHttp(finalPrefix + ep.url)) {
-                                            resolveWebPage(a, s, v, ep, finalPrefix);
-                                        } else if (Cms.isMedia(ep.url)) {
-                                            clearPlaybackLoading(a);
-                                            openPlayer(a, s, v, ep);
-                                        } else {
-                                            a.changingMiniEpisode = false;
-                                            clearPlaybackLoading(a);
-                                            failInPlaceSwitch(a, "此剧集需要外部解析，未找到可用解析接口");
-                                        }
+                                        startParseChain(
+                                                a,
+                                                s,
+                                                v,
+                                                ep,
+                                                new ParseChain(candidates, ticket, serial));
                                     });
                         });
         a.pageRequests.add(request);
+    }
+
+    /**
+     * Advances the parse chain by one interface. Runs on the UI thread. Type-0 interfaces are
+     * player pages and are verified by WebView sniffing; probing them over HTTP would burn the
+     * budget without proving a JS-driven player works. JSON-style types are probed over HTTP first
+     * and only fall back to the WebView when the response looks like a page.
+     */
+    private static void startParseChain(
+            MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode ep, ParseChain chain) {
+        if (a == null || chain == null) return;
+        if (chain.ticket != a.generation
+                || chain.serial != a.playbackResolveSerial
+                || a.isFinishing()) return;
+        long remaining = chain.deadline - SystemClock.elapsedRealtime();
+        if (remaining <= 0 || chain.next >= chain.candidates.size()) {
+            finishParseChain(a, s, v, ep, chain);
+            return;
+        }
+        final ParseChainResolver.Candidate candidate = chain.candidates.get(chain.next++);
+        chain.attempted++;
+        chain.candidateStarted = SystemClock.elapsedRealtime();
+        if (candidate.type == 0) {
+            startWebResolver(
+                    a,
+                    s,
+                    v,
+                    ep,
+                    ParseChainResolver.targetUrl(candidate, ep.url),
+                    chain,
+                    candidate);
+            return;
+        }
+        final long probeCap =
+                candidate.fromConfig
+                        ? ParseChainResolver.PROBE_PHASE_TIMEOUT_MS
+                        : ParseChainResolver.PREFERRED_PROBE_TIMEOUT_MS;
+        final long budget =
+                Math.min(probeCap, Math.min(ParseChainResolver.PER_ATTEMPT_TIMEOUT_MS, remaining));
+        ParseChainResolver.probeAsync(
+                s,
+                ep,
+                candidate,
+                budget,
+                probe -> {
+                    a.ui.post(
+                            () -> {
+                                if (chain.ticket != a.generation
+                                        || chain.serial != a.playbackResolveSerial
+                                        || a.isFinishing()) return;
+                                if (probe != null && probe.ok && probe.episode != null) {
+                                    ParseChainResolver.logAttempt(
+                                            candidate.name, true, probe.reason);
+                                    if (candidate.fromConfig) {
+                                        ParseChainResolver.remember(a, candidate.name);
+                                    }
+                                    clearPlaybackLoading(a);
+                                    openPlayer(a, s, v, probe.episode);
+                                    return;
+                                }
+                                String reason = probe == null ? "请求失败" : probe.reason;
+                                if (probe != null && (probe.pageLike || !candidate.fromConfig)) {
+                                    // The interface answered with a player page (or this is the
+                                    // source's own prefix): let the WebView sniff it before
+                                    // moving on, matching the old page-based behaviour.
+                                    startWebResolver(
+                                            a,
+                                            s,
+                                            v,
+                                            ep,
+                                            ParseChainResolver.targetUrl(candidate, ep.url),
+                                            chain,
+                                            candidate);
+                                    return;
+                                }
+                                ParseChainResolver.logAttempt(candidate.name, false, reason);
+                                startParseChain(a, s, v, ep, chain);
+                            });
+                });
+    }
+
+    /** Emits the terminal state of the chain; only here does the user see a parse failure. */
+    private static void finishParseChain(
+            MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode ep, ParseChain chain) {
+        if (chain.ticket != a.generation
+                || chain.serial != a.playbackResolveSerial
+                || a.isFinishing()) return;
+        if (Cms.isDirectStreamUrl(ep.url)) {
+            clearPlaybackLoading(a);
+            openPlayer(a, s, v, ep);
+            return;
+        }
+        long remaining = chain.deadline - SystemClock.elapsedRealtime();
+        if (chain.webAttempts == 0 && !chain.rawPageTried && remaining > 0 && Cms.isHttp(ep.url)) {
+            // JSON-only configurations used to sniff the episode page itself when no page-style
+            // interface existed; keep that one last attempt.
+            chain.rawPageTried = true;
+            chain.candidateStarted = SystemClock.elapsedRealtime();
+            startWebResolver(a, s, v, ep, ep.url, chain, null);
+            return;
+        }
+        a.changingMiniEpisode = false;
+        clearPlaybackLoading(a);
+        if (chain.attempted <= 0) {
+            failInPlaceSwitch(a, "此剧集需要外部解析，未找到可用解析接口");
+        } else {
+            failInPlaceSwitch(
+                    a, "此剧集需要外部解析，试过 " + chain.attempted + " 个解析接口，均未返回可播放的视频");
+        }
+    }
+
+    /** Mutable state of one parse-chain run; only touched on the UI thread. */
+    private static final class ParseChain {
+        final List<ParseChainResolver.Candidate> candidates;
+        final long deadline;
+        final int ticket;
+        final int serial;
+        int next;
+        int attempted;
+        int webAttempts;
+        long candidateStarted;
+        boolean rawPageTried;
+
+        ParseChain(List<ParseChainResolver.Candidate> candidates, int ticket, int serial) {
+            this.candidates = candidates;
+            this.deadline = SystemClock.elapsedRealtime() + ParseChainResolver.TOTAL_TIMEOUT_MS;
+            this.ticket = ticket;
+            this.serial = serial;
+        }
     }
 
     static void showPlaybackLoading(MainActivity a) {
