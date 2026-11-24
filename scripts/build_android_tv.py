@@ -171,7 +171,9 @@ def main():
     argfile.write_text('\n'.join('"' + str(p).replace('\\', '/') + '"' for p in sources) + '\n', encoding='utf-8')
     run(
         exe(JDK / 'bin', 'javac'),
-        '-encoding', 'UTF-8', '-source', '8', '-target', '8', '-Xlint:-options',
+        # Java 17 source level: d8 (build-tools 35) desugars records / switch expressions /
+        # pattern instanceof down to min-api 23, verified with a probe on 2026-11-24.
+        '-encoding', 'UTF-8', '--release', '17',
         '-classpath', os.pathsep.join(str(p) for p in [ANDROID, *dependencies]),
         '-d', BUILD / 'classes',
         '@' + str(argfile),
