@@ -1,6 +1,6 @@
 package com.pilipala.marcomovie;
 
-/** Pixel-exact height budget for the TV brand header and all eight destinations. */
+/** Pixel-exact height budget for the TV brand header and every navigation destination. */
 final class TvRailMetrics {
     private TvRailMetrics() {}
 

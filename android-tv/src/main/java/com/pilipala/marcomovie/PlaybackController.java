@@ -1164,6 +1164,16 @@ final class PlaybackController {
         return false;
     }
 
+    /**
+     * True when a player error looks like the first fetch being refused: an HTTP 4xx/5xx answer or
+     * one of the Media3 IO error codes (2000..2999). Used to tell an unreachable HLS proxy apart
+     * from decode or container problems. Such a failure downgrades the episode from the loopback
+     * proxy to the original playlist URL once (_hlsDirectFallback guards the repeat).
+     */
+    static boolean isHlsProxyFetchFailure(int what, int httpStatus) {
+        return httpStatus >= 400 || (what >= 2000 && what < 3000);
+    }
+
     static void openPlayer(MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode e) {
         if (e.url != null) {
             e.url = e.url.trim();
@@ -1693,6 +1703,7 @@ final class PlaybackController {
                                     String rawPlayUrl =
                                             Cms.isHttp(ep.url) ? Cms.normalizeHttp(ep.url) : ep.url;
                                     String playUrl = rawPlayUrl;
+                                    boolean hlsProxyRoute = false;
                                     boolean isLiveStream = ep.media.optBoolean("live");
                                     String declaredMime = MediaOptions.mime(ep.media);
                                     boolean hlsLike =
@@ -1724,6 +1735,22 @@ final class PlaybackController {
                                                                 ? "yes"
                                                                 : "no"));
                                     } else if (hlsLike
+                                            && ep.media.optBoolean("_hlsDirectFallback", false)) {
+                                        // The loopback proxy already failed once for this episode
+                                        // (see the proxy->direct retry in the error listener), so
+                                        // stay on the original playlist URL. The player sends the
+                                        // episode headers on every request either way.
+                                        AppLog.w(
+                                                "HlsRoute",
+                                                "direct (fallback) engine="
+                                                        + kernelName(candidate)
+                                                        + " headers="
+                                                        + mediaHeaders.size()
+                                                        + " cookie="
+                                                        + (hasCookieHeader(mediaHeaders)
+                                                                ? "yes"
+                                                                : "no"));
+                                    } else if (hlsLike
                                             && a.prefs.getBoolean(Prefs.HLS_PROXY_ENABLED, true)) {
                                         try {
                                             SourceController.ensureProxy(a, a.config);
@@ -1733,6 +1760,7 @@ final class PlaybackController {
                                                             mediaHeaders,
                                                             a.prefs.getBoolean(
                                                                     Prefs.HLS_AD_STRIP, false));
+                                            hlsProxyRoute = true;
                                             AppLog.w(
                                                     "HlsRoute",
                                                     "proxy headers="
@@ -1771,6 +1799,7 @@ final class PlaybackController {
                                             }
                                         }
                                     }
+                                    final boolean usedHlsProxy = hlsProxyRoute;
                                     candidate.configureDefaultAudio();
                                     candidate.setDataSource(a, Uri.parse(playUrl), mediaHeaders);
                                     try {
@@ -2191,6 +2220,53 @@ final class PlaybackController {
                                                                             500L);
                                                                     return true;
                                                                 }
+                                                            }
+                                                            // Proxy port taken: retry direct.
+                                                            if (usedHlsProxy
+                                                                    && !ep.media.optBoolean(
+                                                                            "_hlsDirectFallback",
+                                                                            false)
+                                                                    && isHlsProxyFetchFailure(
+                                                                            what,
+                                                                            mp
+                                                                                    .getLastHttpStatus())) {
+                                                                try {
+                                                                    ep.media.put(
+                                                                            "_hlsDirectFallback",
+                                                                            true);
+                                                                    if (a.activeEpisode != null
+                                                                            && a.activeEpisode.media
+                                                                                    != null) {
+                                                                        a.activeEpisode.media.put(
+                                                                                "_hlsDirectFallback",
+                                                                                true);
+                                                                    }
+                                                                } catch (Exception ignored) {
+                                                                }
+                                                                int httpStatus =
+                                                                        mp.getLastHttpStatus();
+                                                                AppLog.w(
+                                                                        "HlsFallback",
+                                                                        "proxy->direct "
+                                                                                + (httpStatus >= 400
+                                                                                        ? "http="
+                                                                                                + httpStatus
+                                                                                        : "io="
+                                                                                                + what));
+                                                                // Leave the resume intent as is.
+                                                                if (currentPos > 0)
+                                                                    a.resumeAt = currentPos;
+                                                                a.playStatus.setText(
+                                                                        "本地代理取流失败，正在改直连重试…");
+                                                                a.ui.post(
+                                                                        () -> {
+                                                                            if (ticket
+                                                                                    == a.generation)
+                                                                                playerPage(
+                                                                                        a, s, v,
+                                                                                        ep);
+                                                                        });
+                                                                return true;
                                                             }
                                                             if (mp instanceof MpvPlayer
                                                                     && !ep.media.optBoolean(

@@ -223,7 +223,8 @@ final class HomeScreen {
         source.setOnFocusChangeListener((v, f) -> styleSource(f));
         styleSource(false);
         source.setMaxWidth(a.dp(Math.round(220 * Math.max(1f, navScale))));
-        source.setContentDescription("当前片源：" + site.name + "，按确认键切换");
+        source.setContentDescription(
+                "浏览站点：" + site.name + "，按确认键切换（片源包与线路在 dock「源」里）");
         LinearLayout.LayoutParams sourceSize =
                 new LinearLayout.LayoutParams(-2, a.dp(Math.round(34 * navScale)));
         sourceSize.leftMargin = a.dp(14);
@@ -928,17 +929,17 @@ final class HomeScreen {
         packageName.setShadowLayer(a.dp(6), 0, a.dp(1), 0xb0000000);
         packageRow.addView(packageName, new LinearLayout.LayoutParams(-2, -2));
 
-        final TextView packageSwitch = a.text("⟩ 切换", 11.5f, 0xdceef4ff);
+        final TextView packageSwitch = a.text("⟩ 源", 11.5f, 0xdceef4ff);
         packageSwitch.setGravity(Gravity.CENTER);
         packageSwitch.setIncludeFontPadding(false);
         packageSwitch.setPadding(a.dp(10), 0, a.dp(10), 0);
-        packageSwitch.setContentDescription("切换当前片源包");
+        packageSwitch.setContentDescription("打开源控制：片源包、站点、本剧线路");
         packageSwitch.setShadowLayer(a.dp(6), 0, a.dp(1), 0xb0000000);
-        // Kept as a label only: a focusable pill sitting above the hero title is unreachable by
-        // D-pad (geometric search prefers the top dock), so the real switch lives in the action row.
+        // Read-only summary: the actual three-layer switching lives in the dock "源" panel. This
+        // pill only opens that panel, so the chain has one home.
         packageSwitch.setTag("home-source-package-switch");
         packageSwitch.setBackground(a.bg(0x33ffffff, 999));
-        packageSwitch.setOnClickListener(v -> SourceSwitchDialog.show(a));
+        packageSwitch.setOnClickListener(v -> SourceControlPanel.show(a));
         packageSwitch.setOnFocusChangeListener(
                 (v, f) ->
                         FocusMotion.style(
@@ -1047,14 +1048,14 @@ final class HomeScreen {
                                 1.05f));
         actionRow.addView(playBtn, new LinearLayout.LayoutParams(-2, a.dp(44)));
 
-        final TextView switchInline = a.text("⇄  切换片源", 12.5f, 0xffe6e6ee);
+        final TextView switchInline = a.text("⇄  源", 12.5f, 0xffe6e6ee);
         switchInline.setGravity(Gravity.CENTER);
         switchInline.setIncludeFontPadding(false);
         switchInline.setPadding(a.dp(16), 0, a.dp(16), 0);
-        switchInline.setContentDescription("切换当前片源包");
+        switchInline.setContentDescription("打开源控制：片源包、站点、本剧线路");
         focusable(switchInline, "home-source-switch-inline");
         switchInline.setBackground(a.bg(0x33ffffff, 999));
-        switchInline.setOnClickListener(v -> SourceSwitchDialog.show(a));
+        switchInline.setOnClickListener(v -> SourceControlPanel.show(a));
         switchInline.setOnFocusChangeListener(
                 (v, f) ->
                         FocusMotion.style(

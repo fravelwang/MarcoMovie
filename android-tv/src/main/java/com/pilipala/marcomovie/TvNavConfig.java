@@ -46,6 +46,7 @@ final class TvNavConfig {
     private static final String[] CANONICAL_KEYS = {
         "nav-home",
         "nav-search",
+        "nav-source",
         "nav-history",
         "nav-live",
         "nav-favorites",
@@ -55,12 +56,13 @@ final class TvNavConfig {
     };
 
     private static final String[] CANONICAL_LABELS = {
-        "首页", "搜索", "历史", "直播", "我的", "网盘", "投屏", "设置"
+        "首页", "搜索", "源", "历史", "直播", "我的", "网盘", "投屏", "设置"
     };
 
     private static final int[] CANONICAL_ICONS = {
         HomeDock.ICON_HOME,
         HomeDock.ICON_SEARCH,
+        HomeDock.ICON_SOURCE,
         HomeDock.ICON_HISTORY,
         HomeDock.ICON_LIVE,
         HomeDock.ICON_FAVORITE,

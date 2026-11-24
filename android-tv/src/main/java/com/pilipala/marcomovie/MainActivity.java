@@ -72,6 +72,10 @@ public final class MainActivity extends Activity {
     TvMarkerHost markerHost;
     Cms.Line activeLine;
     Cms.Episode activeEpisode;
+    /** Last series opened in detail or playback; feeds the dock source control panel. */
+    Cms.Site recentSeriesSite;
+    Cms.Video recentSeriesVideo;
+    Cms.Config recentSeriesConfig;
     int resumeAt;
     WatchHistory.Entry playingBookmark;
     WatchHistory.Entry historyFallbackBookmark;
@@ -2632,6 +2636,7 @@ public final class MainActivity extends Activity {
     }
 
     void detail(Cms.Site s, Cms.Video listing, Cms.Video ready) {
+        rememberSeries(s, ready != null ? ready : listing);
         if (!isTvDevice()) {
             MobileDetailScreen.show(this, s, listing, ready);
             return;
@@ -2640,6 +2645,13 @@ public final class MainActivity extends Activity {
         if (root != null && android.os.Build.VERSION.SDK_INT > 23) {
             activeTransition = PlayerTransitionHelper.animateTvPageFade(root, true, reduced, null);
         }
+    }
+
+    /** Keeps the last series the user opened so the dock source panel can offer its line picker. */
+    void rememberSeries(Cms.Site s, Cms.Video v) {
+        if (s != null) recentSeriesSite = s;
+        if (v != null) recentSeriesVideo = v;
+        if (s != null || v != null) recentSeriesConfig = config;
     }
 
     void renderEpisodes(
@@ -2879,6 +2891,7 @@ public final class MainActivity extends Activity {
     }
 
     void resolvePlayer(Cms.Site s, Cms.Video v, Cms.Line line, Cms.Episode ep) {
+        rememberSeries(s, v);
         PlaybackController.resolvePlayer(this, s, v, line, ep);
     }
 
@@ -2887,6 +2900,7 @@ public final class MainActivity extends Activity {
     }
 
     void openPlayer(Cms.Site s, Cms.Video v, Cms.Episode e) {
+        rememberSeries(s, v);
         PlaybackController.openPlayer(this, s, v, e);
     }
 

@@ -242,10 +242,10 @@ public final class Tv063Batch2Checks {
     private static void checkItem5CustomNavAndLanQrServer() throws Exception {
         List<TvNavConfig.Module> defs = TvNavConfig.defaultModules();
         check(
-                defs.size() == 8 && "nav-home".equals(defs.get(0).key),
-                "Item5 TvNavConfig has 8 canonical modules");
+                defs.size() == 9 && "nav-home".equals(defs.get(0).key),
+                "Item5 TvNavConfig has 9 canonical modules");
 
-        List<TvNavConfig.Module> moved = TvNavConfig.move(defs, 7, 0);
+        List<TvNavConfig.Module> moved = TvNavConfig.move(defs, 8, 0);
         check(
                 "nav-settings".equals(moved.get(0).key) && "nav-home".equals(moved.get(1).key),
                 "Item5 TvNavConfig.move reorders modules cleanly");
@@ -254,7 +254,7 @@ public final class Tv063Batch2Checks {
         String json = TvNavConfig.toJson(renamed);
         List<TvNavConfig.Module> parsed = TvNavConfig.parseJson(json);
         check(
-                parsed.size() == 8
+                parsed.size() == 9
                         && "nav-settings".equals(parsed.get(0).key)
                         && "云盘中心".equals(findByKey(parsed, "nav-accounts").label),
                 "Item5 TvNavConfig JSON roundtrips custom order and custom display names");
@@ -264,7 +264,7 @@ public final class Tv063Batch2Checks {
                 TvNavConfig.parseJson(
                         "{\"items\":[{\"key\":\"nav-live\",\"label\":\"电视直播\"},{\"key\":\"nav-live\",\"label\":\"重复\"},{\"key\":\"bogus\",\"label\":\"坏数据\"}]}");
         check(
-                repaired.size() == 8
+                repaired.size() == 9
                         && "nav-live".equals(repaired.get(0).key)
                         && "电视直播".equals(repaired.get(0).label)
                         && findByKey(repaired, "nav-settings") != null,

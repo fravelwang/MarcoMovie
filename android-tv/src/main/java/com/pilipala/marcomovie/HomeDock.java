@@ -15,6 +15,7 @@ final class HomeDock {
     static final int ICON_CAST = 5;
     static final int ICON_SETTINGS = 6;
     static final int ICON_HISTORY = 8;
+    static final int ICON_SOURCE = 9;
 
     private static android.view.animation.DecelerateInterpolator topDecelCache;
 
@@ -77,7 +78,7 @@ final class HomeDock {
     /**
      * Pure-JVM adaptive top navigation bar sizing across real TV resolutions (720p / 1080p / 4K /
      * ultrawide), OEM DPI scales, system font scales, and user navigation scale preferences.
-     * Guarantees the left brand mark and right 8-item capsule never collide or clip.
+     * Guarantees the left brand mark and the configurable right capsule never collide or clip.
      */
     static AdaptiveTopMetrics computeAdaptiveTopMetrics(
             int windowWidthPx,
@@ -99,7 +100,7 @@ final class HomeDock {
         int sideMargin = Math.max(20, Math.min(52, Math.round(widthDp * 0.045f)));
         int topMargin = Math.max(10, Math.min(22, Math.round(heightDp * 0.029f)));
 
-        // Conservative width budget at scale=1.0: brand (~142dp) + 8 labeled pills (~604dp) + gap.
+        // Conservative width budget at scale=1.0: brand (~142dp) + one labeled pill per item + gap.
         float brandAtOneDp = 28f + 9f + 105f * Math.max(1f, safeFont * 0.96f);
         float itemAtOneDp = 20f + 18f + 4.5f + 27f * Math.max(1f, safeFont * 0.96f) + 4f;
         float railAtOneDp = 16f + count * itemAtOneDp;
@@ -136,13 +137,14 @@ final class HomeDock {
     }
 
     static String[] tvNavLabels() {
-        return new String[] {"首页", "搜索", "历史", "直播", "我的", "网盘", "投屏", "设置"};
+        return new String[] {"首页", "搜索", "源", "历史", "直播", "我的", "网盘", "投屏", "设置"};
     }
 
     static String[] tvNavKeys() {
         return new String[] {
             "nav-home",
             "nav-search",
+            "nav-source",
             "nav-history",
             "nav-live",
             "nav-favorites",
@@ -445,6 +447,9 @@ final class HomeDock {
                     break;
                 case "nav-search":
                     actions[i] = searchAction;
+                    break;
+                case "nav-source":
+                    actions[i] = () -> SourceControlPanel.show(a);
                     break;
                 case "nav-history":
                     actions[i] = historyAction;
@@ -1201,6 +1206,24 @@ final class HomeDock {
                                 cx + clockR * 0.38f,
                                 cy + clockR * 0.24f,
                                 p);
+                        break;
+                    }
+                case ICON_SOURCE:
+                    {
+                        // Three stacked cards: the package / site / series chain in one glyph.
+                        p.setStyle(Paint.Style.STROKE);
+                        for (int layer = 0; layer < 3; layer++) {
+                            float topY = cy - r * 0.58f + layer * r * 0.44f;
+                            float midY = topY + r * 0.22f;
+                            float halfW = r * 0.80f;
+                            path.reset();
+                            path.moveTo(cx, topY);
+                            path.lineTo(cx + halfW, midY);
+                            path.lineTo(cx, midY + r * 0.22f);
+                            path.lineTo(cx - halfW, midY);
+                            path.close();
+                            c.drawPath(path, p);
+                        }
                         break;
                     }
             }

@@ -141,12 +141,14 @@ public final class TvUxOptimizationChecks {
         String[] navLabels = HomeDock.tvNavLabels();
         String[] navKeys = HomeDock.tvNavKeys();
         check(
-                navLabels.length == 8
-                        && navKeys.length == 8
-                        && "历史".equals(navLabels[2])
-                        && "nav-history".equals(navKeys[2])
-                        && "nav-accounts".equals(navKeys[5]),
-                "HomeDock exposes 8 TV nav items including dedicated Watch History entry");
+                navLabels.length == 9
+                        && navKeys.length == 9
+                        && "源".equals(navLabels[2])
+                        && "nav-source".equals(navKeys[2])
+                        && "历史".equals(navLabels[3])
+                        && "nav-history".equals(navKeys[3])
+                        && "nav-accounts".equals(navKeys[6]),
+                "HomeDock exposes 9 TV nav items including dedicated Source and Watch History entries");
 
         check(
                 MainActivity.isMenuShortPress(android.view.KeyEvent.ACTION_UP, false, 0)
@@ -2051,17 +2053,18 @@ public final class TvUxOptimizationChecks {
 
     private static void testAdaptiveTvNavBarAndWelcomeScreen() throws Exception {
         // 1. Adaptive TV top nav bar scales down cleanly on compact / 120%-scaled TVs and scales
-        // up on wide large-canvas TVs without ever overflowing or colliding with brand mark
+        // up on wide large-canvas TVs without ever overflowing or colliding with brand mark. The
+        // count follows the 9 default TV modules including "源".
         HomeDock.AdaptiveTopMetrics compact =
-                HomeDock.computeAdaptiveTopMetrics(1600, 900, 2.0f, 1.0f, 1.0f, 8); // 800x450dp
+                HomeDock.computeAdaptiveTopMetrics(1600, 900, 2.0f, 1.0f, 1.0f, 9); // 800x450dp
         HomeDock.AdaptiveTopMetrics standard1080 =
-                HomeDock.computeAdaptiveTopMetrics(1920, 1080, 2.0f, 1.0f, 1.0f, 8); // 960x540dp
+                HomeDock.computeAdaptiveTopMetrics(1920, 1080, 2.0f, 1.0f, 1.0f, 9); // 960x540dp
         HomeDock.AdaptiveTopMetrics standard4k =
-                HomeDock.computeAdaptiveTopMetrics(3840, 2160, 4.0f, 1.0f, 1.0f, 8); // 960x540dp
+                HomeDock.computeAdaptiveTopMetrics(3840, 2160, 4.0f, 1.0f, 1.0f, 9); // 960x540dp
         HomeDock.AdaptiveTopMetrics wideTv =
-                HomeDock.computeAdaptiveTopMetrics(1920, 1080, 1.5f, 1.0f, 1.0f, 8); // 1280x720dp
+                HomeDock.computeAdaptiveTopMetrics(1920, 1080, 1.5f, 1.0f, 1.0f, 9); // 1280x720dp
         HomeDock.AdaptiveTopMetrics hugeFont =
-                HomeDock.computeAdaptiveTopMetrics(1280, 720, 1.6f, 1.30f, 1.20f, 8); // 800x450dp
+                HomeDock.computeAdaptiveTopMetrics(1280, 720, 1.6f, 1.30f, 1.20f, 9); // 800x450dp
 
         check(
                 compact.fitScale < standard1080.fitScale
