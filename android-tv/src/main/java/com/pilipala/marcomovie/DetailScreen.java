@@ -815,9 +815,13 @@ final class DetailScreen {
                     MediaBadges.formatDotJoined(lineBadges, MediaBadgeView.LINE_PICKER_MAX_BADGES);
             final String lineBaseLabel =
                     lineSpec.isEmpty() ? candName : (candName + " · " + lineSpec);
+            // Last recorded outcome of this line; empty when it was never played on this device.
+            final String lineHealth = LineHealth.badge(a, siteKey, candName);
+            final String lineLabel =
+                    lineHealth.isEmpty() ? lineBaseLabel : (lineBaseLabel + " " + lineHealth);
             final Button choice =
                     a.button(
-                            selected ? "● " + lineBaseLabel : lineBaseLabel,
+                            selected ? "● " + lineLabel : lineLabel,
                             "detail-line:" + n,
                             () -> {
                                 renderEpisodes(a, site, video, index, 0, panel, null);

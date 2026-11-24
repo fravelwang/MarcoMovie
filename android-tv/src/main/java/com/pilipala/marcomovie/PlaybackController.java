@@ -12,10 +12,12 @@ import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 import com.pilipala.marcomovie.hud.EpisodeHoldSwitchOverlay;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -252,6 +254,9 @@ final class PlaybackController {
         PlaybackFailure.Attribution attributed =
                 kind == null ? PlaybackFailure.Attribution.UNKNOWN : kind;
         logAttribution(a, s, attributed, 0, 0);
+        // A line-level failure gets one automatic hop first; the failed text is held back until the
+        // hop budget is exhausted so the user sees one outcome instead of a stack of toasts.
+        if (switchToNextLine(a, s, attributed)) return;
         String message = attributed.text(detail);
         if (a.playerChrome != null) a.playerChrome.setLoading(false);
         if (a.current != null && a.current.player) {
@@ -259,6 +264,108 @@ final class PlaybackController {
             showControls(a, true);
         }
         a.toast(message);
+    }
+
+    /**
+     * One playback attempt's automatic line-switch budget: the lines that already failed, how many
+     * automatic switches were made, and what the picker should announce once the switch plays.
+     * Only touched on the UI thread.
+     */
+    private static final class LineFailover {
+        private Cms.Video video;
+        private final Set<String> tried = new HashSet<>();
+        private int switches;
+        private boolean selfRequested;
+        private String pendingLabel;
+        private String pendingTarget;
+
+        void reset(Cms.Video next) {
+            video = next;
+            tried.clear();
+            switches = 0;
+            selfRequested = false;
+            pendingLabel = null;
+            pendingTarget = null;
+        }
+    }
+
+    /** Two hops show the feature without turning playback into a line roulette. */
+    private static final int MAX_AUTO_LINE_SWITCHES = 2;
+
+    private static final LineFailover lineFailover = new LineFailover();
+
+    /**
+     * After a LINE/PARSE/SOURCE failure, plays the same episode from the next line of the same site
+     * in picker order (wrapping once past the last line), skipping the lines this attempt already
+     * tried. Device failures are not retried here: another line feeds the same decoder. At most
+     * {@link #MAX_AUTO_LINE_SWITCHES} hops, so a site whose lines all fail still ends on the normal
+     * failure text. Netdisk lines are included, their native resolution is already in place.
+     */
+    private static boolean switchToNextLine(
+            MainActivity a, Cms.Site s, PlaybackFailure.Attribution kind) {
+        if (a == null || s == null || s.key == null || "live".equals(s.key)) return false;
+        if (kind != PlaybackFailure.Attribution.LINE
+                && kind != PlaybackFailure.Attribution.PARSE
+                && kind != PlaybackFailure.Attribution.SOURCE) {
+            return false;
+        }
+        Cms.Video video = lineFailover.video;
+        Cms.Line from = a.activeLine;
+        if (video == null
+                || video.lines == null
+                || video.lines.size() < 2
+                || from == null
+                || from.name == null) {
+            return false;
+        }
+        lineFailover.tried.add(from.name);
+        if (lineFailover.switches >= MAX_AUTO_LINE_SWITCHES) return false;
+        int index = video.lines.indexOf(from);
+        if (index < 0) return false;
+        for (int offset = 1; offset < video.lines.size(); offset++) {
+            Cms.Line candidate = video.lines.get((index + offset) % video.lines.size());
+            if (candidate == null
+                    || candidate.name == null
+                    || candidate.name.trim().isEmpty()
+                    || lineFailover.tried.contains(candidate.name)
+                    || candidate.episodes == null
+                    || candidate.episodes.isEmpty()) {
+                continue;
+            }
+            // Only a line that has the same episode can replace the current one.
+            Cms.Episode match = findMatchingEpisode(candidate, from, a.activeEpisode);
+            if (match == null) continue;
+            lineFailover.switches++;
+            lineFailover.selfRequested = true;
+            lineFailover.pendingLabel = kind.label;
+            lineFailover.pendingTarget = candidate.name;
+            final Cms.Episode target = match;
+            final Cms.Video source = video;
+            final int ticket = a.generation;
+            if (a.playStatus != null) {
+                a.playStatus.setText("正在切换至 " + candidate.name + "…");
+            }
+            a.ui.post(
+                    () -> {
+                        if (ticket != a.generation) return;
+                        resolvePlayer(a, s, source, candidate, target);
+                    });
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Marks the line healthy once it actually plays, and reports the automatic switch at that
+     * moment: "switched" is only true when the new line reached the prepared state.
+     */
+    private static void onLinePrepared(MainActivity a, Cms.Site s) {
+        if (a == null || s == null || "live".equals(s.key)) return;
+        LineHealth.markOk(a, s, a.activeLine);
+        if (lineFailover.pendingTarget == null) return;
+        String label = lineFailover.pendingLabel == null ? "" : lineFailover.pendingLabel;
+        a.toast("上一条线路【" + label + "】，已换到 " + lineFailover.pendingTarget);
+        lineFailover.reset(lineFailover.video);
     }
 
     /** One PlayAttribution line per failure; only config labels, never URLs or credentials. */
@@ -272,6 +379,11 @@ final class PlaybackController {
                         http,
                         a != null && a.activeLine != null ? a.activeLine.name : null,
                         s != null ? s.key : null));
+        // Single attribution choke point for both failure exits (failInPlaceSwitch and the in-player
+        // error handler), so the line picker memory is written here.
+        if (a != null && s != null && !"live".equals(s.key)) {
+            LineHealth.markFailed(a, s, a.activeLine, kind);
+        }
     }
 
     private static boolean tryHistoryCrossSourceFailover(
@@ -374,6 +486,12 @@ final class PlaybackController {
 
     static void resolvePlayer(
             MainActivity a, Cms.Site s, Cms.Video v, Cms.Line line, Cms.Episode ep) {
+        if (lineFailover.selfRequested) {
+            // Our own automatic line switch: keep the attempt budget and the tried set.
+            lineFailover.selfRequested = false;
+        } else {
+            lineFailover.reset(v);
+        }
         if (a.miniMode) {
             a.changingMiniEpisode = true;
             showEpisodeDetails(a, s, v);
@@ -1754,6 +1872,7 @@ final class PlaybackController {
                                                         mp -> {
                                                             if (ticket != a.generation) return;
                                                             a.prepared = true;
+                                                            onLinePrepared(a, s);
                                                             a.historyFallbackInFlight = false;
                                                             a.historyFallbackBookmark = null;
                                                             if (a.migratingHistoryOldKey != null) {
@@ -2233,6 +2352,20 @@ final class PlaybackController {
                                                                                     hopCount + 1);
                                                                         } catch (
                                                                                 Exception ignored) {
+                                                                        }
+                                                                        // Remember this line:
+                                                                        // the hop shows its own
+                                                                        // toast instead of the
+                                                                        // attribution text.
+                                                                        if (!"live"
+                                                                                .equals(s.key)) {
+                                                                            LineHealth.markFailed(
+                                                                                    a,
+                                                                                    s,
+                                                                                    a.activeLine,
+                                                                                    mp
+                                                                                            .getFailureAttribution(
+                                                                                                    what));
                                                                         }
                                                                         a.resumeAt =
                                                                                 mp
