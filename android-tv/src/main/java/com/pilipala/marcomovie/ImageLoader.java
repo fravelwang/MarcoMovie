@@ -154,6 +154,59 @@ final class ImageLoader {
         }
     }
 
+    /**
+     * Artwork-only connection that tolerates an unverifiable certificate chain.
+     *
+     * <p>Measured on the target box: several poster hosts (e.g. {@code kuakes.com}) answer fine over
+     * TCP but fail {@code Chain validation failed} on this Android build. Artwork carries no
+     * credentials, so images get their own permissive trust while playback and API calls keep the
+     * system trust store untouched.
+     */
+    private static java.net.HttpURLConnection openInsecureArtwork(URL url, Map<String, String> headers)
+            throws IOException {
+        java.net.HttpURLConnection connection = (java.net.HttpURLConnection) url.openConnection();
+        if (connection instanceof javax.net.ssl.HttpsURLConnection) {
+            javax.net.ssl.HttpsURLConnection https =
+                    (javax.net.ssl.HttpsURLConnection) connection;
+            try {
+                javax.net.ssl.SSLContext context =
+                        javax.net.ssl.SSLContext.getInstance("TLS");
+                context.init(
+                        null,
+                        new javax.net.ssl.TrustManager[] {
+                            new javax.net.ssl.X509TrustManager() {
+                                @Override
+                                public void checkClientTrusted(
+                                        java.security.cert.X509Certificate[] chain, String authType) {}
+
+                                @Override
+                                public void checkServerTrusted(
+                                        java.security.cert.X509Certificate[] chain, String authType) {}
+
+                                @Override
+                                public java.security.cert.X509Certificate[]
+                                        getAcceptedIssuers() {
+                                    return new java.security.cert.X509Certificate[0];
+                                }
+                            }
+                        },
+                        new java.security.SecureRandom());
+                https.setSSLSocketFactory(context.getSocketFactory());
+                https.setHostnameVerifier((host, session) -> true);
+            } catch (Exception ignored) {
+                // Keep the system trust store when the permissive context cannot be built.
+            }
+        }
+        connection.setInstanceFollowRedirects(true);
+        connection.setConnectTimeout(12000);
+        connection.setReadTimeout(20000);
+        if (headers != null) {
+            for (Map.Entry<String, String> header : headers.entrySet())
+                connection.setRequestProperty(header.getKey(), header.getValue());
+        }
+        return connection;
+    }
+
     private static void startPosterLoad(
             MainActivity a,
             String address,
@@ -475,6 +528,34 @@ final class ImageLoader {
                                 AppLog.w(
                                         "Poster",
                                         "http fallback failed for " + plain + " : " + fallbackFailure);
+                            }
+                            try {
+                                java.net.HttpURLConnection insecure =
+                                        openInsecureArtwork(new URL(candidate), source.headers);
+                                java.io.InputStream stream = insecure.getInputStream();
+                                java.io.ByteArrayOutputStream out =
+                                        new java.io.ByteArrayOutputStream();
+                                byte[] buffer = new byte[8192];
+                                int n;
+                                while ((n = stream.read(buffer)) != -1) {
+                                    if (out.size() + n > (detail ? 8 : 3) * 1024 * 1024)
+                                        throw new IOException("Poster too large");
+                                    out.write(buffer, 0, n);
+                                }
+                                stream.close();
+                                insecure.disconnect();
+                                byte[] lenientBytes = out.toByteArray();
+                                if (lenientBytes.length > 128) {
+                                    writeDiskCachedPoster(a, candidate, lenientBytes);
+                                    return lenientBytes;
+                                }
+                            } catch (Exception lenientFailure) {
+                                AppLog.w(
+                                        "Poster",
+                                        "lenient tls failed for "
+                                                + candidate
+                                                + " : "
+                                                + lenientFailure);
                             }
                         }
                     }
