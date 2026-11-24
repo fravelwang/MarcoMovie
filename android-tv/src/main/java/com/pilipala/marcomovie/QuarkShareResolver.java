@@ -242,13 +242,17 @@ final class QuarkShareResolver {
         // never piles up name(1).mp4, name(2).mp4 ... of the same file. Only entries that match this
         // episode (same size, same base name) are candidates, and a failed delete is logged, not
         // thrown: playback must not depend on it.
-        deleteOldCopies(credential.cookie, client, ident, hit, saveDirFid);
-
-        // Step 4b: refuse the copy when the drive has no room left. Runs after the delete so the
-        // space it just freed counts. Letting the save task fail instead only surfaces as "no
-        // address", which hides the real cause. A capacity lookup that fails is not a refusal: the
-        // copy goes ahead exactly as before.
+        // Check room BEFORE deleting anything: when the drive has no quota left, deleting the only
+        // copy of this episode and then refusing would leave the user with neither a copy nor a
+        // message about why. If there is enough room we delete and copy; if not we delete first
+        // (that is exactly what frees the quota) and only then re-check.
         String shortage = spaceShortage(credential.cookie, ident.size);
+        deleteOldCopies(credential.cookie, client, ident, hit, saveDirFid);
+        if (!shortage.isEmpty()) shortage = spaceShortage(credential.cookie, ident.size);
+
+        // Step 4b: refuse the copy when the drive still has no room. Letting the save task fail
+        // instead only surfaces as "no address", which hides the real cause. A capacity lookup
+        // that fails is not a refusal: the copy goes ahead exactly as before.
         if (!shortage.isEmpty()) {
             lastRefusalReason = shortage;
             AppLog.w(TAG, "step4 refused, no transfer: " + shortage);
