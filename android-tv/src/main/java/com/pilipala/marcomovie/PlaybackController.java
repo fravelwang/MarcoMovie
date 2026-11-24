@@ -349,6 +349,37 @@ final class PlaybackController {
                                 JSONObject result = null;
                                 Cms.Episode resolvedCandidate = null;
                                 Exception primaryError = null;
+                                // Netdisk lines are resolved by us FIRST. The config-center
+                                // plugin has no 夸克 credential of its own, so letting it answer
+                                // first only produces its "cookie invalid, please log in again"
+                                // popup and a five second wait before our own resolution wins.
+                                // Recognising the id shape is the whole condition; when it does
+                                // not match, nothing changes and the plugin answers as before.
+                                final Cms.Episode nativeFirst =
+                                        nativeNetdiskCandidate(
+                                                targetSite, targetFlag, chosenEp, null, null);
+                                if (nativeFirst != null) {
+                                    final int nativeSerial = serial;
+                                    final int nativeTicket = ticket;
+                                    a.ui.post(
+                                            () -> {
+                                                if (nativeSerial != a.playbackResolveSerial
+                                                        || nativeTicket != a.generation
+                                                        || a.isFinishing()) return;
+                                                clearPlaybackLoading(a);
+                                                openPlayer(a, s, v, nativeFirst);
+                                            });
+                                    return;
+                                }
+                                AppLog.w(
+                                        "SpiderAsk",
+                                        "site="
+                                                + targetSite.key
+                                                + " flag="
+                                                + targetFlag
+                                                + " id=["
+                                                + targetId
+                                                + "]");
                                 try {
                                     result =
                                             new JSONObject(
@@ -463,6 +494,14 @@ final class PlaybackController {
                                 final Cms.Episode finalEp = chosenEp;
                                 final boolean switchedLine =
                                         chosenLine != line && chosenLine != null;
+                                // Netdisk safety net: the config-center plugin has no 夸克
+                                // credentials, so a 夸克 line answers {"list":[],"jx":0,"parse":0}
+                                // and no address ever reaches the player. Ask our own logged-in
+                                // client for one instead. Null keeps the original failure path.
+                                final Cms.Episode nativeEp =
+                                        nativeNetdiskCandidate(
+                                                targetSite, targetFlag, finalEp, finalResult,
+                                                resolved);
                                 a.ui.post(
                                         () -> {
                                             if (serial != a.playbackResolveSerial
@@ -520,6 +559,15 @@ final class PlaybackController {
                                                     resolveWebPage(a, s, v, resolved, playPrefix);
                                                     return;
                                                 }
+                                                // Native netdisk hook: only when the plugin came
+                                                // back empty, exactly before the "no address"
+                                                // fallback below, so every existing failure message
+                                                // still shows when this returns nothing.
+                                                if (url.isEmpty() && nativeEp != null) {
+                                                    clearPlaybackLoading(a);
+                                                    openPlayer(a, s, v, nativeEp);
+                                                    return;
+                                                }
                                                 clearPlaybackLoading(a);
                                                 if (url.isEmpty()) {
                                                     a.changingMiniEpisode = false;
@@ -544,7 +592,7 @@ final class PlaybackController {
                                                             s, finalLine, finalEp.url)) {
                                                         failInPlaceSwitch(
                                                                 a,
-                                                                "该网盘线路未返回播放地址，请先在「网盘与账号」扫码登录对应网盘，或点击右上角 ⇄ 切换其他线路");
+                                                                "该网盘线路未返回播放地址，请先在顶部「网盘」里扫码登录对应网盘，或点击右上角 ⇄ 切换其他线路");
                                                     } else {
                                                         failInPlaceSwitch(
                                                                 a, "当前线路未返回有效播放地址，请点击右上角 ⇄ 切换其他线路");
@@ -557,7 +605,7 @@ final class PlaybackController {
                                                     if (looksLikeNetdiskLine(s, finalLine, url)) {
                                                         failInPlaceSwitch(
                                                                 a,
-                                                                "该网盘线路需先在「网盘与账号」登录授权，或点击右上角 ⇄ 切换其他线路");
+                                                                "该网盘线路需先在顶部「网盘」里登录授权，或点击右上角 ⇄ 切换其他线路");
                                                     } else {
                                                         failInPlaceSwitch(
                                                                 a, "来源返回的播放协议暂不支持，请切换其他线路");
@@ -592,6 +640,41 @@ final class PlaybackController {
                             }
                         });
         a.pageRequests.add(request);
+    }
+
+    /**
+     * Native netdisk fallback for a line the config-center plugin could not resolve: returns the
+     * episode built by our own 夸克 client, or null so the caller keeps its original "no address"
+     * handling (same toast, same cross-source failover).
+     *
+     * <p>Deliberately narrow: only when the plugin answered empty, did not ask for the web parser,
+     * the episode url is not already a plain media link, and the id is a netdisk share id. Runs on
+     * the player-resolve worker thread.
+     */
+    private static Cms.Episode nativeNetdiskCandidate(
+            Cms.Site site, String lineName, Cms.Episode ep, JSONObject result, Cms.Episode resolved) {
+        if (ep == null || ep.url == null) return null;
+        String rawEp = ep.url.trim();
+        if (rawEp.isEmpty() || Cms.isMedia(rawEp) || rawEp.startsWith("magnet:?")) return null;
+        if (result != null && (result.optInt("parse", 0) != 0 || result.optInt("jx", 0) != 0)) {
+            return null;
+        }
+        String pluginUrl = resolved == null || resolved.url == null ? "" : resolved.url.trim();
+        if (!pluginUrl.isEmpty()) {
+            AppLog.w("QuarkShare", "skip: plugin returned url=[" + pluginUrl + "]");
+            return null;
+        }
+        try {
+            Cms.Episode nativeEp =
+                    QuarkShareResolver.resolve(site == null ? "" : site.api, lineName, rawEp);
+            if (nativeEp != null && nativeEp.url != null && !nativeEp.url.trim().isEmpty()) {
+                AppLog.w("QuarkShare", "native episode ready name=" + nativeEp.name);
+                return nativeEp;
+            }
+        } catch (RuntimeException error) {
+            AppLog.w("QuarkShare", "native resolution crashed", error);
+        }
+        return null;
     }
 
     private static String extractEmbeddedStreamUrl(String baseUrl, String body) {
@@ -747,6 +830,22 @@ final class PlaybackController {
                 a.playbackLoadingFocus.requestFocus();
             a.playbackLoadingFocus = null;
         }
+    }
+
+    /** Engine label shared by the PlayKernel and HlsRoute log lines. */
+    private static String kernelName(MoviePlayer player) {
+        if (player instanceof MpvPlayer) return "mpv";
+        if (player instanceof SystemPlayer) return "system";
+        return "media3";
+    }
+
+    /** True when the map carries a Cookie header, whatever its case. */
+    private static boolean hasCookieHeader(Map<String, String> headers) {
+        if (headers == null) return false;
+        for (String key : headers.keySet()) {
+            if ("Cookie".equalsIgnoreCase(key)) return true;
+        }
+        return false;
     }
 
     static void openPlayer(MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode e) {
@@ -1237,7 +1336,8 @@ final class PlaybackController {
                                                     && !ep.media.optBoolean("_softwareFallback")
                                                     && !ep.media.optBoolean("_mpvFallback")
                                                     && drmScheme.isEmpty()
-                                                    && engPref == 3
+                                                    && (engPref == 3
+                                                            || ep.media.optBoolean("_forceMpv", false))
                                                     && MpvPlayer.isAvailable();
                                     boolean preferIjk =
                                             engPref == 2
@@ -1269,15 +1369,44 @@ final class PlaybackController {
                                     } else {
                                         candidate = new MoviePlayer(a);
                                     }
+                                    // Evidence for device tests: which kernel actually plays. The
+                                    // netdisk quality guard only sees Media3 drop reports, so a
+                                    // "mpv" line here explains why no downgrade happened.
+                                    AppLog.w("PlayKernel", kernelName(candidate));
                                     String rawPlayUrl =
                                             Cms.isHttp(ep.url) ? Cms.normalizeHttp(ep.url) : ep.url;
                                     String playUrl = rawPlayUrl;
                                     boolean isLiveStream = ep.media.optBoolean("live");
                                     String declaredMime = MediaOptions.mime(ep.media);
-                                    if (!isLiveStream
-                                            && a.prefs.getBoolean(Prefs.HLS_PROXY_ENABLED, true)
-                                            && HlsStreamProxy.looksLikeHls(
-                                                    rawPlayUrl, declaredMime)) {
+                                    boolean hlsLike =
+                                            !isLiveStream
+                                                    && HlsStreamProxy.looksLikeHls(
+                                                            rawPlayUrl, declaredMime);
+                                    // Native netdisk episodes (QuarkShareResolver and the 网盘 page)
+                                    // need the saved Cookie on the playlist and on every segment;
+                                    // quark answers 412 without it. The player already forwards the
+                                    // episode headers on each request (MoviePlayer's
+                                    // OkHttpDataSource default request properties, MpvPlayer's
+                                    // http-header-fields), so keep those episodes on the direct URL
+                                    // and skip the loopback HLS proxy. Ordinary lines and every other
+                                    // HLS keep the proxy below.
+                                    boolean netdiskHeaders =
+                                            ep.media.optBoolean("_noCache", false)
+                                                    || ep.media.optBoolean("_forceMpv", false)
+                                                    || ep.media.optBoolean("_netdiskHls", false);
+                                    if (hlsLike && netdiskHeaders) {
+                                        AppLog.w(
+                                                "HlsRoute",
+                                                "direct engine="
+                                                        + kernelName(candidate)
+                                                        + " headers="
+                                                        + mediaHeaders.size()
+                                                        + " cookie="
+                                                        + (hasCookieHeader(mediaHeaders)
+                                                                ? "yes"
+                                                                : "no"));
+                                    } else if (hlsLike
+                                            && a.prefs.getBoolean(Prefs.HLS_PROXY_ENABLED, true)) {
                                         try {
                                             SourceController.ensureProxy(a, a.config);
                                             playUrl =
@@ -1286,6 +1415,14 @@ final class PlaybackController {
                                                             mediaHeaders,
                                                             a.prefs.getBoolean(
                                                                     Prefs.HLS_AD_STRIP, false));
+                                            AppLog.w(
+                                                    "HlsRoute",
+                                                    "proxy headers="
+                                                            + mediaHeaders.size()
+                                                            + " cookie="
+                                                            + (hasCookieHeader(mediaHeaders)
+                                                                    ? "yes"
+                                                                    : "no"));
                                         } catch (Exception proxyErr) {
                                             AppLog.w(
                                                     "PlaybackController",
@@ -1294,7 +1431,11 @@ final class PlaybackController {
                                         }
                                     } else if (!isLiveStream) {
                                         int cacheMb = a.prefs.getInt(Prefs.MEDIA_CACHE_MB, 256);
+                                        // Cloud streams resolved by the native netdisk layer opt out:
+                                        // their signed URLs are short-lived and the cache proxy's
+                                        // chunked ranges are refused upstream.
                                         if (cacheMb > 0
+                                                && !ep.media.optBoolean("_noCache", false)
                                                 && MediaDiskCache.isCacheableDirectUrl(
                                                         rawPlayUrl, declaredMime)) {
                                             try {

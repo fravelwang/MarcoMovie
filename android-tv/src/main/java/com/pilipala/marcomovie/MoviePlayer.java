@@ -77,6 +77,20 @@ public class MoviePlayer {
         void onAudioTracksChanged();
     }
 
+    /**
+     * Process-wide sink for dropped-frame batches. {@link NetdiskQualityGuard} installs one to spot
+     * tiers this box cannot decode; it is a report, not a playback command.
+     */
+    interface DropFrameSink {
+        void onDroppedFrames(MoviePlayer player, int droppedFrames, long elapsedMs);
+    }
+
+    private static volatile DropFrameSink dropFrameSink;
+
+    static void setDropFrameSink(DropFrameSink sink) {
+        dropFrameSink = sink;
+    }
+
     private OnTextTracksChangedListener textTracksChangedListener;
     private OnAudioTracksChangedListener audioTracksChangedListener;
 
@@ -370,6 +384,59 @@ public class MoviePlayer {
                                                     .build())
                                     .setLooper(Looper.getMainLooper())
                                     .build();
+                    // Objective playback stats: which decoder actually decoded, at what format,
+                    // and how many frames were dropped. Used to tell "codec/profile problem" apart
+                    // from "network problem" instead of guessing.
+                    try {
+                        exo.addAnalyticsListener(
+                                new androidx.media3.exoplayer.analytics.AnalyticsListener() {
+                                    @Override
+                                    public void onVideoDecoderInitialized(
+                                            EventTime time,
+                                            String decoderName,
+                                            long initializedTimestampMs,
+                                            long initializationDurationMs) {
+                                        AppLog.w("PlayStats", "decoder=" + decoderName);
+                                    }
+
+                                    @Override
+                                    public void onVideoInputFormatChanged(
+                                            EventTime time,
+                                            androidx.media3.common.Format format,
+                                            androidx.media3.exoplayer.DecoderReuseEvaluation reuse) {
+                                        AppLog.w(
+                                                "PlayStats",
+                                                "mime="
+                                                        + format.sampleMimeType
+                                                        + " "
+                                                        + format.width
+                                                        + "x"
+                                                        + format.height
+                                                        + " fps="
+                                                        + format.frameRate
+                                                        + " bitrate="
+                                                        + format.bitrate);
+                                    }
+
+                                    @Override
+                                    public void onDroppedVideoFrames(
+                                            EventTime time, int droppedFrames, long elapsedMs) {
+                                        AppLog.w(
+                                                "PlayStats",
+                                                "dropped=" + droppedFrames + " overMs=" + elapsedMs);
+                                        DropFrameSink sink = dropFrameSink;
+                                        if (sink == null) return;
+                                        try {
+                                            sink.onDroppedFrames(
+                                                    MoviePlayer.this, droppedFrames, elapsedMs);
+                                        } catch (Throwable ignored) {
+                                            // Playback stats must never break playback.
+                                        }
+                                    }
+                                });
+                    } catch (Throwable statsErr) {
+                        AppLog.w("PlayStats", "analytics hook failed", statsErr);
+                    }
                     androidx.media3.exoplayer.trackselection.DefaultTrackSelector.Parameters.Builder
                             trackParams =
                                     new androidx.media3.exoplayer.trackselection
