@@ -427,41 +427,43 @@ final class QuarkShareResolver {
      */
     private static void deleteOldCopies(
             String cookie, QuarkDriveClient client, Ident ident, ShareHit hit, String saveDirFid) {
-        String wanted = baseName(hit.name);
-        List<String> fids = new ArrayList<>();
-        if (!wanted.isEmpty() && saveDirFid != null && !ROOT_FID.equals(saveDirFid)) {
+        if (saveDirFid == null || ROOT_FID.equals(saveDirFid)) {
+            AppLog.w(TAG, "delete skipped: no save dir");
+            return;
+        }
+        int deleted = 0;
+        // The directory is a temp area owned by this app: every run starts from an empty folder, so
+        // no name/size matching is needed and no stale copy can pile up. Pages are drained until the
+        // listing comes back empty (QuarkDriveClient#list only returns the first page).
+        for (int page = 0; page < 8; page++) {
+            List<String> fids = new ArrayList<>();
             try {
-                // Only the first page of the folder is listed (see QuarkDriveClient#list); a folder
-                // grown past it leaves an extra copy behind, never a deleted wrong file.
                 for (QuarkDriveClient.Entry entry : client.list(saveDirFid)) {
-                    if (entry.dir || entry.size != ident.size) continue;
-                    if (!wanted.equalsIgnoreCase(baseName(entry.name))) continue;
+                    if (entry.dir) continue;
                     if (!fids.contains(entry.fid)) fids.add(entry.fid);
                 }
             } catch (IOException error) {
-                AppLog.w(TAG, "old copy lookup failed, transferring: " + describe(error));
+                AppLog.w(TAG, "clear dir listing failed: " + describe(error));
+                break;
+            }
+            if (fids.isEmpty()) break;
+            JsonObject payload = new JsonObject();
+            payload.addProperty("action_type", 2);
+            JsonArray filelist = new JsonArray();
+            for (String fid : fids) filelist.add(fid);
+            payload.add("filelist", filelist);
+            payload.add("exclude_fids", new JsonArray());
+            try {
+                JsonObject answer =
+                        call("POST", BASE + "/file/delete?pr=ucpro&fr=pc", payload.toString(), cookie);
+                AppLog.w(TAG, "clear dir delete n=" + fids.size() + " raw=" + answer);
+                deleted += fids.size();
+            } catch (IOException error) {
+                AppLog.w(TAG, "clear dir delete failed, transferring anyway: " + describe(error));
+                break;
             }
         }
-        if (fids.isEmpty()) {
-            AppLog.w(TAG, "delete done, transferring");
-            return;
-        }
-        AppLog.w(TAG, "reuse dup delete n=" + fids.size() + " fids=" + fids);
-        JsonObject payload = new JsonObject();
-        payload.addProperty("action_type", 2);
-        JsonArray filelist = new JsonArray();
-        for (String fid : fids) filelist.add(fid);
-        payload.add("filelist", filelist);
-        payload.add("exclude_fids", new JsonArray());
-        try {
-            JsonObject answer =
-                    call("POST", BASE + "/file/delete?pr=ucpro&fr=pc", payload.toString(), cookie);
-            AppLog.w(TAG, "delete raw=" + answer);
-        } catch (IOException error) {
-            AppLog.w(TAG, "delete failed, transferring anyway: " + describe(error));
-            return;
-        }
-        AppLog.w(TAG, "delete done, transferring");
+        AppLog.w(TAG, "clear dir done, deleted=" + deleted + ", transferring");
     }
 
     /**
