@@ -715,11 +715,16 @@ final class PlaybackController {
                                                                 spiderMsg);
                                                     } else if (looksLikeNetdiskLine(
                                                             s, finalLine, finalEp.url)) {
+                                                        String refusal =
+                                                                QuarkShareResolver
+                                                                        .lastFailureReason();
                                                         failInPlaceSwitch(
                                                                 a,
                                                                 s,
                                                                 PlaybackFailure.Attribution.SOURCE,
-                                                                "该网盘线路未返回播放地址，请先在顶部「网盘」里扫码登录对应网盘，或点击右上角 ⇄ 切换其他线路");
+                                                                refusal.isEmpty()
+                                                                        ? "该网盘线路未返回播放地址，请先在顶部「网盘」里扫码登录对应网盘，或点击右上角 ⇄ 切换其他线路"
+                                                                        : refusal);
                                                     } else {
                                                         failInPlaceSwitch(
                                                                 a,

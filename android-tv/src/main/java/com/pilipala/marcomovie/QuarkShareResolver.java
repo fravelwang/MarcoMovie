@@ -19,6 +19,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Native fallback for a 夸克 (Quark) netdisk line: the config-center plugin ({@code csp_MacCMS})
@@ -49,6 +51,9 @@ import java.util.Set;
  *       - measured (returns {@code data.list[]} with {@code fid/file_name/file_type/size/
  *       share_fid_token})
  *   <li>own-drive search / list / play: delegated to {@link QuarkDriveClient} - measured
+ *   <li>account quota: {@code GET /member?...&fetch_subscribe=true&_ch=home} - field names
+ *       measured ({@code data.use_capacity} / {@code data.total_capacity}), unit unmeasured; see
+ *       {@link #spaceShortage(String, long)}
  *   <li>create the save folder: {@code POST /file} - <b>not measured</b>, see
  *       {@link #createSaveDir(String)}
  *   <li>share save: {@code POST /share/sharepage/save} - <b>not measured</b>, see
@@ -57,8 +62,12 @@ import java.util.Set;
  * </ul>
  *
  * <p>Copies land in {@link #SAVE_DIR_NAME} under the drive root (created on demand) so every
- * transfer this app makes can be found, and later cleaned up, in one folder. When that folder cannot
- * be prepared the copy falls back to the root, i.e. the behaviour before the folder existed.
+ * transfer this app makes can be found, and later cleaned up, in one folder. Before each copy the
+ * folder is listed and the earlier copies of the same episode (same size, same base name with the
+ * {@code (n)} duplicate suffixes stripped) are deleted, so playing an episode repeatedly keeps one
+ * file instead of stacking {@code (1)}, {@code (2)}, ...; when the drive still lacks the room for
+ * the new copy the resolution stops with a reason the caller can show. When the folder cannot be
+ * prepared the copy falls back to the root, i.e. the behaviour before the folder existed.
  */
 final class QuarkShareResolver {
 
@@ -105,6 +114,33 @@ final class QuarkShareResolver {
      */
     private static final String SAVE_DIR_NAME = "MarcoPlayer";
 
+    /**
+     * Account quota, read right before a copy. Field names measured on the live service
+     * 2026-11-24 ({@code data.use_capacity} / {@code data.total_capacity}); see
+     * {@link #spaceShortage(String, long)} for how the numbers are interpreted.
+     */
+    private static final String MEMBER_URL =
+            BASE + "/member?pr=ucpro&fr=pc&uc_param_str=&fetch_subscribe=true&_ch=home";
+
+    /** Headroom kept over the file itself: a copy needs the file plus a little slack. */
+    private static final double SPACE_MARGIN = 1.1d;
+
+    private static final long GIB = 1024L * 1024L * 1024L;
+
+    /**
+     * The duplicate suffix 夸克 appends to every copy ({@code name(1).mp4}, {@code name(2).mp4}).
+     * Applied to the stem only, so the extension still has to match.
+     */
+    private static final Pattern COPY_SUFFIX = Pattern.compile("\\s*\\(\\d{1,4}\\)\\s*$");
+
+    /**
+     * Why the last {@link #resolve(String, String, String)} refused to play, empty when it did not
+     * refuse. A plain volatile field rather than a {@code ThreadLocal} because the caller reads it
+     * after hopping to the UI thread. Reason text only (no 【...】 prefix): the caller renders it
+     * with {@code PlaybackFailure.Attribution.SOURCE.text(reason)}.
+     */
+    private static volatile String lastRefusalReason = "";
+
     private static final String LOGIN_EXPIRED = "夸克登录已失效";
 
     private QuarkShareResolver() {}
@@ -119,6 +155,7 @@ final class QuarkShareResolver {
      * @param episodeId the episode url as the plugin received it, {@code ++}-separated
      */
     static Cms.Episode resolve(String siteKey, String lineName, String episodeId) {
+        lastRefusalReason = "";
         Ident ident = parseIdent(episodeId);
         if (ident == null) return null;
         boolean named = mentionsQuark(siteKey) || mentionsQuark(lineName);
@@ -151,6 +188,16 @@ final class QuarkShareResolver {
             AppLog.w(TAG, "resolve failed unexpectedly", error);
         }
         return null;
+    }
+
+    /**
+     * The refusal reason of the last resolution, empty when it did not refuse. Read it right after
+     * {@link #resolve(String, String, String)} returned null: the value is only valid for that
+     * resolution and every new one clears it.
+     */
+    static String lastFailureReason() {
+        String reason = lastRefusalReason;
+        return reason == null ? "" : reason;
     }
 
     /** Steps 2-5 of the spec, in order. */
@@ -190,6 +237,23 @@ final class QuarkShareResolver {
         // Step 4 destination: resolved once here and passed down, so one resolution never lists the
         // root twice for the folder. A failure degrades to the root and is logged, never thrown.
         String saveDirFid = ensureSaveDir(client, credential.cookie);
+
+        // Step 4a: drop the earlier copies of this episode before copying it again, so the folder
+        // never piles up name(1).mp4, name(2).mp4 ... of the same file. Only entries that match this
+        // episode (same size, same base name) are candidates, and a failed delete is logged, not
+        // thrown: playback must not depend on it.
+        deleteOldCopies(credential.cookie, client, ident, hit, saveDirFid);
+
+        // Step 4b: refuse the copy when the drive has no room left. Runs after the delete so the
+        // space it just freed counts. Letting the save task fail instead only surfaces as "no
+        // address", which hides the real cause. A capacity lookup that fails is not a refusal: the
+        // copy goes ahead exactly as before.
+        String shortage = spaceShortage(credential.cookie, ident.size);
+        if (!shortage.isEmpty()) {
+            lastRefusalReason = shortage;
+            AppLog.w(TAG, "step4 refused, no transfer: " + shortage);
+            return null;
+        }
 
         // Steps 4-5: copy into our own drive, then swap the new fid for a playback URL.
         String url = saveAndResolve(credential.cookie, client, ident, hit, saveDirFid);
@@ -337,6 +401,149 @@ final class QuarkShareResolver {
         AppLog.w(TAG, "save dir create raw=" + created);
         JsonElement data = created.get("data");
         return data != null && data.isJsonObject() ? optString(data.getAsJsonObject(), "fid") : "";
+    }
+
+    // ---------------------------------------------------------------- step 4a: old copies
+
+    /**
+     * Deletes the earlier copies of the episode this resolution is about to save again.
+     *
+     * <p>A copy counts as this episode when its size is exactly {@code ident.size} <b>and</b> its
+     * base name matches the share entry's once the duplicate suffixes 夸克 appends
+     * ({@code 03.mp4}, {@code 03(1).mp4}, ...) are stripped from both sides. Nothing else in
+     * {@link #SAVE_DIR_NAME} is touched: other episodes of the show keep their files.
+     *
+     * <p>Deleting is best effort. A lookup or delete failure is logged and the transfer goes ahead,
+     * which may land the new copy as {@code name(1).mp4}; playback must not depend on this call.
+     *
+     * <p>TODO(verify): the delete body below ({@code action_type: 2}, {@code filelist},
+     * {@code exclude_fids}) follows the public 夸克 web contract for {@code POST /file/delete} but
+     * has never been run against the live service from this app. The raw answer is logged as
+     * {@code delete raw=...} so the first real run pins the shape down.
+     */
+    private static void deleteOldCopies(
+            String cookie, QuarkDriveClient client, Ident ident, ShareHit hit, String saveDirFid) {
+        String wanted = baseName(hit.name);
+        List<String> fids = new ArrayList<>();
+        if (!wanted.isEmpty() && saveDirFid != null && !ROOT_FID.equals(saveDirFid)) {
+            try {
+                // Only the first page of the folder is listed (see QuarkDriveClient#list); a folder
+                // grown past it leaves an extra copy behind, never a deleted wrong file.
+                for (QuarkDriveClient.Entry entry : client.list(saveDirFid)) {
+                    if (entry.dir || entry.size != ident.size) continue;
+                    if (!wanted.equalsIgnoreCase(baseName(entry.name))) continue;
+                    if (!fids.contains(entry.fid)) fids.add(entry.fid);
+                }
+            } catch (IOException error) {
+                AppLog.w(TAG, "old copy lookup failed, transferring: " + describe(error));
+            }
+        }
+        if (fids.isEmpty()) {
+            AppLog.w(TAG, "delete done, transferring");
+            return;
+        }
+        AppLog.w(TAG, "reuse dup delete n=" + fids.size() + " fids=" + fids);
+        JsonObject payload = new JsonObject();
+        payload.addProperty("action_type", 2);
+        JsonArray filelist = new JsonArray();
+        for (String fid : fids) filelist.add(fid);
+        payload.add("filelist", filelist);
+        payload.add("exclude_fids", new JsonArray());
+        try {
+            JsonObject answer =
+                    call("POST", BASE + "/file/delete?pr=ucpro&fr=pc", payload.toString(), cookie);
+            AppLog.w(TAG, "delete raw=" + answer);
+        } catch (IOException error) {
+            AppLog.w(TAG, "delete failed, transferring anyway: " + describe(error));
+            return;
+        }
+        AppLog.w(TAG, "delete done, transferring");
+    }
+
+    /**
+     * {@code 03.mp4} and {@code 03(1).mp4} both become {@code 03.mp4}. The suffix is stripped from
+     * the stem only, so the extension stays part of the comparison.
+     */
+    private static String baseName(String name) {
+        String value = text(name).trim();
+        if (value.isEmpty()) return "";
+        int dot = value.lastIndexOf('.');
+        String stem = dot > 0 ? value.substring(0, dot) : value;
+        String extension = dot > 0 ? value.substring(dot) : "";
+        while (true) {
+            Matcher matcher = COPY_SUFFIX.matcher(stem);
+            if (!matcher.find()) break;
+            stem = stem.substring(0, matcher.start());
+        }
+        if (stem.isEmpty()) return "";
+        return stem + extension;
+    }
+
+    /**
+     * Reads the account quota and returns a user-facing reason when the copy would not fit, or ""
+     * when it may proceed.
+     *
+     * <p>The field names are measured ({@code data.use_capacity} / {@code data.total_capacity},
+     * 2026-11-24); the unit is not. A total far below any real byte quota is read as GiB, which
+     * covers both shapes; anything unreadable or implausible is a pass rather than a refusal,
+     * because the save itself still enforces the real limit.
+     *
+     * <p>The threshold is the file size times {@link #SPACE_MARGIN} (1.1), compared against
+     * {@code total_capacity - use_capacity}.
+     */
+    private static String spaceShortage(String cookie, long fileSize) {
+        if (fileSize <= 0) return "";
+        long used;
+        long total;
+        try {
+            JsonObject body = call("GET", MEMBER_URL, null, cookie);
+            JsonElement data = body == null ? null : body.get("data");
+            if (data == null || !data.isJsonObject()) {
+                AppLog.w(TAG, "space check: no data, transferring anyway");
+                return "";
+            }
+            used = optLong(data.getAsJsonObject(), "use_capacity", -1L);
+            total = optLong(data.getAsJsonObject(), "total_capacity", -1L);
+        } catch (IOException error) {
+            AppLog.w(TAG, "space check failed, transferring anyway: " + describe(error));
+            return "";
+        }
+        if (used < 0 || total <= 0) {
+            AppLog.w(TAG, "space check: capacity missing used=" + used + " total=" + total);
+            return "";
+        }
+        // TODO(verify): the quota unit is unmeasured. A byte quota is never under 1 GiB and a GiB
+        // quota is never near 2^30, so this split is safe for both shapes.
+        boolean gib = total < GIB;
+        long totalBytes = gib ? total * GIB : total;
+        long usedBytes = gib ? used * GIB : used;
+        long freeBytes = Math.max(0L, totalBytes - usedBytes);
+        long requiredBytes = (long) Math.ceil(fileSize * SPACE_MARGIN);
+        if (freeBytes >= requiredBytes) {
+            AppLog.w(
+                    TAG,
+                    "space check free="
+                            + gibText(freeBytes)
+                            + "GB of "
+                            + gibText(totalBytes)
+                            + "GB, need="
+                            + gibText(requiredBytes)
+                            + "GB");
+            return "";
+        }
+        AppLog.w(
+                TAG,
+                "space low free="
+                        + gibText(freeBytes)
+                        + "GB need="
+                        + gibText(requiredBytes)
+                        + "GB");
+        return "网盘空间不足（剩 " + gibText(freeBytes) + " GB），请先清理 MarcoPlayer 里的旧文件";
+    }
+
+    /** One decimal of a byte count in GiB, used by the capacity log and the user-facing text. */
+    private static String gibText(long bytes) {
+        return String.format(Locale.ROOT, "%.1f", bytes / (double) GIB);
     }
 
     // ---------------------------------------------------------------- step 4-5: save + play
