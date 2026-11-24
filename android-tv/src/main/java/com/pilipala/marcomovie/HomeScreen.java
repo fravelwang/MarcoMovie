@@ -2809,11 +2809,11 @@ final class HomeScreen {
             String referer = cardSite.api == null ? "" : cardSite.api.trim();
             if (referer.startsWith("http")) posterHeaders.put("Referer", referer);
         }
-        if (posterHeaders == null || posterHeaders.isEmpty()) {
-            a.poster(video.poster, art);
-        } else {
-            ImageLoader.poster(a, video.poster, art, false, posterHeaders);
-        }
+        // The wall appends rows lazily, so the art view has no size yet when this runs. Loading at
+        // w=0 means the decode target collapses and nothing is ever drawn; defer until laid out.
+        final java.util.Map<String, String> deferredHeaders = posterHeaders;
+        final String deferredPoster = video.poster;
+        loadCardPoster(a, art, deferredPoster, deferredHeaders, 0);
         TextView title = a.text(video.title, 13, 0xffc8c8d0);
         single(title);
         title.setPadding(a.dp(2), a.dp(7), a.dp(2), 0);
@@ -2873,6 +2873,24 @@ final class HomeScreen {
     Cms.Site siteFor(Cms.Video video) {
         List<Cms.Site> sources = wallSources(video);
         return sources.isEmpty() ? site : sources.get(0);
+    }
+
+    /** Loads a wall card's artwork once the view has a real size (retries a few frames). */
+    void loadCardPoster(
+            final MainActivity a,
+            final android.widget.ImageView art,
+            final String address,
+            final java.util.Map<String, String> headers,
+            final int attempt) {
+        if (art.getWidth() > 0 && art.getHeight() > 0) {
+            if (headers == null || headers.isEmpty()) a.poster(address, art);
+            else ImageLoader.poster(a, address, art, false, headers);
+            return;
+        }
+        if (attempt >= 6) return;
+        art.postDelayed(
+                () -> loadCardPoster(a, art, address, headers, attempt + 1),
+                attempt == 0 ? 16L : 48L);
     }
 
     int librarySourceCount(Cms.Video video) {
