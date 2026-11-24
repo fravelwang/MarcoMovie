@@ -55,7 +55,31 @@ final class ImageLoader {
         return lower.startsWith("file://") || lower.startsWith("content://");
     }
 
+    /**
+     * Artwork for a card that belongs to a known source. Many poster hosts refuse requests without
+     * the source's referer/user-agent, so the site headers travel with the request instead of the
+     * default browser UA only.
+     */
+    static void poster(
+            MainActivity a,
+            String address,
+            ImageView image,
+            boolean detail,
+            Map<String, String> siteHeaders) {
+        poster(a, address, image, detail, siteHeaders, true);
+    }
+
     static void poster(MainActivity a, String address, ImageView image, boolean detail) {
+        poster(a, address, image, detail, null, true);
+    }
+
+    private static void poster(
+            MainActivity a,
+            String address,
+            ImageView image,
+            boolean detail,
+            Map<String, String> siteHeaders,
+            boolean ignored) {
         String normalized = normalizeArtworkAddress(address);
         image.setTag(normalized);
         if (!Cms.isHttp(normalized)
@@ -92,7 +116,7 @@ final class ImageLoader {
                 return;
             }
         }
-        startPosterLoad(a, address, image, detail, ticket);
+        startPosterLoad(a, address, image, detail, ticket, siteHeaders);
     }
 
     private static byte[] readLocalArtworkBytes(Context context, String uriStr) {
@@ -131,7 +155,12 @@ final class ImageLoader {
     }
 
     private static void startPosterLoad(
-            MainActivity a, String address, ImageView image, boolean detail, final int ticket) {
+            MainActivity a,
+            String address,
+            ImageView image,
+            boolean detail,
+            final int ticket,
+            final Map<String, String> siteHeaders) {
         if (ticket != a.generation || !address.equals(image.getTag())) return;
         final int width = ImageDecodePolicy.targetWidth(image.getWidth(), detail);
         final int height = ImageDecodePolicy.targetHeight(image.getHeight(), detail);
@@ -170,6 +199,18 @@ final class ImageLoader {
                                     bytes = readLocalArtworkBytes(a, address);
                                 } else {
                                     Cms.ImageRequest source = Cms.imageRequest(address);
+                                    if (siteHeaders != null && !siteHeaders.isEmpty()) {
+                                        for (Map.Entry<String, String> header :
+                                                siteHeaders.entrySet()) {
+                                            String headerName = header.getKey();
+                                            String headerValue = header.getValue();
+                                            if (headerName == null
+                                                    || headerValue == null
+                                                    || headerValue.isEmpty()) continue;
+                                            if (source.headers.containsKey(headerName)) continue;
+                                            source.headers.put(headerName, headerValue);
+                                        }
+                                    }
                                     String resolvedUrl = Cms.normalizeHttp(source.url);
                                     if (resolvedUrl.startsWith("catpaw://")) {
                                         resolvedUrl =
@@ -395,6 +436,48 @@ final class ImageLoader {
                             return bytes;
                         }
                     }
+                } catch (javax.net.ssl.SSLHandshakeException sslFailure) {
+                    // Some poster hosts serve a chain this old Android build refuses to validate
+                    // (measured: kuakes.com "Chain validation failed"). Artwork is not sensitive, so
+                    // retry the same path over plain http before giving up on the image.
+                    lastError = sslFailure;
+                    if (candidate.startsWith("https://")) {
+                        String plain = "http://" + candidate.substring("https://".length());
+                        if (tried.add(plain)) {
+                            try {
+                                byte[] fallbackCached = readDiskCachedPoster(a, plain);
+                                if (fallbackCached != null) return fallbackCached;
+                                HttpURLConnection insecure =
+                                        ProxyAddress.openHttpConnection(new URL(plain));
+                                insecure.setInstanceFollowRedirects(true);
+                                for (Map.Entry<String, String> header :
+                                        source.headers.entrySet())
+                                    insecure.setRequestProperty(
+                                            header.getKey(), header.getValue());
+                                java.io.InputStream stream = insecure.getInputStream();
+                                java.io.ByteArrayOutputStream out =
+                                        new java.io.ByteArrayOutputStream();
+                                byte[] buffer = new byte[8192];
+                                int n;
+                                while ((n = stream.read(buffer)) != -1) {
+                                    if (out.size() + n > (detail ? 8 : 3) * 1024 * 1024)
+                                        throw new IOException("Poster too large");
+                                    out.write(buffer, 0, n);
+                                }
+                                stream.close();
+                                insecure.disconnect();
+                                byte[] fallbackBytes = out.toByteArray();
+                                if (fallbackBytes.length > 128) {
+                                    writeDiskCachedPoster(a, candidate, fallbackBytes);
+                                    return fallbackBytes;
+                                }
+                            } catch (Exception fallbackFailure) {
+                                AppLog.w(
+                                        "Poster",
+                                        "http fallback failed for " + plain + " : " + fallbackFailure);
+                            }
+                        }
+                    }
                 } catch (Exception e) {
                     lastError = e;
                 } finally {
@@ -405,7 +488,17 @@ final class ImageLoader {
                 }
             }
         }
-        if (lastError != null) throw lastError;
+        if (lastError != null) {
+            AppLog.w(
+                    "Poster",
+                    "fetch failed for "
+                            + (candidates.length > 0 ? candidates[0] : "?")
+                            + " : "
+                            + lastError.getClass().getSimpleName()
+                            + " "
+                            + lastError.getMessage());
+            throw lastError;
+        }
         return null;
     }
 

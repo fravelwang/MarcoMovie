@@ -2801,7 +2801,19 @@ final class HomeScreen {
                 new LinearLayout.LayoutParams(a.dp(posterWidth), a.dp(posterWidth * 1.5f)));
         int sourceCount = usesLibraryWall() ? librarySourceCount(video) : 0;
         if (sourceCount > 0) attachSourceBadge(artWrap, sourceCount);
-        a.poster(video.poster, art);
+        // Pass the source's headers so poster hosts that require a referer still render, and fall
+        // back to a site-derived referer when the spider provides none.
+        java.util.Map<String, String> posterHeaders =
+                cardSite == null ? null : new java.util.LinkedHashMap<>(cardSite.headers);
+        if (cardSite != null && posterHeaders != null && !posterHeaders.containsKey("Referer")) {
+            String referer = cardSite.api == null ? "" : cardSite.api.trim();
+            if (referer.startsWith("http")) posterHeaders.put("Referer", referer);
+        }
+        if (posterHeaders == null || posterHeaders.isEmpty()) {
+            a.poster(video.poster, art);
+        } else {
+            ImageLoader.poster(a, video.poster, art, false, posterHeaders);
+        }
         TextView title = a.text(video.title, 13, 0xffc8c8d0);
         single(title);
         title.setPadding(a.dp(2), a.dp(7), a.dp(2), 0);
