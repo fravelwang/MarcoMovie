@@ -2438,7 +2438,28 @@ final class PlaybackControls {
         int next = i + direction;
         if (a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 2)
             next = (next + line.episodes.size()) % line.episodes.size();
-        if (next < 0 || next >= line.episodes.size()) return false;
+        if (next < 0 || next >= line.episodes.size()) {
+            // Netdisk sources often expose one file per line, so a show's episodes are spread over
+            // several lines instead of one list. When this line runs out, continue on the
+            // neighbouring line that actually has episodes; looping mode stays inside the line.
+            if (a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 2) return false;
+            for (int li = l + direction; li >= 0 && li < video.lines.size(); li += direction) {
+                Cms.Line other = video.lines.get(li);
+                if (other == null || other.episodes == null || other.episodes.isEmpty()) continue;
+                transitioning = true;
+                resetEpisodeTransientState();
+                markSleepTimerInPlaceSwitch();
+                if (a.touchPlayerGesture != null) a.touchPlayerGesture.onEpisodeSwitch();
+                Cms.Episode target =
+                        direction > 0
+                                ? other.episodes.get(0)
+                                : other.episodes.get(other.episodes.size() - 1);
+                a.activeLine = other;
+                a.changeEpisode(site, video, other, target, 0);
+                return true;
+            }
+            return false;
+        }
         transitioning = true;
         resetEpisodeTransientState();
         markSleepTimerInPlaceSwitch();
@@ -5518,6 +5539,22 @@ final class PlaybackControls {
     }
 
     void completed() {
+        AppLog.w(
+                "TransNext",
+                "completed(): transitioning="
+                        + transitioning
+                        + " autoNext="
+                        + a.prefs.getBoolean(Prefs.AUTO_NEXT, true)
+                        + " repeat="
+                        + a.prefs.getInt(Prefs.REPEAT_MODE, 0)
+                        + " line="
+                        + (a.activeLine == null ? "-" : a.activeLine.name)
+                        + " eps="
+                        + (a.activeLine == null ? -1 : a.activeLine.episodes.size())
+                        + " idx="
+                        + episodeIndex()
+                        + " epIsOrigin="
+                        + (a.activeEpisode != null && a.activeEpisode.origin != null));
         if (SESSION_SLEEP_TIMER.onEpisodeCompleted()) {
             triggerSleepExpiry();
             return;

@@ -2157,6 +2157,25 @@ final class PlaybackController {
                                                             a.playing = false;
                                                             stopEmbySession(a);
                                                             a.playStatus.setText("播放结束");
+                                                            AppLog.w(
+                                                                    "TransNext",
+                                                                    "ended: activeEp="
+                                                                            + (a.activeEpisode == null
+                                                                                    ? "-"
+                                                                                    : a.activeEpisode.name)
+                                                                            + " origin="
+                                                                            + (a.activeEpisode == null
+                                                                                            || a.activeEpisode
+                                                                                                            .origin
+                                                                                                    == null
+                                                                                                    ? "-"
+                                                                                                    : a.activeEpisode
+                                                                                                            .origin
+                                                                                                            .name)
+                                                                            + " autoNext="
+                                                                            + a.prefs.getBoolean(
+                                                                                    Prefs.AUTO_NEXT,
+                                                                                    true));
                                                             controls.completed();
                                                         });
                                                 ready.setOnErrorListener(
