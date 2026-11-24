@@ -550,7 +550,12 @@ public final class SystemPlayer extends MoviePlayer {
 
     @Override
     public String getFailureMessage(int code) {
-        return "系统播放器无法播放。可切换到 Media3 尝试内置解码扩展，或刷新线路。";
+        return PlaybackFailure.Attribution.DEVICE.text("系统播放器无法播放，建议切换到 Media3 内核或换一条线路");
+    }
+
+    @Override
+    public PlaybackFailure.Attribution getFailureAttribution(int code) {
+        return PlaybackFailure.Attribution.DEVICE;
     }
 
     @Override

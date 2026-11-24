@@ -403,7 +403,8 @@ public class MoviePlayer {
                                     public void onVideoInputFormatChanged(
                                             EventTime time,
                                             androidx.media3.common.Format format,
-                                            androidx.media3.exoplayer.DecoderReuseEvaluation reuse) {
+                                            androidx.media3.exoplayer.DecoderReuseEvaluation
+                                                    reuse) {
                                         AppLog.w(
                                                 "PlayStats",
                                                 "mime="
@@ -423,7 +424,10 @@ public class MoviePlayer {
                                             EventTime time, int droppedFrames, long elapsedMs) {
                                         AppLog.w(
                                                 "PlayStats",
-                                                "dropped=" + droppedFrames + " overMs=" + elapsedMs);
+                                                "dropped="
+                                                        + droppedFrames
+                                                        + " overMs="
+                                                        + elapsedMs);
                                         DropFrameSink sink = dropFrameSink;
                                         if (sink == null) return;
                                         try {
@@ -1553,6 +1557,16 @@ public class MoviePlayer {
 
     public String getFailureMessage(int code) {
         return onMain(() -> PlaybackFailure.message(code, lastHttpStatus));
+    }
+
+    /** HTTP status behind the last failure, 0 when the error never reached a response. */
+    public int getLastHttpStatus() {
+        return onMain(() -> lastHttpStatus);
+    }
+
+    /** Attribution class of the last failure, kept in step with {@link #getFailureMessage}. */
+    public PlaybackFailure.Attribution getFailureAttribution(int code) {
+        return onMain(() -> PlaybackFailure.attribution(code, lastHttpStatus));
     }
 
     public org.json.JSONObject decoderDiagnostics() {

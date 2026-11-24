@@ -32,7 +32,11 @@ public final class WebResolver {
     public interface Listener {
         void media(String url, Map<String, String> headers);
 
-        void failed(String reason);
+        /**
+         * Reports why no stream was extracted. The kind tells the caller whose problem it is, so
+         * the failure can be attributed without matching the Chinese reason text.
+         */
+        void failed(String reason, PlaybackFailure.Attribution kind);
     }
 
     private static final Pattern MEDIA_EXT_PATTERN =
@@ -113,7 +117,7 @@ public final class WebResolver {
         public boolean onRenderProcessGone(WebView web, RenderProcessGoneDetail detail) {
             if (!stopped) {
                 stop();
-                callback.failed("网页渲染进程已重启，请重试解析。");
+                callback.failed("网页渲染进程已重启，建议重试解析", PlaybackFailure.Attribution.UNKNOWN);
             }
             return true;
         }
@@ -199,13 +203,18 @@ public final class WebResolver {
         view = created;
         if (view == null) {
             stopped = true;
-            main.post(() -> callback.failed("当前系统缺少 WebView 组件，无法网页嗅探此播放地址。"));
+            main.post(
+                    () ->
+                            callback.failed(
+                                    "当前系统缺少网页组件，无法嗅探这个地址，建议换一条线路或换设备",
+                                    PlaybackFailure.Attribution.DEVICE));
             return;
         }
         main.postDelayed(
                 () -> {
                     if (!stopped) {
-                        callback.failed("页面未返回可直接播放的视频。可在下方网页完成登录或验证，再重试。");
+                        callback.failed(
+                                "页面没返回可播放视频，建议在下方网页登录或验证后重试", PlaybackFailure.Attribution.SOURCE);
                     }
                 },
                 30000);

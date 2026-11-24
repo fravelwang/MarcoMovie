@@ -1023,7 +1023,12 @@ public final class MpvPlayer extends MoviePlayer {
 
     @Override
     public String getFailureMessage(int code) {
-        return "MPV 引擎未能播放当前流。可切换 Media3 或刷新线路重试。";
+        return PlaybackFailure.Attribution.DEVICE.text("MPV 内核没能播放当前流，建议切换到 Media3 内核");
+    }
+
+    @Override
+    public PlaybackFailure.Attribution getFailureAttribution(int code) {
+        return PlaybackFailure.Attribution.DEVICE;
     }
 
     @Override

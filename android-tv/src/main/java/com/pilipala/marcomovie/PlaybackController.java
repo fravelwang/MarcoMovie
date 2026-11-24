@@ -133,7 +133,7 @@ final class PlaybackController {
             } else {
                 a.changingMiniEpisode = false;
                 clearPlaybackLoading(a);
-                failInPlaceSwitch(a, "解析页面地址不受支持。");
+                failInPlaceSwitch(a, s, PlaybackFailure.Attribution.LINE, "此剧集的页面地址无效，建议换一条线路");
             }
             return;
         }
@@ -176,7 +176,8 @@ final class PlaybackController {
                                     openPlayer(a, s, v, resolved);
                                 }
 
-                                public void failed(String reason) {
+                                public void failed(
+                                        String reason, PlaybackFailure.Attribution kind) {
                                     if (ticket != a.generation || serial != a.playbackResolveSerial)
                                         return;
                                     if (chained) {
@@ -191,7 +192,7 @@ final class PlaybackController {
                                     a.changingMiniEpisode = false;
                                     clearPlaybackLoading(a);
                                     stopWeb(a);
-                                    failInPlaceSwitch(a, reason);
+                                    failInPlaceSwitch(a, s, kind, reason);
                                 }
                             });
             a.webResolver = resolver;
@@ -220,9 +221,7 @@ final class PlaybackController {
                                     || a.isFinishing()) return;
                             stopWeb(a);
                             ParseChainResolver.logAttempt(
-                                    candidate == null ? "原页面" : candidate.name,
-                                    false,
-                                    "网页嗅探超时");
+                                    candidate == null ? "原页面" : candidate.name, false, "网页嗅探超时");
                             startParseChain(a, s, v, ep, chain);
                         },
                         wait);
@@ -237,18 +236,42 @@ final class PlaybackController {
             } else {
                 a.changingMiniEpisode = false;
                 clearPlaybackLoading(a);
-                failInPlaceSwitch(a, "这台设备无法打开网页播放组件。");
+                failInPlaceSwitch(
+                        a, s, PlaybackFailure.Attribution.DEVICE, "这台设备无法运行网页播放组件，建议换一条线路或升级系统");
             }
         }
     }
 
-    static void failInPlaceSwitch(MainActivity a, String message) {
+    /**
+     * Single exit for every playback failure shown in place: logs one attribution line, then shows
+     * the same prefixed text in the status line and as a toast. {@code detail} is the sentence after
+     * the 【...】 prefix; an empty detail falls back to the class advice.
+     */
+    static void failInPlaceSwitch(
+            MainActivity a, Cms.Site s, PlaybackFailure.Attribution kind, String detail) {
+        PlaybackFailure.Attribution attributed =
+                kind == null ? PlaybackFailure.Attribution.UNKNOWN : kind;
+        logAttribution(a, s, attributed, 0, 0);
+        String message = attributed.text(detail);
         if (a.playerChrome != null) a.playerChrome.setLoading(false);
         if (a.current != null && a.current.player) {
             if (a.playStatus != null) a.playStatus.setText(message);
             showControls(a, true);
         }
         a.toast(message);
+    }
+
+    /** One PlayAttribution line per failure; only config labels, never URLs or credentials. */
+    private static void logAttribution(
+            MainActivity a, Cms.Site s, PlaybackFailure.Attribution kind, int code, int http) {
+        AppLog.w(
+                "PlayAttribution",
+                PlaybackFailure.logLine(
+                        kind,
+                        code,
+                        http,
+                        a != null && a.activeLine != null ? a.activeLine.name : null,
+                        s != null ? s.key : null));
     }
 
     private static boolean tryHistoryCrossSourceFailover(
@@ -584,7 +607,10 @@ final class PlaybackController {
                                 // client for one instead. Null keeps the original failure path.
                                 final Cms.Episode nativeEp =
                                         nativeNetdiskCandidate(
-                                                targetSite, targetFlag, finalEp, finalResult,
+                                                targetSite,
+                                                targetFlag,
+                                                finalEp,
+                                                finalResult,
                                                 resolved);
                                 a.ui.post(
                                         () -> {
@@ -646,7 +672,9 @@ final class PlaybackController {
                                                                 s,
                                                                 v,
                                                                 resolved,
-                                                                playPrefix == null ? "" : playPrefix);
+                                                                playPrefix == null
+                                                                        ? ""
+                                                                        : playPrefix);
                                                         return;
                                                     }
                                                     resolveWebPage(a, s, v, resolved, playPrefix);
@@ -680,15 +708,24 @@ final class PlaybackController {
                                                                                                     "")))
                                                                     .trim();
                                                     if (!spiderMsg.isEmpty()) {
-                                                        failInPlaceSwitch(a, spiderMsg);
+                                                        failInPlaceSwitch(
+                                                                a,
+                                                                s,
+                                                                PlaybackFailure.Attribution.LINE,
+                                                                spiderMsg);
                                                     } else if (looksLikeNetdiskLine(
                                                             s, finalLine, finalEp.url)) {
                                                         failInPlaceSwitch(
                                                                 a,
+                                                                s,
+                                                                PlaybackFailure.Attribution.SOURCE,
                                                                 "该网盘线路未返回播放地址，请先在顶部「网盘」里扫码登录对应网盘，或点击右上角 ⇄ 切换其他线路");
                                                     } else {
                                                         failInPlaceSwitch(
-                                                                a, "当前线路未返回有效播放地址，请点击右上角 ⇄ 切换其他线路");
+                                                                a,
+                                                                s,
+                                                                PlaybackFailure.Attribution.LINE,
+                                                                "当前线路未返回有效播放地址，请点击右上角 ⇄ 切换其他线路");
                                                     }
                                                     return;
                                                 }
@@ -698,10 +735,15 @@ final class PlaybackController {
                                                     if (looksLikeNetdiskLine(s, finalLine, url)) {
                                                         failInPlaceSwitch(
                                                                 a,
+                                                                s,
+                                                                PlaybackFailure.Attribution.SOURCE,
                                                                 "该网盘线路需先在顶部「网盘」里登录授权，或点击右上角 ⇄ 切换其他线路");
                                                     } else {
                                                         failInPlaceSwitch(
-                                                                a, "来源返回的播放协议暂不支持，请切换其他线路");
+                                                                a,
+                                                                s,
+                                                                PlaybackFailure.Attribution.SOURCE,
+                                                                "来源返回的播放协议暂不支持，建议换一条线路");
                                                     }
                                                     return;
                                                 }
@@ -713,7 +755,11 @@ final class PlaybackController {
                                                         error);
                                                 a.changingMiniEpisode = false;
                                                 clearPlaybackLoading(a);
-                                                failInPlaceSwitch(a, "播放信息无法读取，请重试");
+                                                failInPlaceSwitch(
+                                                        a,
+                                                        s,
+                                                        PlaybackFailure.Attribution.UNKNOWN,
+                                                        "播放信息无法读取，已记录，建议重试或换一条线路");
                                             }
                                         });
                             } catch (Exception error) {
@@ -728,7 +774,11 @@ final class PlaybackController {
                                                     a, s, a.resumeAt, "原片源解析失败")) {
                                                 return;
                                             }
-                                            failInPlaceSwitch(a, a.message(error));
+                                            failInPlaceSwitch(
+                                                    a,
+                                                    s,
+                                                    PlaybackFailure.Attribution.LINE,
+                                                    a.message(error));
                                         });
                             }
                         });
@@ -745,7 +795,11 @@ final class PlaybackController {
      * the player-resolve worker thread.
      */
     private static Cms.Episode nativeNetdiskCandidate(
-            Cms.Site site, String lineName, Cms.Episode ep, JSONObject result, Cms.Episode resolved) {
+            Cms.Site site,
+            String lineName,
+            Cms.Episode ep,
+            JSONObject result,
+            Cms.Episode resolved) {
         if (ep == null || ep.url == null) return null;
         String rawEp = ep.url.trim();
         if (rawEp.isEmpty() || Cms.isMedia(rawEp) || rawEp.startsWith("magnet:?")) return null;
@@ -849,13 +903,7 @@ final class PlaybackController {
         chain.candidateStarted = SystemClock.elapsedRealtime();
         if (candidate.type == 0) {
             startWebResolver(
-                    a,
-                    s,
-                    v,
-                    ep,
-                    ParseChainResolver.targetUrl(candidate, ep.url),
-                    chain,
-                    candidate);
+                    a, s, v, ep, ParseChainResolver.targetUrl(candidate, ep.url), chain, candidate);
             return;
         }
         final long probeCap =
@@ -928,12 +976,11 @@ final class PlaybackController {
         }
         a.changingMiniEpisode = false;
         clearPlaybackLoading(a);
-        if (chain.attempted <= 0) {
-            failInPlaceSwitch(a, "此剧集需要外部解析，未找到可用解析接口");
-        } else {
-            failInPlaceSwitch(
-                    a, "此剧集需要外部解析，试过 " + chain.attempted + " 个解析接口，均未返回可播放的视频");
-        }
+        failInPlaceSwitch(
+                a,
+                s,
+                PlaybackFailure.Attribution.PARSE,
+                PlaybackFailure.parseFailure(chain.attempted));
     }
 
     /** Mutable state of one parse-chain run; only touched on the UI thread. */
@@ -1483,7 +1530,8 @@ final class PlaybackController {
                                                     && !ep.media.optBoolean("_mpvFallback")
                                                     && drmScheme.isEmpty()
                                                     && (engPref == 3
-                                                            || ep.media.optBoolean("_forceMpv", false))
+                                                            || ep.media.optBoolean(
+                                                                    "_forceMpv", false))
                                                     && MpvPlayer.isAvailable();
                                     boolean preferIjk =
                                             engPref == 2
@@ -1534,7 +1582,8 @@ final class PlaybackController {
                                     // episode headers on each request (MoviePlayer's
                                     // OkHttpDataSource default request properties, MpvPlayer's
                                     // http-header-fields), so keep those episodes on the direct URL
-                                    // and skip the loopback HLS proxy. Ordinary lines and every other
+                                    // and skip the loopback HLS proxy. Ordinary lines and every
+                                    // other
                                     // HLS keep the proxy below.
                                     boolean netdiskHeaders =
                                             ep.media.optBoolean("_noCache", false)
@@ -1577,7 +1626,8 @@ final class PlaybackController {
                                         }
                                     } else if (!isLiveStream) {
                                         int cacheMb = a.prefs.getInt(Prefs.MEDIA_CACHE_MB, 256);
-                                        // Cloud streams resolved by the native netdisk layer opt out:
+                                        // Cloud streams resolved by the native netdisk layer opt
+                                        // out:
                                         // their signed URLs are short-lived and the cache proxy's
                                         // chunked ranges are refused upstream.
                                         if (cacheMb > 0
@@ -2221,11 +2271,13 @@ final class PlaybackController {
                                                             a.playing = false;
                                                             if (a.playerChrome != null)
                                                                 a.playerChrome.setLoading(false);
+                                                            PlaybackFailure.Attribution kind =
+                                                                    mp.getFailureAttribution(what);
+                                                            int httpStatus = mp.getLastHttpStatus();
+                                                            logAttribution(
+                                                                    a, s, kind, what, httpStatus);
                                                             a.playStatus.setText(
-                                                                    mp.getFailureMessage(what)
-                                                                            + "（"
-                                                                            + what
-                                                                            + "）");
+                                                                    mp.getFailureMessage(what));
                                                             showControls(a, true);
                                                             return true;
                                                         });
@@ -2260,7 +2312,14 @@ final class PlaybackController {
                                                 if (ticket == a.generation) {
                                                     if (a.playerChrome != null)
                                                         a.playerChrome.setLoading(false);
-                                                    a.playStatus.setText(a.message(ex));
+                                                    // A Java Exception here means our own adapter
+                                                    // failed, not the source: report it as ours and
+                                                    // make clear the case was recorded.
+                                                    PlaybackFailure.Attribution kind =
+                                                            PlaybackFailure.Attribution.UNKNOWN;
+                                                    logAttribution(a, s, kind, 0, 0);
+                                                    a.playStatus.setText(
+                                                            kind.text("播放器启动失败，已记录，建议重试或换一条线路"));
                                                     showControls(a, true);
                                                 }
                                             });
