@@ -934,7 +934,9 @@ final class HomeScreen {
         packageSwitch.setPadding(a.dp(10), 0, a.dp(10), 0);
         packageSwitch.setContentDescription("切换当前片源包");
         packageSwitch.setShadowLayer(a.dp(6), 0, a.dp(1), 0xb0000000);
-        focusable(packageSwitch, "home-source-package-switch");
+        // Kept as a label only: a focusable pill sitting above the hero title is unreachable by
+        // D-pad (geometric search prefers the top dock), so the real switch lives in the action row.
+        packageSwitch.setTag("home-source-package-switch");
         packageSwitch.setBackground(a.bg(0x33ffffff, 999));
         packageSwitch.setOnClickListener(v -> SourceSwitchDialog.show(a));
         packageSwitch.setOnFocusChangeListener(
@@ -1044,6 +1046,31 @@ final class HomeScreen {
                                 true,
                                 1.05f));
         actionRow.addView(playBtn, new LinearLayout.LayoutParams(-2, a.dp(44)));
+
+        final TextView switchInline = a.text("⇄  切换片源", 12.5f, 0xffe6e6ee);
+        switchInline.setGravity(Gravity.CENTER);
+        switchInline.setIncludeFontPadding(false);
+        switchInline.setPadding(a.dp(16), 0, a.dp(16), 0);
+        switchInline.setContentDescription("切换当前片源包");
+        focusable(switchInline, "home-source-switch-inline");
+        switchInline.setBackground(a.bg(0x33ffffff, 999));
+        switchInline.setOnClickListener(v -> SourceSwitchDialog.show(a));
+        switchInline.setOnFocusChangeListener(
+                (v, f) ->
+                        FocusMotion.style(
+                                a,
+                                switchInline,
+                                f,
+                                0x33ffffff,
+                                0xffffffff,
+                                999,
+                                0xffe6e6ee,
+                                0xff111318,
+                                false,
+                                1.03f));
+        LinearLayout.LayoutParams switchLp = new LinearLayout.LayoutParams(-2, a.dp(44));
+        switchLp.leftMargin = a.dp(12);
+        actionRow.addView(switchInline, switchLp);
 
         final LinearLayout dotsRow = a.row();
         dotsRow.setGravity(Gravity.CENTER_VERTICAL);
