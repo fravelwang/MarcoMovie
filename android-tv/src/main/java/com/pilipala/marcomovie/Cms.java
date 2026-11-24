@@ -325,6 +325,12 @@ public final class Cms {
         public String name, url;
         public final Map<String, String> headers = new LinkedHashMap<>();
         public JSONObject media = new JSONObject();
+        /**
+         * Episode this playback address was resolved from. Native netdisk resolution hands the
+         * player a synthesized media episode, so the episode list and auto-next keep pointing at
+         * the episode the user actually picked.
+         */
+        public Episode origin;
     }
 
     public static final class Listing {

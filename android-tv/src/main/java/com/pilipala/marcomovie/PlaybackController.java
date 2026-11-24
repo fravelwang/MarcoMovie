@@ -938,6 +938,10 @@ final class PlaybackController {
             Cms.Episode nativeEp =
                     QuarkShareResolver.resolve(site == null ? "" : site.api, lineName, rawEp);
             if (nativeEp != null && nativeEp.url != null && !nativeEp.url.trim().isEmpty()) {
+                // The synthesized episode carries only the media address. Keep the share-id
+                // episode as its origin so auto-next advances through the real episode list and
+                // resolves the next episode natively again.
+                nativeEp.origin = ep;
                 AppLog.w("QuarkShare", "native episode ready name=" + nativeEp.name);
                 return nativeEp;
             }
@@ -1175,6 +1179,9 @@ final class PlaybackController {
     }
 
     static void openPlayer(MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode e) {
+        // A natively resolved episode is only the media address; the playing context must stay on
+        // the episode the user picked so auto-next, history and markers keep the episode list.
+        if (e.origin != null) a.activeEpisode = e.origin;
         if (e.url != null) {
             e.url = e.url.trim();
             if (e.url.startsWith("//")) {

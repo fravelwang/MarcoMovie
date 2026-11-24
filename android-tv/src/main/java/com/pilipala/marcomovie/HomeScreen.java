@@ -58,7 +58,10 @@ final class HomeScreen {
     float retainedFontScale;
     Map<String, Object> retainedAppearance;
 
-    /** Library wall filter: empty lists every aggregated site, otherwise a single site key. */
+    /**
+     * Library wall filter. Empty is the "全部站点" entry and always means the merged wall;
+     * otherwise it holds one site key picked in the filter menu.
+     */
     String librarySiteFilter = "";
 
     static final class Snapshot {
@@ -219,10 +222,13 @@ final class HomeScreen {
         TextView title = a.text(a.isTvDevice() ? "片库" : "发现", 22, MainActivity.WHITE);
         title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(-2, -2));
+        // The pill is always the library filter, so "全部站点" is one press away and brings the
+        // merged wall back even when a config/netdisk site is the filter target.
         source =
-                usesLibraryWall()
-                        ? pill("全部站点", "source-switcher", this::showLibraryFilter)
-                        : pill(site.name, "source-switcher", a::chooseSources);
+                pill(
+                        usesLibraryWall() ? "全部站点" : librarySiteName(librarySiteFilter),
+                        "source-switcher",
+                        this::showLibraryFilter);
         source.setPadding(a.dp(Math.round(14 * navScale)), 0, a.dp(Math.round(14 * navScale)), 0);
         source.setCompoundDrawablePadding(a.dp(9));
         source.setCompoundDrawables(null, null, new SourceChevron(a), null);
@@ -232,7 +238,9 @@ final class HomeScreen {
         source.setContentDescription(
                 usesLibraryWall()
                         ? "片库筛选：全部站点，按确认键切换（片源与站点在 dock「源」里）"
-                        : "浏览站点：" + site.name + "，按确认键切换（片源包与线路在 dock「源」里）");
+                        : "片库筛选："
+                                + librarySiteName(librarySiteFilter)
+                                + "，按确认键切换（片源与站点在 dock「源」里）");
         LinearLayout.LayoutParams sourceSize =
                 new LinearLayout.LayoutParams(-2, a.dp(Math.round(34 * navScale)));
         sourceSize.leftMargin = a.dp(14);
@@ -692,11 +700,24 @@ final class HomeScreen {
     // ---------------------------------------------------------------------------------------
 
     /**
-     * The library section is a merged wall for regular sites. Config/netdisk entries keep their
-     * own folder browser because they are account utilities, not content sources.
+     * The library section is a merged wall by default, whatever site is selected. A config/netdisk
+     * entry keeps its own folder browser only when the filter names that site explicitly; the
+     * default "全部站点" filter is always the wall.
      */
     boolean usesLibraryWall() {
-        return !SourceController.isConfigOrNetdiskSite(site);
+        if (librarySiteFilter == null || librarySiteFilter.isEmpty()) return true;
+        Cms.Site filtered = siteForLibraryFilter(librarySiteFilter);
+        return filtered == null || !SourceController.isConfigOrNetdiskSite(filtered);
+    }
+
+    /** Resolves a filter key against the active config; null when no such site exists. */
+    Cms.Site siteForLibraryFilter(String key) {
+        Cms.Config config = a == null ? null : a.config;
+        if (config == null || key == null || key.isEmpty()) return null;
+        for (Cms.Site candidate : config.sites) {
+            if (candidate != null && key.equals(candidate.key)) return candidate;
+        }
+        return null;
     }
 
     /** Hides single-site category chrome: the wall is already merged and pre-sorted. */
@@ -869,6 +890,9 @@ final class HomeScreen {
                 break;
             }
         }
+        // Config/netdisk sites never join the aggregation, but the filter can still name one.
+        Cms.Site own = siteForLibraryFilter(key);
+        if (own != null && own.name != null && !own.name.trim().isEmpty()) return own.name;
         return key;
     }
 
@@ -1186,38 +1210,19 @@ final class HomeScreen {
         packageName.setShadowLayer(a.dp(6), 0, a.dp(1), 0xb0000000);
         packageRow.addView(packageName, new LinearLayout.LayoutParams(-2, -2));
 
+        // Plain caption: the only source switcher is the dock "源" panel, so this line stays
+        // readable but never takes focus and never opens anything.
         final TextView packageSwitch = a.text("⟩ 源", 11.5f, 0xdceef4ff);
         packageSwitch.setGravity(Gravity.CENTER);
         packageSwitch.setIncludeFontPadding(false);
         packageSwitch.setPadding(a.dp(10), 0, a.dp(10), 0);
-        packageSwitch.setContentDescription("打开源控制：片源包、站点、本剧线路");
         packageSwitch.setShadowLayer(a.dp(6), 0, a.dp(1), 0xb0000000);
-        // Read-only summary: the actual three-layer switching lives in the dock "源" panel. This
-        // pill only opens that panel, so the chain has one home.
-        packageSwitch.setTag("home-source-package-switch");
-        packageSwitch.setBackground(a.bg(0x33ffffff, 999));
-        packageSwitch.setOnClickListener(v -> SourceControlPanel.show(a));
-        packageSwitch.setOnFocusChangeListener(
-                (v, f) ->
-                        FocusMotion.style(
-                                a,
-                                packageSwitch,
-                                f,
-                                0x33ffffff,
-                                0xffffffff,
-                                13,
-                                0xffdceef4,
-                                0xff111318,
-                                true,
-                                1.04f));
+        packageSwitch.setFocusable(false);
+        packageSwitch.setClickable(false);
         LinearLayout.LayoutParams packageSwitchLp = new LinearLayout.LayoutParams(-2, a.dp(26));
         packageSwitchLp.leftMargin = a.dp(10);
         packageRow.addView(packageSwitch, packageSwitchLp);
         info.addView(packageRow, new LinearLayout.LayoutParams(-2, -2));
-        // The pill sits above the hero title, and D-pad focus search from the play button is
-        // geometric: it jumps to the top dock instead of landing here. Wire the pair explicitly so
-        // the switch is always reachable with one UP from play (and back down again).
-        heroPackageSwitchId = packageSwitch.getId();
         a.gap(info, 5);
 
         final TextView titleTv = a.text("", fullBleedTvHero ? 31f : 28f, MainActivity.WHITE);
@@ -1260,31 +1265,6 @@ final class HomeScreen {
         actionRow.setClipChildren(false);
 
         final TextView playBtn = a.text("▶  立即观看", 14.5f, 0xff111318);
-        playBtn.setId(View.generateViewId());
-        // Geometric focus search from play jumps to the top dock, so wire UP/DOWN by hand. A key
-        // listener is used instead of nextFocusUpId because the pill's position on screen makes
-        // the FocusFinder prefer the dock even when the id link is set.
-        final View switchPill = info.findViewWithTag("home-source-package-switch");
-        if (switchPill != null) {
-            playBtn.setOnKeyListener(
-                    (v, keyCode, event) -> {
-                        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
-                                && event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
-                            switchPill.requestFocus();
-                            return true;
-                        }
-                        return false;
-                    });
-            switchPill.setOnKeyListener(
-                    (v, keyCode, event) -> {
-                        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN
-                                && event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
-                            playBtn.requestFocus();
-                            return true;
-                        }
-                        return false;
-                    });
-        }
         playBtn.setTypeface(null, Typeface.BOLD);
         playBtn.setGravity(Gravity.CENTER);
         playBtn.setPadding(a.dp(26), 0, a.dp(26), 0);
@@ -1304,31 +1284,6 @@ final class HomeScreen {
                                 true,
                                 1.05f));
         actionRow.addView(playBtn, new LinearLayout.LayoutParams(-2, a.dp(44)));
-
-        final TextView switchInline = a.text("⇄  源", 12.5f, 0xffe6e6ee);
-        switchInline.setGravity(Gravity.CENTER);
-        switchInline.setIncludeFontPadding(false);
-        switchInline.setPadding(a.dp(16), 0, a.dp(16), 0);
-        switchInline.setContentDescription("打开源控制：片源包、站点、本剧线路");
-        focusable(switchInline, "home-source-switch-inline");
-        switchInline.setBackground(a.bg(0x33ffffff, 999));
-        switchInline.setOnClickListener(v -> SourceControlPanel.show(a));
-        switchInline.setOnFocusChangeListener(
-                (v, f) ->
-                        FocusMotion.style(
-                                a,
-                                switchInline,
-                                f,
-                                0x33ffffff,
-                                0xffffffff,
-                                999,
-                                0xffe6e6ee,
-                                0xff111318,
-                                false,
-                                1.03f));
-        LinearLayout.LayoutParams switchLp = new LinearLayout.LayoutParams(-2, a.dp(44));
-        switchLp.leftMargin = a.dp(12);
-        actionRow.addView(switchInline, switchLp);
 
         final LinearLayout dotsRow = a.row();
         dotsRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -2926,8 +2881,6 @@ final class HomeScreen {
         text.setSingleLine(true);
         text.setEllipsize(TextUtils.TruncateAt.END);
     }
-
-    private int heroPackageSwitchId;
 
     void focusable(View view, String tag) {
         view.setTag(tag);

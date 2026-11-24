@@ -2127,7 +2127,22 @@ final class PlaybackControls {
     }
 
     int episodeIndex() {
-        return a.activeLine == null ? -1 : a.activeLine.episodes.indexOf(a.activeEpisode);
+        if (a.activeLine == null) return -1;
+        int index = a.activeLine.episodes.indexOf(a.activeEpisode);
+        if (index >= 0) return index;
+        // A natively resolved netdisk address is a synthesized episode that is not inside the
+        // line's episode list; advance from the share-id episode it came from.
+        Cms.Episode origin = a.activeEpisode == null ? null : a.activeEpisode.origin;
+        return origin == null ? -1 : a.activeLine.episodes.indexOf(origin);
+    }
+
+    /**
+     * Episode inside the line's list that backs the current playback. Native netdisk resolution
+     * replaces the played address, never the episode list entry.
+     */
+    Cms.Episode playbackEpisode() {
+        if (a.activeEpisode == null) return null;
+        return a.activeEpisode.origin != null ? a.activeEpisode.origin : a.activeEpisode;
     }
 
     void choose(String title, String[] labels, int selected, PlayerBubble.IntAction action) {
@@ -2436,8 +2451,9 @@ final class PlaybackControls {
         int position =
                 preserve && a.prepared && a.player != null ? a.player.getCurrentPosition() : 0;
         markSleepTimerInPlaceSwitch();
-        if (a.activeLine != null && a.activeEpisode != null)
-            a.changeEpisode(site, video, a.activeLine, a.activeEpisode, position);
+        Cms.Episode episode = playbackEpisode();
+        if (a.activeLine != null && episode != null)
+            a.changeEpisode(site, video, a.activeLine, episode, position);
         else {
             a.resumeAt = position;
             a.playerPage(site, video, resolved);
