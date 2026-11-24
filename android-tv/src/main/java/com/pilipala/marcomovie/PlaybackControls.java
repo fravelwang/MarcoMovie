@@ -2431,8 +2431,26 @@ final class PlaybackControls {
         return skipCountdownPill != null && skipCountdownPill.isActive();
     }
 
+    /** First 1-3 digit run in a name ("03.mp4", "quark原画12", "E07"), 0 when there is none. */
+    static int episodeNumber(String name) {
+        if (name == null || name.isEmpty()) return 0;
+        java.util.regex.Matcher matcher =
+                java.util.regex.Pattern.compile("(\\d{1,3})").matcher(name);
+        if (!matcher.find()) return 0;
+        try {
+            return Integer.parseInt(matcher.group(1));
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+
     boolean step(int direction) {
         int i = episodeIndex(), l = lineIndex();
+        AppLog.w(
+                "TransStep",
+                "step(" + direction + ") i=" + i + " l=" + l + " lines=" + video.lines.size()
+                        + " cur=" + (playbackEpisode() == null ? "-" : playbackEpisode().name)
+                        + " n=" + episodeNumber(playbackEpisode() == null ? null : playbackEpisode().name));
         if (l < 0 || i < 0) return false;
         Cms.Line line = video.lines.get(l);
         int next = i + direction;
@@ -2443,6 +2461,45 @@ final class PlaybackControls {
             // several lines instead of one list. When this line runs out, continue on the
             // neighbouring line that actually has episodes; looping mode stays inside the line.
             if (a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 2) return false;
+            // Some netdisk sources expose one file per line, so "next" must be chosen by episode
+            // number and not by line order: walking the line list wraps back to episode 1 and
+            // replays it forever. Pick the smallest number above the current one (largest below for
+            // direction -1), across every line.
+            int current = episodeNumber(playbackEpisode() == null ? null : playbackEpisode().name);
+            if (current > 0) {
+                Cms.Line bestLine = null;
+                Cms.Episode bestEpisode = null;
+                int bestNumber = direction > 0 ? Integer.MAX_VALUE : -1;
+                for (Cms.Line candidate : video.lines) {
+                    if (candidate == null || candidate.episodes == null) continue;
+                    for (Cms.Episode candidateEpisode : candidate.episodes) {
+                        if (candidateEpisode == null) continue;
+                        int number = episodeNumber(candidateEpisode.name);
+                        if (number <= 0) continue;
+                        if (direction > 0) {
+                            if (number > current && number < bestNumber) {
+                                bestNumber = number;
+                                bestLine = candidate;
+                                bestEpisode = candidateEpisode;
+                            }
+                        } else if (number < current && number > bestNumber) {
+                            bestNumber = number;
+                            bestLine = candidate;
+                            bestEpisode = candidateEpisode;
+                        }
+                    }
+                }
+                if (bestEpisode != null) {
+                    transitioning = true;
+                    resetEpisodeTransientState();
+                    markSleepTimerInPlaceSwitch();
+                    if (a.touchPlayerGesture != null) a.touchPlayerGesture.onEpisodeSwitch();
+                    a.activeLine = bestLine;
+                    a.changeEpisode(site, video, bestLine, bestEpisode, 0);
+                    return true;
+                }
+                return false;
+            }
             for (int li = l + direction; li >= 0 && li < video.lines.size(); li += direction) {
                 Cms.Line other = video.lines.get(li);
                 if (other == null || other.episodes == null || other.episodes.isEmpty()) continue;
