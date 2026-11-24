@@ -72,8 +72,10 @@ public final class MainActivity extends Activity {
     TvMarkerHost markerHost;
     Cms.Line activeLine;
     Cms.Episode activeEpisode;
+
     /** Last series opened in detail or playback; feeds the dock source control panel. */
     Cms.Site recentSeriesSite;
+
     Cms.Video recentSeriesVideo;
     Cms.Config recentSeriesConfig;
     int resumeAt;
@@ -568,6 +570,11 @@ public final class MainActivity extends Activity {
                             return size() > MAX_HOME_SNAPSHOTS;
                         }
                     });
+    // Cross-site library wall shared by home rebuilds; a config change bumps engineEpoch.
+    LibraryAggregator.Result libraryWall;
+    int libraryWallEpoch = -1;
+    boolean libraryWallLoading;
+    final List<Runnable> libraryWallWaiters = new ArrayList<>();
     AppDialog appDialog;
     FrameLayout playbackLayer;
     MiniDetails miniDetails;

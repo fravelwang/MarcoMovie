@@ -58,6 +58,12 @@ final class HomeScreen {
     float retainedFontScale;
     Map<String, Object> retainedAppearance;
 
+    /** Library wall filter: empty lists every aggregated site, otherwise a single site key. */
+    String librarySiteFilter = "";
+
+    final Map<Cms.Video, Cms.Site> wallSiteByVideo = new IdentityHashMap<>();
+    final Map<Cms.Video, Integer> wallSourcesByVideo = new IdentityHashMap<>();
+
     static final class Snapshot {
         long time = System.currentTimeMillis();
         final List<Cms.Video> videos;
@@ -216,7 +222,10 @@ final class HomeScreen {
         TextView title = a.text(a.isTvDevice() ? "片库" : "发现", 22, MainActivity.WHITE);
         title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(-2, -2));
-        source = pill(site.name, "source-switcher", a::chooseSources);
+        source =
+                usesLibraryWall()
+                        ? pill("全部站点", "source-switcher", this::showLibraryFilter)
+                        : pill(site.name, "source-switcher", a::chooseSources);
         source.setPadding(a.dp(Math.round(14 * navScale)), 0, a.dp(Math.round(14 * navScale)), 0);
         source.setCompoundDrawablePadding(a.dp(9));
         source.setCompoundDrawables(null, null, new SourceChevron(a), null);
@@ -224,12 +233,14 @@ final class HomeScreen {
         styleSource(false);
         source.setMaxWidth(a.dp(Math.round(220 * Math.max(1f, navScale))));
         source.setContentDescription(
-                "浏览站点：" + site.name + "，按确认键切换（片源包与线路在 dock「源」里）");
+                usesLibraryWall()
+                        ? "片库筛选：全部站点，按确认键切换（片源与站点在 dock「源」里）"
+                        : "浏览站点：" + site.name + "，按确认键切换（片源包与线路在 dock「源」里）");
         LinearLayout.LayoutParams sourceSize =
                 new LinearLayout.LayoutParams(-2, a.dp(Math.round(34 * navScale)));
         sourceSize.leftMargin = a.dp(14);
         heading.addView(source, sourceSize);
-        if (a.isTvDevice() && !SourceController.isConfigOrNetdiskSite(site)) {
+        if (a.isTvDevice() && !usesLibraryWall()) {
             filterToggle = pill("筛选  ⌄", "home-filters", this::showFilters);
             filterToggle.setPadding(
                     a.dp(Math.round(14 * navScale)), 0, a.dp(Math.round(14 * navScale)), 0);
@@ -284,6 +295,10 @@ final class HomeScreen {
                         "加载更多",
                         "home-load-more",
                         () -> {
+                            if (usesLibraryWall()) {
+                                retryLibraryWall();
+                                return;
+                            }
                             if (snapshot == null
                                     || (snapshot.recommendationsPending
                                             && state.category.isEmpty())) {
@@ -334,6 +349,11 @@ final class HomeScreen {
         retainedEngineEpoch = a.engineEpoch;
         retainedAppearance = appearance();
         if (a.current != null) a.current.retainedHome = this;
+        if (usesLibraryWall()) {
+            prepareLibraryWallChrome();
+            ensureLibraryWall();
+            return;
+        }
         Snapshot saved = state.snapshot != null ? state.snapshot : a.homeData.get(site.key);
         if (saved != null
                 && (state.snapshot != null || System.currentTimeMillis() - saved.time < 300000)) {
@@ -668,6 +688,253 @@ final class HomeScreen {
                                 });
                     }
                 });
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Cross-site library wall
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * The library section is a merged wall for regular sites. Config/netdisk entries keep their
+     * own folder browser because they are account utilities, not content sources.
+     */
+    boolean usesLibraryWall() {
+        return !SourceController.isConfigOrNetdiskSite(site);
+    }
+
+    /** Hides single-site category chrome: the wall is already merged and pre-sorted. */
+    void prepareLibraryWallChrome() {
+        a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+        if (filters != null) filters.setVisibility(View.GONE);
+        if (categoryScroll != null) categoryScroll.setVisibility(View.GONE);
+        if (inlineFilters != null) inlineFilters.setVisibility(View.GONE);
+        if (filterToggle != null) filterToggle.setVisibility(View.GONE);
+        if (more != null) more.setVisibility(View.GONE);
+        updateLibraryFilterPill();
+        wireNavigation();
+    }
+
+    /** Applies the cached wall, joins a load already in flight, or starts a new aggregation. */
+    void ensureLibraryWall() {
+        LibraryAggregator.Result cached = freshLibraryWall();
+        if (cached != null) {
+            applyLibraryWall(cached);
+            return;
+        }
+        boolean joined = false;
+        synchronized (a) {
+            if (a.libraryWallLoading) {
+                joined = true;
+                a.libraryWallWaiters.add(this::onLibraryWallReady);
+            } else {
+                a.libraryWallLoading = true;
+            }
+        }
+        if (joined) {
+            showLibraryWallLoading();
+            return;
+        }
+        final int epoch = a.engineEpoch;
+        final List<Cms.Site> targets = LibraryAggregator.targets(a);
+        showLibraryWallLoading();
+        try {
+            a.worker.execute(
+                    () -> {
+                        LibraryAggregator.Result result;
+                        try {
+                            result = LibraryAggregator.load(a, targets);
+                        } catch (Throwable failure) {
+                            result = new LibraryAggregator.Result();
+                            result.targets.addAll(targets);
+                            result.failedSites = targets.size();
+                            result.loadedAt = System.currentTimeMillis();
+                        }
+                        final LibraryAggregator.Result loaded = result;
+                        a.ui.post(
+                                () -> {
+                                    List<Runnable> waiters;
+                                    synchronized (a) {
+                                        if (epoch == a.engineEpoch) {
+                                            a.libraryWall = loaded;
+                                            a.libraryWallEpoch = epoch;
+                                        }
+                                        a.libraryWallLoading = false;
+                                        waiters = new ArrayList<>(a.libraryWallWaiters);
+                                        a.libraryWallWaiters.clear();
+                                    }
+                                    for (Runnable waiter : waiters) waiter.run();
+                                    if (active() && epoch == a.engineEpoch) {
+                                        applyLibraryWall(loaded);
+                                    }
+                                });
+                    });
+        } catch (Throwable rejected) {
+            synchronized (a) {
+                a.libraryWallLoading = false;
+            }
+            showLibraryWallFailure();
+        }
+    }
+
+    LibraryAggregator.Result freshLibraryWall() {
+        synchronized (a) {
+            if (a.libraryWall != null
+                    && a.libraryWallEpoch == a.engineEpoch
+                    && a.libraryWall.fresh()) return a.libraryWall;
+            return null;
+        }
+    }
+
+    void onLibraryWallReady() {
+        if (!active() || !usesLibraryWall()) return;
+        LibraryAggregator.Result cached = freshLibraryWall();
+        if (cached != null) applyLibraryWall(cached);
+        else ensureLibraryWall();
+    }
+
+    void showLibraryWallLoading() {
+        if (status != null) {
+            int sites = LibraryAggregator.targets(a).size();
+            status.setVisibility(View.VISIBLE);
+            status.setText(sites == 0 ? "当前片源包没有可聚合的站点。" : "正在聚合 " + sites + " 个站点…");
+        }
+        if (more != null) more.setVisibility(View.GONE);
+    }
+
+    void showLibraryWallFailure() {
+        if (state != null) state.categoryFailed = true;
+        if (status != null) {
+            status.setVisibility(View.VISIBLE);
+            status.setText("片库聚合失败，可点「重新加载」再试。");
+        }
+        if (more != null) {
+            more.setText("重新加载");
+            more.setVisibility(View.VISIBLE);
+        }
+        wireNavigation();
+    }
+
+    /** Rebuilds the wall after the retry button is pressed. */
+    void retryLibraryWall() {
+        synchronized (a) {
+            a.libraryWall = null;
+            a.libraryWallEpoch = -1;
+        }
+        if (state != null) state.categoryFailed = false;
+        if (more != null) more.setText("加载更多");
+        ensureLibraryWall();
+    }
+
+    void applyLibraryWall(LibraryAggregator.Result result) {
+        if (result == null || state == null || content == null) return;
+        wallSiteByVideo.clear();
+        wallSourcesByVideo.clear();
+        for (LibraryAggregator.Item item : result.items) {
+            if (item == null || item.video == null || item.sites.isEmpty()) continue;
+            wallSiteByVideo.put(item.video, item.sites.get(0));
+            wallSourcesByVideo.put(item.video, item.sites.size());
+        }
+        List<Cms.Video> videos = new ArrayList<>();
+        for (LibraryAggregator.Item item : result.items) {
+            if (item == null || item.video == null) continue;
+            if (!librarySiteFilter.isEmpty() && !item.hasSite(librarySiteFilter)) continue;
+            videos.add(item.video);
+        }
+        // The wall owns the flat list; category paging is bypassed while the filter is active.
+        state.category = "";
+        state.page = 1;
+        state.pages = 1;
+        state.windowStart = 0;
+        state.ready = true;
+        state.categoryFailed = result.okSites == 0 || result.items.isEmpty();
+        state.activeFilterNote = "";
+        state.activeFilterLocalFallback = false;
+        state.selectedFilters.clear();
+        state.videos = videos;
+        updateLibraryFilterPill();
+        drawGrid(false);
+        updateMore();
+        wireNavigation();
+        if (a.current != null && a.current.focus == null && !rows.isEmpty()) {
+            List<View> firstRow = rows.get(0);
+            View first = firstRow.isEmpty() ? source : firstRow.get(0);
+            if (first != null) {
+                a.current.focus = String.valueOf(first.getTag());
+                restoreFocus();
+            }
+        }
+    }
+
+    void updateLibraryFilterPill() {
+        if (source == null) return;
+        String label = librarySiteFilter.isEmpty() ? "全部站点" : librarySiteName(librarySiteFilter);
+        source.setText(label);
+        source.setContentDescription("片库筛选：" + label + "，按确认键切换（片源与站点在 dock「源」里）");
+    }
+
+    String librarySiteName(String key) {
+        for (Cms.Site target : LibraryAggregator.targets(a)) {
+            if (target.key.equals(key)) {
+                if (target.name != null && !target.name.trim().isEmpty()) return target.name;
+                break;
+            }
+        }
+        return key;
+    }
+
+    void showLibraryFilter() {
+        final List<Cms.Site> targets = LibraryAggregator.targets(a);
+        if (targets.isEmpty()) {
+            a.notice("当前片源包没有可用于聚合的站点。");
+            return;
+        }
+        final String[] names = new String[targets.size() + 1];
+        names[0] = "全部站点";
+        int checked = 0;
+        for (int i = 0; i < targets.size(); i++) {
+            Cms.Site target = targets.get(i);
+            names[i + 1] =
+                    target.name == null || target.name.trim().isEmpty() ? target.key : target.name;
+            if (target.key.equals(librarySiteFilter)) checked = i + 1;
+        }
+        new AppDialog.Builder(a)
+                .setTitle("片库筛选")
+                .wrapChoices()
+                .setSingleChoiceItems(
+                        names,
+                        checked,
+                        (dialog, which) -> {
+                            String next = which == 0 ? "" : targets.get(which - 1).key;
+                            if (next.equals(librarySiteFilter)) return;
+                            librarySiteFilter = next;
+                            updateLibraryFilterPill();
+                            LibraryAggregator.Result cached = freshLibraryWall();
+                            if (cached != null) applyLibraryWall(cached);
+                            else ensureLibraryWall();
+                        })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    String libraryWallStatusText() {
+        LibraryAggregator.Result result = a.libraryWall;
+        String filterName = librarySiteFilter.isEmpty() ? "" : librarySiteName(librarySiteFilter);
+        if (result == null) return "正在聚合站点…";
+        if (result.okSites == 0) {
+            return result.totalSites() == 0 ? "当前片源包没有可聚合的站点。" : "片库聚合失败：站点均未返回内容，可点「重新加载」再试。";
+        }
+        if (result.items.isEmpty()) {
+            return "片库聚合完成，暂无可显示内容，可点「重新加载」再试。";
+        }
+        if (state.videos.isEmpty()) {
+            return filterName.isEmpty()
+                    ? "已聚合 " + result.okSites + " 个站点，暂无可显示内容。"
+                    : "「" + filterName + "」暂无可显示内容，可切回「全部站点」。";
+        }
+        String message = "已聚合 " + result.okSites + " 个站点，共 " + state.videos.size() + " 部影片";
+        if (!filterName.isEmpty()) message = message + "（筛选：" + filterName + "）";
+        if (result.timedOut) message = message + " · 部分站点超时";
+        return message;
     }
 
     private static java.io.File snapshotCacheFile(MainActivity a, String siteKey) {
@@ -1647,7 +1914,7 @@ final class HomeScreen {
 
     void updateFilterToggle() {
         if (filterToggle == null || state == null) return;
-        boolean show = !SourceController.isConfigOrNetdiskSite(site);
+        boolean show = !usesLibraryWall() && !SourceController.isConfigOrNetdiskSite(site);
         filterToggle.setVisibility(show ? View.VISIBLE : View.GONE);
         if (!show) return;
         String base =
@@ -2370,7 +2637,10 @@ final class HomeScreen {
         updateEarlier();
         if (existing < windowEnd()) a.learnTitles(state.videos.subList(existing, windowEnd()));
         boolean hasFilters = !state.selectedFilters.isEmpty();
-        if (!hasFilters) {
+        if (usesLibraryWall()) {
+            status.setText(libraryWallStatusText());
+            status.setVisibility(View.VISIBLE);
+        } else if (!hasFilters) {
             status.setText("这个分类暂无内容，可切换其他分类或使用全局搜索。");
             status.setVisibility(state.videos.isEmpty() ? View.VISIBLE : View.GONE);
         } else if (state.videos.isEmpty()) {
@@ -2553,12 +2823,15 @@ final class HomeScreen {
             art.setBackground(a.bg(0xff25252d, 10));
             art.setClipToOutline(true);
         }
-        boolean showDoubanBadge = !SourceController.isConfigOrNetdiskActionCard(site, video);
+        Cms.Site cardSite = siteFor(video);
+        boolean showDoubanBadge = !SourceController.isConfigOrNetdiskActionCard(cardSite, video);
         FrameLayout artWrap =
                 TvV17PosterCard.wrapArtworkWithDoubanBadge(a, art, video, showDoubanBadge);
         card.addView(
                 artWrap,
                 new LinearLayout.LayoutParams(a.dp(posterWidth), a.dp(posterWidth * 1.5f)));
+        int sourceCount = usesLibraryWall() ? librarySourceCount(video) : 0;
+        if (sourceCount > 0) attachSourceBadge(artWrap, sourceCount);
         a.poster(video.poster, art);
         TextView title = a.text(video.title, 13, 0xffc8c8d0);
         single(title);
@@ -2567,8 +2840,9 @@ final class HomeScreen {
         focusable(card, "home-video:" + index);
         if (a.isTvDevice()) TvFocusFrame.attachCard(card, "home-library-grid");
         outline(card, false, 13, Color.TRANSPARENT);
-        card.setContentDescription(video.title);
-        card.setOnClickListener(v -> a.openListing(site, video));
+        card.setContentDescription(
+                sourceCount > 0 ? video.title + "，" + sourceCount + " 个来源" : video.title);
+        card.setOnClickListener(v -> a.openListing(cardSite, video));
         card.setOnFocusChangeListener(
                 (v, f) -> {
                     if (a.isTvDevice()) TvV17PosterCard.focus(a, card, title, f);
@@ -2592,7 +2866,7 @@ final class HomeScreen {
                             v.postDelayed(
                                     () -> {
                                         if (v.hasFocus() && active()) {
-                                            SourceController.prefetchDetail(a, site, video);
+                                            SourceController.prefetchDetail(a, cardSite, video);
                                         }
                                     },
                                     360);
@@ -2604,6 +2878,41 @@ final class HomeScreen {
                 && (ambient.wanted == null || !ambient.wanted.isAttachedToWindow()))
             ambient.follow(art);
         return card;
+    }
+
+    /** The site a wall card opens with: its first aggregated source, or the screen site. */
+    Cms.Site siteFor(Cms.Video video) {
+        if (video != null) {
+            Cms.Site first = wallSiteByVideo.get(video);
+            if (first != null) return first;
+        }
+        return site;
+    }
+
+    int librarySourceCount(Cms.Video video) {
+        if (video == null) return 0;
+        Integer count = wallSourcesByVideo.get(video);
+        return count == null ? 0 : count;
+    }
+
+    /** Small "N 源" corner pill, styled like the existing Douban badge. */
+    void attachSourceBadge(FrameLayout wrap, int count) {
+        if (wrap == null || count <= 0) return;
+        TextView badge = a.text(count + " 源", 10.5f, 0xffe8eef6);
+        badge.setTag("card-source-count");
+        badge.setSingleLine(true);
+        badge.setIncludeFontPadding(false);
+        badge.setPadding(a.dp(6), a.dp(2.5f), a.dp(6), a.dp(2.5f));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(0xd010141c);
+        background.setCornerRadius(a.dp(6));
+        background.setStroke(Math.max(1, a.dp(0.8f)), 0x443b82f6);
+        badge.setBackground(background);
+        FrameLayout.LayoutParams params =
+                new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
+        params.leftMargin = a.dp(6);
+        params.bottomMargin = a.dp(6);
+        wrap.addView(badge, params);
     }
 
     void outline(View view, boolean focused, int radius, int color) {
@@ -2803,7 +3112,12 @@ final class HomeScreen {
                                 : (topDockActive ? a.homeDock.items[0].getId() : source.getId()))
                         : historyCards.get(stackedHistory ? historyCards.size() - 1 : 0).getId();
         source.setNextFocusUpId(sourceUpId);
-        source.setNextFocusDownId(selectedTab().getId());
+        View sourceDown = selectedTab();
+        // With no category tabs the wall itself sits directly below the filter pill.
+        if (usesLibraryWall() && tabs.isEmpty() && !rows.isEmpty() && !rows.get(0).isEmpty()) {
+            sourceDown = rows.get(0).get(0);
+        }
+        source.setNextFocusDownId(sourceDown.getId());
         boolean filterToggleShown = filterToggle != null && filterToggle.isShown();
         if (filterToggleShown) {
             source.setNextFocusRightId(filterToggle.getId());
