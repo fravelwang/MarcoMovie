@@ -1020,6 +1020,8 @@ public final class MainActivity extends Activity {
                         ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
                         : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER);
         configStore = new ConfigStore(getFilesDir());
+        // The native netdisk account layer keeps its verified credentials under files/netdisk/.
+        QuarkQrLogin.useFilesDir(getFilesDir());
         if (isTvDevice()) {
             getWindow().getDecorView().setSystemUiVisibility(5894);
         } else {

@@ -6,6 +6,51 @@ import java.util.*;
 
 /** Normalizes playback metadata returned by a source, without persisting signed URLs. */
 final class MediaOptions {
+    private static boolean isQuarkMediaUrl(String url) {
+        if (url == null || url.isEmpty()) return false;
+        try {
+            String host = new URL(url).getHost();
+            if (host == null) return false;
+            host = host.toLowerCase(Locale.ROOT);
+            return host.endsWith("quark.cn") || host.endsWith("quark.com");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * True when this episode's media really lives on 夸克. Sources may hand back a direct
+     * {@code https://...quark.cn/...} URL or a {@code proxy://} / localhost rewrite, so the raw
+     * strings from the source response are checked as well as the final URL.
+     */
+    private static boolean quarkTarget(String finalUrl, JSONObject result, Cms.Episode original) {
+        if (isQuarkMediaUrl(finalUrl)) return true;
+        if (result != null) {
+            if (isQuarkMediaUrl(result.optString("url"))) return true;
+            if (isQuarkMediaUrl(result.optString("playUrl"))) return true;
+        }
+        if (original != null) {
+            if (isQuarkMediaUrl(original.url)) return true;
+            if (original.headers != null) {
+                for (String value : original.headers.values()) {
+                    if (value != null && value.contains("quark.cn")) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasHeader(Map<String, String> headers, String name) {
+        if (headers == null) return false;
+        for (String key : headers.keySet()) {
+            if (key != null && key.equalsIgnoreCase(name)) {
+                String value = headers.get(key);
+                return value != null && !value.trim().isEmpty();
+            }
+        }
+        return false;
+    }
+
     static Cms.Episode episode(Cms.Site site, Cms.Episode original, JSONObject result)
             throws Exception {
         Cms.Episode out = new Cms.Episode();
@@ -60,6 +105,15 @@ final class MediaOptions {
         for (String key : new String[] {"Referer", "referer"})
             if (!result.optString(key).isEmpty())
                 put(out.headers, "Referer", result.optString(key));
+        // 夸克 playback carries the credential from the native account layer. The spider may or may
+        // not have its own cookie; when it does not, ours is the difference between a 403 and a
+        // playable stream, and it keeps working without any spider-side login.
+        QuarkQrLogin.Credential quarkCredential = QuarkQrLogin.loadSaved();
+        if (quarkCredential != null
+                && quarkTarget(out.url, result, original)
+                && !hasHeader(out.headers, "Cookie")) {
+            out.headers.put("Cookie", quarkCredential.cookie);
+        }
         Object subtitles = result.opt("subtitles");
         if (subtitles == null) subtitles = result.opt("subs");
         if (subtitles == null) subtitles = result.opt("subt");

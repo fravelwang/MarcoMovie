@@ -319,6 +319,11 @@ final class AccountPanel {
     static boolean isDriveLoggedIn(MainActivity a, String driveKey) {
         if (a == null || driveKey == null) return false;
         String key = driveKey.trim().toLowerCase(Locale.ROOT);
+        // 夸克 has a native account layer of its own: the saved, verified credential is the only
+        // evidence we accept, in both directions. The old three-way guess stays for other drives.
+        if (QuarkQrLogin.PROVIDER.equals(key)) {
+            return QuarkQrLogin.loadSaved() != null;
+        }
         String scope = configScopePrefix(a);
         boolean hasFile = hasNonEmptyCookieFile(a, key);
         int obs = a.prefs != null ? a.prefs.getInt(PREF_LOGIN_PREFIX + scope + key, -1) : -1;
@@ -695,6 +700,30 @@ final class AccountPanel {
         a.open(page, true);
     }
 
+    /** One section label for the netdisk page: number + title + one-line hint. */
+    private static LinearLayout sectionHeader(
+            MainActivity a, String number, String title, String hint) {
+        LinearLayout box = a.vertical();
+        box.setPadding(a.dp(2), a.dp(10), a.dp(2), a.dp(6));
+        LinearLayout line = a.row();
+        TextView num = a.text(number, 12f, 0x99ffffff);
+        num.setTypeface(null, Typeface.BOLD);
+        num.setPadding(0, 0, a.dp(8), 0);
+        line.addView(num, new LinearLayout.LayoutParams(-2, -2));
+        TextView head = a.text(title, 15f, MainActivity.WHITE);
+        head.setTypeface(null, Typeface.BOLD);
+        line.addView(head, new LinearLayout.LayoutParams(-2, -2));
+        box.addView(line, new LinearLayout.LayoutParams(-1, -2));
+        if (hint != null && !hint.isEmpty()) {
+            TextView sub = a.text(hint, 11.5f, MainActivity.MUTED);
+            sub.setSingleLine(true);
+            sub.setEllipsize(TextUtils.TruncateAt.END);
+            sub.setPadding(0, a.dp(1), 0, 0);
+            box.addView(sub, new LinearLayout.LayoutParams(-1, -2));
+        }
+        return box;
+    }
+
     private static void showTvDialog(final MainActivity a, final View anchor) {
         final Dialog dialog = new Dialog(a);
         a.accountDialog = dialog;
@@ -723,7 +752,7 @@ final class AccountPanel {
         LinearLayout headRow = a.row();
         headRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout titleCol = a.vertical();
-        TextView heading = a.text("网盘与配置中心", 21, MainActivity.WHITE);
+        TextView heading = a.text("网盘高级设置", 21, MainActivity.WHITE);
         heading.setTypeface(null, Typeface.BOLD);
         titleCol.addView(heading);
         final TextView note = a.text("", 12f, MainActivity.MUTED);
@@ -785,6 +814,10 @@ final class AccountPanel {
         final Runnable[] refreshDriveStatesRef = new Runnable[1];
         final Runnable[] reloadEmbeddedConfigRef = new Runnable[1];
 
+        body.addView(
+                sectionHeader(a, "1", "网盘账号", "点一下直接出二维码，扫完自动关闭"),
+                new LinearLayout.LayoutParams(-1, -2));
+
         // 2x2 Quick Drive Cards Grid (stay open on click -> anchored QR bubble extends from
         // button!)
         for (int rowIdx = 0; rowIdx < DRIVES.length; rowIdx += 2) {
@@ -797,25 +830,40 @@ final class AccountPanel {
                 final android.widget.Button driveCard =
                         a.button("", "account-drive:" + drive.key, () -> {});
                 driveCard.setOnClickListener(
-                        v ->
-                                a.ensureStoragePermissionForNetdisk(
+                        v -> {
+                            if (QuarkQrLogin.PROVIDER.equals(drive.key)) {
+                                // Native path: no storage permission, no spider dialog, no bubble.
+                                QuarkLoginDialog.show(
+                                        a,
                                         () -> {
-                                            NetdiskQrBubble.arm(
-                                                    a,
-                                                    driveCard,
-                                                    drive.key,
-                                                    drive.providerName,
-                                                    () -> {
-                                                        if (refreshDriveStatesRef[0] != null) {
-                                                            refreshDriveStatesRef[0].run();
-                                                        }
-                                                        if (reloadEmbeddedConfigRef[0] != null) {
-                                                            reloadEmbeddedConfigRef[0].run();
-                                                        }
-                                                    });
-                                            dispatchDriveLoginAction(
-                                                    a, activeSiteRef[0], drive, false);
-                                        }));
+                                            if (refreshDriveStatesRef[0] != null) {
+                                                refreshDriveStatesRef[0].run();
+                                            }
+                                            if (reloadEmbeddedConfigRef[0] != null) {
+                                                reloadEmbeddedConfigRef[0].run();
+                                            }
+                                        });
+                                return;
+                            }
+                            a.ensureStoragePermissionForNetdisk(
+                                    () -> {
+                                        NetdiskQrBubble.arm(
+                                                a,
+                                                driveCard,
+                                                drive.key,
+                                                drive.providerName,
+                                                () -> {
+                                                    if (refreshDriveStatesRef[0] != null) {
+                                                        refreshDriveStatesRef[0].run();
+                                                    }
+                                                    if (reloadEmbeddedConfigRef[0] != null) {
+                                                        reloadEmbeddedConfigRef[0].run();
+                                                    }
+                                                });
+                                        dispatchDriveLoginAction(
+                                                a, activeSiteRef[0], drive, false);
+                                    });
+                        });
                 driveCard.setOnLongClickListener(
                         v -> {
                             a.ensureStoragePermissionForNetdisk(
@@ -851,17 +899,31 @@ final class AccountPanel {
                                             + SourcePicker.siteGroup(cs)
                                             + "] "
                                             + cs.name
-                                            + " · 点击按钮直接弹出扫码气泡，长按切换启用")
+                                            + " · 点击按钮扫码登录（夸克为应用内原生扫码），长按切换启用")
                                     : "当前订阅未内置配置中心 · 可在下方挂载 AList 或切换到含配置中心的订阅源");
                     for (DriveSpec drive : DRIVES) {
                         android.widget.Button btn = driveButtons.get(drive.key);
                         if (btn == null) continue;
                         boolean loggedIn = isDriveLoggedIn(a, drive.key);
                         boolean enabled = isDriveEnabled(a, drive.key);
-                        String stateBadge =
-                                loggedIn
-                                        ? (enabled ? "✓ 已登录 · 启用中 · 点击重新扫码" : "✓ 已登录 · 点击扫码")
-                                        : "未登录 · 点击弹出扫码气泡";
+                        String stateBadge;
+                        if (QuarkQrLogin.PROVIDER.equals(drive.key)) {
+                            // Native layer: the badge mirrors our own credential, not a guess.
+                            QuarkQrLogin.Credential quark = QuarkQrLogin.loadSaved();
+                            stateBadge =
+                                    quark == null
+                                            ? "未登录 · 点击扫码登录"
+                                            : "✓ 已登录 · "
+                                                    + QuarkQrLogin.describeShort(quark)
+                                                    + " · 点击重新扫码";
+                        } else {
+                            stateBadge =
+                                    loggedIn
+                                            ? (enabled
+                                                    ? "✓ 已登录 · 启用中 · 点击重新扫码"
+                                                    : "✓ 已登录 · 点击扫码")
+                                            : "未登录 · 点击弹出扫码气泡";
+                        }
                         btn.setText(
                                 drive.tvAlias + "  (" + drive.providerName + ")\n" + stateBadge);
                         final int cardNormal = loggedIn ? 0x2a30d158 : 0x18ffffff;
@@ -894,6 +956,10 @@ final class AccountPanel {
                     }
                 };
         refreshDriveStatesRef[0].run();
+
+        body.addView(
+                sectionHeader(a, "2", "更多", "网盘顺序、Cookie 凭据、插件兜底登录"),
+                new LinearLayout.LayoutParams(-1, -2));
 
         // Utility Action Row (keeps AccountPanel open!)
         String[] labels = {"Cookie 凭据", "网盘优先顺序", "网盘搜索顺序"};
@@ -943,6 +1009,10 @@ final class AccountPanel {
         }
         body.addView(actRow, new LinearLayout.LayoutParams(-1, -2));
 
+        body.addView(
+                sectionHeader(a, "3", "插件配置中心（兜底）", "自建网盘登不上的盘，仍可从这里的插件入口登录"),
+                new LinearLayout.LayoutParams(-1, -2));
+
         // Embedded Auto-Compatible Subscription Source Config Center Section (Item 7)
         final LinearLayout configEmbedBox = a.vertical();
         configEmbedBox.setTag("account-config-center-embed");
@@ -970,7 +1040,7 @@ final class AccountPanel {
         embedGridHost.setClipChildren(false);
         final LinearLayout multiSubMergeSlot = a.vertical();
         multiSubMergeSlot.setClipChildren(false);
-        body.addView(multiSubMergeSlot, 0, new LinearLayout.LayoutParams(-1, -2));
+        body.addView(multiSubMergeSlot, new LinearLayout.LayoutParams(-1, -2));
 
         final EmbedCategoryLoader loadEmbedCategory =
                 (catId, folderTitle) -> {
@@ -1754,6 +1824,18 @@ final class AccountPanel {
             final Cms.Site configSite,
             final DriveSpec drive,
             final boolean toggleEnableOnly) {
+        if (QuarkQrLogin.PROVIDER.equals(drive.key)) {
+            // Never hand 夸克 to the spider again: long-press only explains where the switch lives.
+            if (toggleEnableOnly) {
+                a.toast(
+                        QuarkQrLogin.loadSaved() == null
+                                ? "夸克网盘：先在扫码弹窗里登录，登录成功即自动启用"
+                                : "夸克网盘：登录状态由应用内账号管理，长按不再切换插件开关");
+                return;
+            }
+            QuarkLoginDialog.show(a, () -> {});
+            return;
+        }
         a.ensureStoragePermissionForNetdisk(
                 () -> {
                     try {

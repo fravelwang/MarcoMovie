@@ -431,7 +431,10 @@ final class HomeDock {
             }
         }
         final int accountIndex = resolvedAccountIdx;
-        Runnable accountAction = () -> AccountPanel.show(a, items[accountIndex]);
+        Runnable accountAction =
+                () ->
+                        a.open(
+                                new MainActivity.Screen(() -> new NetdiskScreen(a).show()), true);
         Runnable castAction = () -> a.open(new MainActivity.Screen(a::castScreen), true);
         Runnable settingsAction = () -> a.open(new MainActivity.Screen(a::settings), true);
         Runnable[] actions = new Runnable[keys.length];

@@ -1,0 +1,554 @@
+package com.pilipala.marcomovie;
+
+import android.graphics.Typeface;
+import android.text.TextUtils;
+import android.view.Gravity;
+import android.view.View;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * The 网盘 tab: browse your own drives the way a TV file browser should work.
+ *
+ * <p>Browsing is the page. Configuration is not printed next to it: the account state lives in one
+ * header pill, login is a single card that appears only when the drive is not signed in, and the
+ * rest (plugin fallback, ordering, cookie paste) sits behind 更多. Each folder is its own screen, so
+ * the remote's back key goes up one level, exactly like a native drive app or FongMi's browser.
+ *
+ * <p>Only 夸克 has a native client today; the other drives still say so honestly instead of showing
+ * a dead grid.
+ */
+final class NetdiskScreen {
+
+    private static final ExecutorService WORKER = Executors.newSingleThreadExecutor();
+    private static final int VIDEO_CARD_W = 210;
+
+    private final MainActivity a;
+    private final String driveKey;
+    private final String dirFid;
+    private final String dirName;
+
+    private LinearLayout gridHost;
+    private TextView status;
+    private int generation;
+
+    NetdiskScreen(MainActivity a) {
+        this(a, QuarkQrLogin.PROVIDER, "0", "");
+    }
+
+    private NetdiskScreen(MainActivity a, String driveKey, String dirFid, String dirName) {
+        this.a = a;
+        this.driveKey = driveKey;
+        this.dirFid = dirFid;
+        this.dirName = dirName;
+    }
+
+    void show() {
+        a.renderPage("网盘", rootPathLabel());
+        if (a.body != null) {
+            a.body.setPadding(a.dp(48), a.dp(18), a.dp(48), a.dp(40));
+        }
+        renderDriveStrip();
+        renderPathBar();
+        status = a.text("", 12f, TvV17Theme.MUTED);
+        status.setPadding(a.dp(4), a.dp(6), a.dp(4), a.dp(10));
+        a.body.addView(status, new LinearLayout.LayoutParams(-1, -2));
+        gridHost = a.vertical();
+        gridHost.setClipChildren(false);
+        gridHost.setClipToPadding(false);
+        a.body.addView(gridHost, new LinearLayout.LayoutParams(-1, -2));
+        load();
+    }
+
+    private String rootPathLabel() {
+        return dirName == null || dirName.isEmpty() ? "我的网盘" : dirName;
+    }
+
+    // ------------------------------------------------------------------ header
+
+    /** One pill per drive: the account status and the way to change it, in a single line. */
+    private void renderDriveStrip() {
+        LinearLayout strip = a.row();
+        strip.setClipChildren(false);
+        strip.setPadding(0, a.dp(4), 0, a.dp(4));
+        String[][] drives = {
+            {QuarkQrLogin.PROVIDER, "夸克"},
+            {"uc", "UC"},
+            {"baidu", "百度"},
+            {"ali", "阿里"},
+        };
+        for (String[] drive : drives) {
+            boolean current = drive[0].equals(driveKey);
+            boolean logged =
+                    QuarkQrLogin.PROVIDER.equals(drive[0]) && QuarkQrLogin.loadSaved() != null;
+            final String key = drive[0];
+            String label =
+                    drive[1]
+                            + (QuarkQrLogin.PROVIDER.equals(key)
+                                    ? (logged ? " · 已登录" : " · 未登录")
+                                    : "");
+            Button pill = a.navButton(label, "netdisk-drive:" + key, () -> onDrivePill(key));
+            pill.setTextSize(13f);
+            if (!current) pill.setAlpha(.62f);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(36));
+            lp.rightMargin = a.dp(10);
+            strip.addView(pill, lp);
+        }
+        View spacer = new View(a);
+        strip.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
+        Button more = a.navButton("更多", "netdisk-more", this::openMore);
+        strip.addView(more, new LinearLayout.LayoutParams(a.dp(96), a.dp(36)));
+        a.body.addView(strip, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private void onDrivePill(String key) {
+        if (!QuarkQrLogin.PROVIDER.equals(key)) {
+            a.toast(
+                    "UC / 百度 / 阿里的原生浏览还没做，暂时只能用「更多 → 插件配置中心」里的旧登录");
+            return;
+        }
+        if (QuarkQrLogin.loadSaved() == null) {
+            QuarkLoginDialog.show(a, this::reloadSelf);
+            return;
+        }
+        QuarkQrLogin.Credential credential = QuarkQrLogin.loadSaved();
+        a.notice("已登录 · " + QuarkQrLogin.describeShort(credential));
+    }
+
+    private void reloadSelf() {
+        if (a.body != null) {
+            a.open(new MainActivity.Screen(() -> new NetdiskScreen(a).show()), true);
+        }
+    }
+
+    /** Breadcrumb + the only two verbs a browser needs: up, refresh. */
+    private void renderPathBar() {
+        LinearLayout bar = a.row();
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        TextView path = a.text(rootPathLabel(), 15f, TvV17Theme.TEXT);
+        path.setTypeface(null, Typeface.BOLD);
+        path.setSingleLine(true);
+        path.setEllipsize(TextUtils.TruncateAt.START);
+        bar.addView(path, new LinearLayout.LayoutParams(0, -2, 1f));
+        Button refresh =
+                a.navButton(
+                        "刷新", "netdisk-refresh", () -> load());
+        bar.addView(refresh, new LinearLayout.LayoutParams(a.dp(88), a.dp(34)));
+        a.body.addView(bar, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private void openMore() {
+        LinearLayout box = a.vertical();
+        box.setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6));
+        TextView hint =
+                a.text("网盘的高级设置。日常浏览用不到这里。", 12f, TvV17Theme.MUTED);
+        hint.setPadding(a.dp(4), 0, a.dp(4), a.dp(10));
+        box.addView(hint, new LinearLayout.LayoutParams(-1, -2));
+        box.addView(
+                moreRow("插件配置中心（兜底登录 / 已导入的线路）", "netdisk-more-plugin", () -> AccountPanel.show(a, null)),
+                new LinearLayout.LayoutParams(-1, a.dp(42)));
+        box.addView(
+                moreRow("网盘优先顺序", "netdisk-more-order", () -> accountAction("panSortShow")),
+                new LinearLayout.LayoutParams(-1, a.dp(42)));
+        box.addView(
+                moreRow("网盘搜索顺序", "netdisk-more-search", () -> accountAction("panSourceSortShow")),
+                new LinearLayout.LayoutParams(-1, a.dp(42)));
+        box.addView(
+                moreRow("粘贴 Cookie 凭据", "netdisk-more-cookie", () -> accountAction("pushCkShow")),
+                new LinearLayout.LayoutParams(-1, a.dp(42)));
+        if (QuarkQrLogin.loadSaved() != null) {
+            box.addView(
+                    moreRow("退出夸克登录", "netdisk-more-logout", this::logoutQuark),
+                    new LinearLayout.LayoutParams(-1, a.dp(42)));
+        }
+        new AppDialog.Builder(a)
+                .setTitle("更多")
+                .setView(box)
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    private Button moreRow(String label, String tag, Runnable action) {
+        Button b = a.navButton(label, tag, action);
+        b.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        b.setTextSize(13.5f);
+        b.setPadding(a.dp(14), 0, a.dp(14), 0);
+        return b;
+    }
+
+    private void accountAction(String action) {
+        try {
+            a.ensureStoragePermissionForNetdisk(
+                    () -> {
+                        PluginDialogStyler.clearDirectDriveForward();
+                        PluginDialogStyler.watch(a);
+                        new SettingsScreen(a).accountAction(action, null);
+                    });
+        } catch (Throwable t) {
+            a.notice(t.getMessage() == null ? "这个入口暂时不可用" : t.getMessage());
+        }
+    }
+
+    private void logoutQuark() {
+        QuarkQrLogin.clearSaved();
+        AccountPanel.markDriveLoggedIn(a, QuarkQrLogin.PROVIDER, false);
+        a.toast("已退出夸克登录");
+        reloadSelf();
+    }
+
+    // ------------------------------------------------------------------ grid
+
+    private void load() {
+        final int mine = ++generation;
+        gridHost.removeAllViews();
+        if (!QuarkQrLogin.PROVIDER.equals(driveKey)) {
+            status.setText("这个网盘还没有原生浏览（下一步做 UC / 百度 / 阿里）");
+            return;
+        }
+        QuarkQrLogin.Credential credential = QuarkQrLogin.loadSaved();
+        if (credential == null) {
+            status.setText("");
+            renderLoginCard();
+            return;
+        }
+        status.setText("正在读取…");
+        final QuarkDriveClient client = new QuarkDriveClient(credential.cookie);
+        WORKER.execute(
+                () -> {
+                    List<QuarkDriveClient.Entry> rows = null;
+                    String error = null;
+                    try {
+                        rows = client.list(dirFid);
+                    } catch (Throwable t) {
+                        error = t.getMessage() == null ? "读取失败" : t.getMessage();
+                    }
+                    final List<QuarkDriveClient.Entry> done = rows;
+                    final String err = error;
+                    a.ui.post(
+                            () -> {
+                                if (generation != mine) return;
+                                renderGrid(client, done, err);
+                            });
+                });
+    }
+
+    /**未登录时整页只有一张能按的卡：扫码。配置不进主位。 */
+    private void renderLoginCard() {
+        LinearLayout card = a.vertical();
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.setPadding(a.dp(28), a.dp(28), a.dp(28), a.dp(28));
+        card.setBackground(a.bg(0x1affffff, 20));
+        TextView title = a.text("先登录夸克网盘", 20, TvV17Theme.TEXT);
+        title.setTypeface(null, Typeface.BOLD);
+        card.addView(title, new LinearLayout.LayoutParams(-2, -2));
+        a.gap(card, 8);
+        TextView sub =
+                a.text(
+                        "点下面的按钮，屏幕上会出现二维码；用手机夸克 App 扫一下，确认后这里就会列出你的文件和视频。",
+                        13f,
+                        TvV17Theme.MUTED);
+        sub.setLineSpacing(a.dp(4), 1f);
+        card.addView(sub, new LinearLayout.LayoutParams(a.dp(520), -2));
+        a.gap(card, 16);
+        Button login =
+                a.navButton("扫码登录夸克", "netdisk-login", () -> QuarkLoginDialog.show(a, this::reloadSelf));
+        card.addView(login, new LinearLayout.LayoutParams(a.dp(200), a.dp(44)));
+        a.tvInitialFocus = login;
+        LinearLayout wrap = a.row();
+        wrap.setGravity(Gravity.CENTER_VERTICAL);
+        wrap.addView(card, new LinearLayout.LayoutParams(-2, -2));
+        gridHost.addView(wrap, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private void renderGrid(
+            QuarkDriveClient client, List<QuarkDriveClient.Entry> rows, String error) {
+        gridHost.removeAllViews();
+        if (error != null) {
+            status.setText(error);
+            return;
+        }
+        if (rows == null || rows.isEmpty()) {
+            status.setText("这个文件夹是空的");
+            return;
+        }
+        List<QuarkDriveClient.Entry> folders = new ArrayList<>();
+        List<QuarkDriveClient.Entry> videos = new ArrayList<>();
+        List<QuarkDriveClient.Entry> others = new ArrayList<>();
+        for (QuarkDriveClient.Entry row : rows) {
+            if (row.dir) folders.add(row);
+            else if (client.isVideoName(row.name)) videos.add(row);
+            else others.add(row);
+        }
+        status.setText(
+                "文件夹 " + folders.size() + " · 视频 " + videos.size()
+                        + (others.isEmpty() ? "" : " · 其它 " + others.size()));
+        float density = Math.max(1f, a.getResources().getDisplayMetrics().density);
+        int cols = Math.max(3, Math.min(6, (int) (a.windowWidth() / density / 220)));
+        int gap = a.dp(16);
+        int cardW = Math.max(a.dp(150), (a.windowWidth() - a.dp(96) - gap * (cols - 1)) / cols);
+
+        View first = null;
+        List<QuarkDriveClient.Entry> all = new ArrayList<>();
+        all.addAll(folders);
+        all.addAll(videos);
+        all.addAll(others);
+        LinearLayout row = null;
+        for (int i = 0; i < all.size(); i++) {
+            if (i % cols == 0) {
+                row = a.row();
+                row.setGravity(Gravity.TOP);
+                row.setClipChildren(false);
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
+                rlp.bottomMargin = a.dp(16);
+                gridHost.addView(row, rlp);
+            }
+            QuarkDriveClient.Entry entry = all.get(i);
+            boolean playable = !entry.dir && client.isVideoName(entry.name);
+            View card = buildCard(entry, playable, cardW);
+            if (first == null) first = card;
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, -2, 1f);
+            if (i % cols < cols - 1) clp.rightMargin = gap;
+            row.addView(card, clp);
+        }
+        if (row != null) {
+            int rem = all.size() % cols;
+            for (int k = rem; rem > 0 && k < cols; k++) {
+                row.addView(new View(a), new LinearLayout.LayoutParams(0, 1, 1f));
+            }
+        }
+        if (first != null) a.tvInitialFocus = first;
+    }
+
+    private View buildCard(QuarkDriveClient.Entry entry, boolean playable, int width) {
+        LinearLayout card = a.vertical();
+        card.setClipChildren(false);
+        LinearLayout face = a.vertical();
+        face.setGravity(Gravity.CENTER);
+        int faceH = Math.round(width * (playable ? 0.62f : 0.5f));
+        String badge = entry.dir ? "文件夹" : playable ? "视频" : "文件";
+        TextView icon = a.text(badge, 15, 0xccffffff);
+        icon.setTypeface(null, Typeface.BOLD);
+        face.addView(icon, new LinearLayout.LayoutParams(-2, -2));
+        if (entry.size > 0) {
+            TextView size = a.text(size(entry.size), 11.5f, 0xd0ffffff);
+            size.setPadding(0, a.dp(2), 0, 0);
+            face.addView(size, new LinearLayout.LayoutParams(-2, -2));
+        }
+        face.setBackground(a.bg(entry.dir ? 0x2e3b82f6 : playable ? 0x2e34d399 : 0x1affffff, 14));
+        card.addView(face, new LinearLayout.LayoutParams(-1, faceH));
+        TextView name = a.text(entry.name, 12f, TvV17Theme.TEXT);
+        name.setMaxLines(2);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        name.setPadding(a.dp(2), a.dp(7), a.dp(2), 0);
+        card.addView(name, new LinearLayout.LayoutParams(-1, -2));
+
+        card.setFocusable(true);
+        card.setClickable(true);
+        card.setOnClickListener(
+                v -> {
+                    if (entry.dir) {
+                        a.open(
+                                new MainActivity.Screen(
+                                        () ->
+                                                new NetdiskScreen(a, driveKey, entry.fid, entry.name)
+                                                        .show()),
+                                true);
+                    } else if (playable) {
+                        play(entry);
+                    } else {
+                        a.toast("这个文件不是视频，暂时只能在夸克 App 里打开");
+                    }
+                });
+        card.setOnFocusChangeListener(
+                (v, focused) -> {
+                    float scale = focused ? 1.05f : 1f;
+                    card.animate().scaleX(scale).scaleY(scale).setDuration(120).start();
+                    face.setBackground(
+                            a.bg(
+                                    focused
+                                            ? (entry.dir ? 0x553b82f6 : playable ? 0x5534d399 : 0x33ffffff)
+                                            : (entry.dir
+                                                    ? 0x2e3b82f6
+                                                    : playable ? 0x2e34d399 : 0x1affffff),
+                                    14));
+                });
+        return card;
+    }
+
+    private void play(final QuarkDriveClient.Entry entry) {
+        // -1: no manual tier choice. NetdiskQualityGuard then skips tiers this device already
+        // failed to decode (4K first unless the device memory says otherwise).
+        play(entry, -1);
+    }
+
+    /**
+     * Native netdisk playback entry point.
+     *
+     * @param manualRank 1..6 when the user explicitly picked a tier for this file. A manual 4K
+     *     choice (6) wins over the guard's device memory; -1 means automatic. The browser has no
+     *     quality picker yet, so today only -1 is passed.
+     */
+    private void play(final QuarkDriveClient.Entry entry, final int manualRank) {
+        QuarkQrLogin.Credential credential = QuarkQrLogin.loadSaved();
+        if (credential == null) {
+            a.toast("先登录夸克");
+            return;
+        }
+        // A decision queued for the previous netdisk playback must not reopen it after this click.
+        NetdiskQualityGuard.disarm();
+        a.toast("正在取播放地址…");
+        final QuarkDriveClient client = new QuarkDriveClient(credential.cookie);
+        final int startRank = NetdiskQualityGuard.preferredStartRank(a, manualRank);
+        // Only an automatic start may relax upward when the remembered memory leaves no tier;
+        // a manual pick must not silently turn 2K into 4K.
+        startNetdiskPlayback(entry, credential.cookie, client, startRank, 0, 0, manualRank < 0);
+    }
+
+    /**
+     * Resolves one URL and (re)opens the player. The first play and the guard's automatic downgrade
+     * share this path so headers, episode flags and the quality memory stay in one place.
+     *
+     * @param requestedRank highest tier to accept (4k=6 ... normal=1)
+     * @param downgrades automatic downgrades already spent on this playback, 0 on the first play
+     * @param fromRank tier being left when this call is a downgrade, 0 on the first play
+     * @param relaxMissingTier true only for an automatic start: when no tier at or below
+     *     {@code requestedRank} exists, play the only offered tier instead of failing
+     */
+    private void startNetdiskPlayback(
+            final QuarkDriveClient.Entry entry,
+            final String cookie,
+            final QuarkDriveClient client,
+            final int requestedRank,
+            final int downgrades,
+            final int fromRank,
+            final boolean relaxMissingTier) {
+        WORKER.execute(
+                () -> {
+                    QuarkDriveClient.PlayVariant variant = null;
+                    String error = null;
+                    try {
+                        variant = client.playVariant(entry.fid, requestedRank);
+                        if (variant == null
+                                && relaxMissingTier
+                                && requestedRank < NetdiskQualityGuard.RANK_4K) {
+                            // The remembered tier left no lower variant (the file only has 4K), so
+                            // play what exists instead of refusing to play. The guard re-reads the
+                            // real rank and only reports later misses; it does not loop.
+                            variant = client.playVariant(entry.fid, NetdiskQualityGuard.RANK_4K);
+                        }
+                    } catch (Throwable t) {
+                        error = t.getMessage() == null ? "取播放地址失败" : t.getMessage();
+                    }
+                    final QuarkDriveClient.PlayVariant done = variant;
+                    final String err = error;
+                    a.ui.post(
+                            () ->
+                                    onPlaybackResolved(
+                                            entry,
+                                            cookie,
+                                            client,
+                                            done,
+                                            err,
+                                            downgrades,
+                                            fromRank,
+                                            relaxMissingTier));
+                });
+    }
+
+    /** Runs on the UI thread after the URL (or its error) is known. */
+    private void onPlaybackResolved(
+            final QuarkDriveClient.Entry entry,
+            final String cookie,
+            final QuarkDriveClient client,
+            final QuarkDriveClient.PlayVariant variant,
+            final String error,
+            final int downgrades,
+            final int fromRank,
+            final boolean relaxMissingTier) {
+        if (error != null) {
+            // Keep the user's current playback untouched when an automatic switch fails.
+            if (fromRank > 0) a.toast("切换画质失败：" + error);
+            else a.notice(error);
+            return;
+        }
+        if (variant == null || variant.url == null || variant.url.isEmpty()) {
+            if (fromRank > 0) a.toast("没有更低一档可切，继续用当前画质");
+            else if (relaxMissingTier) a.notice("没拿到播放地址");
+            else a.toast("这个文件没有所选画质，换一个档位试试");
+            return;
+        }
+        if (fromRank > 0 && (variant.rank <= 0 || variant.rank >= fromRank)) {
+            // The service has no lower tier for this file: keep playing the current one.
+            a.toast("没有更低一档可切，继续用当前画质");
+            return;
+        }
+        Cms.Site site = new Cms.Site();
+        site.key = "netdisk-native";
+        site.name = "我的夸克网盘";
+        Cms.Video video = new Cms.Video();
+        video.id = entry.fid;
+        video.title = entry.name;
+        Cms.Episode episode = new Cms.Episode();
+        episode.name = entry.name;
+        episode.url = variant.url;
+        try {
+            episode.media.put("_noCache", true);
+            // MPV handles high-bitrate 4K on this box far better than the Media3/MediaCodec path;
+            // netdisk files opt in. When MPV is unavailable this episode falls back to MoviePlayer,
+            // whose PlayStats listener feeds NetdiskQualityGuard's drop-rate detection.
+            episode.media.put("_forceMpv", true);
+            // Only native netdisk playback carries this marker. NetdiskQualityGuard.arm refuses
+            // every episode without it, so ordinary web lines are never silently downgraded.
+            episode.media.put("_netdiskNative", true);
+        } catch (org.json.JSONException ignored) {
+            // org.json's checked exception; the flag is optional.
+        }
+        episode.headers.put("Cookie", cookie);
+        episode.headers.put("User-Agent", "Mozilla/5.0");
+        episode.headers.put("Referer", "https://pan.quark.cn/");
+        a.openPlayer(site, video, episode);
+        if (fromRank > 0 && variant.rank > 0) {
+            a.toast(
+                    "设备跑不动"
+                            + NetdiskQualityGuard.labelOfRank(fromRank)
+                            + "，已切换到"
+                            + NetdiskQualityGuard.labelOfRank(variant.rank));
+        }
+        NetdiskQualityGuard.arm(
+                a,
+                episode,
+                variant.rank,
+                variant.resolution,
+                downgrades,
+                new NetdiskQualityGuard.Hooks() {
+                    @Override
+                    public void restart(int maxRank, int nextDowngrades, int from) {
+                        if (a.isFinishing()) return;
+                        startNetdiskPlayback(
+                                entry, cookie, client, maxRank, nextDowngrades, from, false);
+                    }
+
+                    @Override
+                    public void hint(String message) {
+                        a.toast(message);
+                    }
+                });
+    }
+
+    private static String size(long bytes) {
+        if (bytes <= 0) return "";
+        if (bytes >= 1073741824L) {
+            return String.format(Locale.ROOT, "%.1f GB", bytes / 1073741824d);
+        }
+        if (bytes >= 1048576L) {
+            return String.format(Locale.ROOT, "%.0f MB", bytes / 1048576d);
+        }
+        return String.format(Locale.ROOT, "%.0f KB", bytes / 1024d);
+    }
+}
