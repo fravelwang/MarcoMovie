@@ -7,7 +7,7 @@
   <h1>Marco Movie</h1>
   <p>支持 Android 电视、手机、平板，HarmonyOS NEXT（手机 / 平板 / 智慧屏），Apple TV（tvOS）及 Windows / macOS / iOS 多端自适应的播放器。</p>
   <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.7.0 · Android 电视：0.6.2 · Android Lite：0.5.8 · Windows：0.7.1 · macOS：0.5.20 · iOS：0.7.0 · Apple TV：0.1.1 · HarmonyOS NEXT：0.1.1 · 各端独立更新</p>
-  <p><a href="https://marcotv.wlj9919.top/movie/">镜像下载与产品展示</a> · <a href="https://github.com/Pilipala9919/MarcoMovie/releases">GitHub 下载</a> · <a href="docs/USER_GUIDE.md">使用指南</a> · <a href="docs/BUILD.md">构建说明</a> · <a href="docs/PRIVACY.md">隐私说明</a></p>
+  <p><a href="https://github.com/fravelwang/MarcoMovie/releases">GitHub 下载</a> · <a href="docs/USER_GUIDE.md">使用指南</a> · <a href="docs/BUILD.md">构建说明</a> · <a href="docs/PRIVACY.md">隐私说明</a></p>
 </div>
 
 > **本产品仅为播放与内容管理工具，不内置、不提供、不托管、不售卖任何影视资源，也不提供影视资源配置地址、账号或会员权益。内容及配置需由用户自行合法获取，并确保拥有相应访问和使用权。**
@@ -42,7 +42,7 @@ Marco Movie 希望让大屏电视、随身手机、平板电脑与桌面端上�
 
 ## 安装与开始使用
 
-1. 在 [镜像下载页](https://marcotv.wlj9919.top/movie/) 或 [Releases](https://github.com/Pilipala9919/MarcoMovie/releases) 下载对应系统的安装包，并核对随附的 SHA-256 文件。
+1. 在 [Releases](https://github.com/fravelwang/MarcoMovie/releases) 下载对应系统的安装包，并核对随附的 SHA-256 文件。
 2. 根据设备选择独立安装包：
    - **Android 设备**：电视/盒子用 `-android-tv.apk`（ARM 32 位），手机/平板用 `-android-mobile.apk`（ARM 32/64 位）；旧 Android 4.0+ 设备选择独立 `-android-lite.apk`。
    - **Apple TV（tvOS 16.0+）**：下载 `-tvos-appletv-unsigned.ipa` 未签名包，通过 Xcode、Sideloadly、自签工具或巨魔（TrollStore tvOS）安装。
@@ -84,6 +84,8 @@ docs/                   产品、使用、构建、隐私与验证说明
 
 当前构建流程基于 Windows、Python 3、JDK 17 与 Android SDK 工具。构建时从依赖发布方下载清单中固定版本的依赖并校验摘要。详见[构建说明](docs/BUILD.md)；不会下载影视配置或内容。
 
+> **Fork 说明**：本仓库 fork 自 [Pilipala9919/MarcoMovie](https://github.com/Pilipala9919/MarcoMovie)，按 GPL-3.0-only 继续分发，保留原作者署名与许可证。
+
 ## 作者与第三方致谢
 
 **Marco Movie · Pilipala**  
@@ -94,13 +96,6 @@ Copyright © 2026 Pilipala
 
 原创代码、文档和项目品牌素材按 [GNU GPL v3（GPL-3.0-only）](LICENSE) 发布，另有声明的文件除外。修改与分发时请遵守许可证并保留署名；第三方组件继续适用各自许可。详见 [NOTICE](NOTICE)。
 
-## 捐赠支持
-
-Marco Movie 完全免费开源，捐赠全凭自愿，不影响任何功能。感谢你的支持。
-
-| 微信收款码 | 支付宝收款码 |
-| --- | --- |
-| <img src="docs/images/donate-wechat.jpg" width="260" alt="微信捐赠收款码"> | <img src="docs/images/donate-alipay.jpg" width="260" alt="支付宝捐赠收款码"> |
 
 ## 工具与内容声明
 
