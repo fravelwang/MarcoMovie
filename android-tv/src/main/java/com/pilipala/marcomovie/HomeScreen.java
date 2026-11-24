@@ -2809,6 +2809,15 @@ final class HomeScreen {
             String referer = cardSite.api == null ? "" : cardSite.api.trim();
             if (referer.startsWith("http")) posterHeaders.put("Referer", referer);
         }
+        // Draw a readable placeholder immediately: many poster hosts are unreachable from this box
+        // (socket timeouts), and an empty dark rectangle reads as "broken". The real artwork
+        // replaces it as soon as it loads.
+        art.setImageBitmap(
+                posterPlaceholder(
+                        a,
+                        Math.max(1, a.dp(posterWidth)),
+                        Math.max(1, Math.round(a.dp(posterWidth) * 1.5f)),
+                        video.title));
         // The wall appends rows lazily, so the art view has no size yet when this runs. Loading at
         // w=0 means the decode target collapses and nothing is ever drawn; defer until laid out.
         final java.util.Map<String, String> deferredHeaders = posterHeaders;
@@ -2873,6 +2882,38 @@ final class HomeScreen {
     Cms.Site siteFor(Cms.Video video) {
         List<Cms.Site> sources = wallSources(video);
         return sources.isEmpty() ? site : sources.get(0);
+    }
+
+    /** Solid gradient + first title character, used until (or instead of) the real artwork. */
+    static android.graphics.Bitmap posterPlaceholder(
+            MainActivity a, int width, int height, String title) {
+        try {
+            android.graphics.Bitmap bitmap =
+                    android.graphics.Bitmap.createBitmap(
+                            width, height, android.graphics.Bitmap.Config.ARGB_8888);
+            android.graphics.Canvas canvas = new android.graphics.Canvas(bitmap);
+            android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+            paint.setShader(
+                    new android.graphics.LinearGradient(
+                            0,
+                            0,
+                            width,
+                            height,
+                            new int[] {0xff2b3550, 0xff1a2030},
+                            null,
+                            android.graphics.Shader.TileMode.CLAMP));
+            canvas.drawRect(0, 0, width, height, paint);
+            String mark = title == null || title.trim().isEmpty() ? "" : title.trim().substring(0, 1);
+            paint.setShader(null);
+            paint.setColor(0x66ffffff);
+            paint.setTextSize(height * 0.34f);
+            paint.setTextAlign(android.graphics.Paint.Align.CENTER);
+            paint.setTypeface(Typeface.DEFAULT_BOLD);
+            canvas.drawText(mark, width / 2f, height * 0.58f, paint);
+            return bitmap;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     /** Loads a wall card's artwork once the view has a real size (retries a few frames). */

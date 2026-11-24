@@ -198,8 +198,8 @@ final class ImageLoader {
             }
         }
         connection.setInstanceFollowRedirects(true);
-        connection.setConnectTimeout(12000);
-        connection.setReadTimeout(20000);
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(25000);
         if (headers != null) {
             for (Map.Entry<String, String> header : headers.entrySet())
                 connection.setRequestProperty(header.getKey(), header.getValue());
@@ -457,8 +457,8 @@ final class ImageLoader {
                                 connection.setRequestProperty(h.getKey(), h.getValue());
                         }
                         applyArtworkHeaders(connection, currentUrl, source.headers);
-                        connection.setConnectTimeout(4500);
-                        connection.setReadTimeout(5500);
+                        connection.setConnectTimeout(15000);
+                        connection.setReadTimeout(25000);
                         if (!hasCustomUa && ua != null) {
                             connection.setRequestProperty("User-Agent", ua);
                         }
