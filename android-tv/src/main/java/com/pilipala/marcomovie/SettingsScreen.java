@@ -2624,15 +2624,19 @@ final class SettingsScreen {
                 new String[] {"10 秒", "20 秒", "30 秒"},
                 new int[] {10, 20, 30},
                 20);
+        // Adding only. Switching between saved packages lives in 片源与订阅 and on the home
+        // screen, so this entry must not read like a second switcher.
         link(
-                "导入或更新配置源",
+                "添加订阅源",
                 a.isTvDevice()
-                        ? "手机扫码、遥控输入或本地包（支持多行地址自动分组）"
-                        : "剪贴板粘贴、网址输入或本地包 (.json/.js/.py/.zip)",
+                        ? "手机扫码、遥控输入或本地包，新增一份订阅源（多行地址自动分组）"
+                        : "剪贴板粘贴、网址输入或本地包 (.json/.js/.py/.zip)，新增一份订阅源",
                 "settings-import",
                 a::importDialog);
         if (a.isTvDevice()) {
-            link("已添加源与线路管理", "切换订阅、多源合并自动分组或管理线路", "settings-source-manager", a::chooseOrImport);
+            // Primary entry for the active package: switching packages, the line list inside a
+            // package, and merging or deleting saved subscriptions.
+            link("片源与订阅", "切换片源包、管理线路、多源合并或删除已添加的订阅", "settings-source-manager", a::chooseOrImport);
         }
         toggle("导入的订阅源每天自动更新", Prefs.SUBSCRIPTION_AUTO_UPDATE, true, null);
         link(
@@ -2664,9 +2668,11 @@ final class SettingsScreen {
         toggle("直播优先最高画质与 IPv6", Prefs.LIVE_HIGH_QUALITY, true, null);
         toggle("跨源同名频道智能聚合", Prefs.LIVE_MERGE_SOURCES, true, null);
         if (a.config != null && a.config.depots.length() > 1) {
+            // Switches the sub-warehouse inside the active package. Package-level switching is
+            // 片源与订阅 above, so the wording says so instead of offering a second switcher.
             link(
-                    "切换影视仓线路",
-                    "当前订阅包含 " + a.config.depots.length() + " 个子仓库，点击切换",
+                    "切换当前订阅的子仓库",
+                    "当前片源包包含 " + a.config.depots.length() + " 个子仓库，只在本包内换线路；换整份订阅请用「片源与订阅」",
                     "settings-depots",
                     () -> SourcePicker.showWarehouses(a));
         }

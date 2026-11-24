@@ -838,6 +838,33 @@ final class HomeScreen {
         }
     }
 
+    /**
+     * "当前片源包：<name>" for the hero eyebrow. The name always comes from {@link
+     * SourceController#configName} so the label matches what the settings screen shows, and it
+     * never renders empty. configName() already appends " · N 个片源" for multi-site packages, so
+     * the extra number here only covers the single-site case or the subset that search reaches.
+     */
+    private String sourcePackageLabel() {
+        String name = "";
+        try {
+            name = SourceController.configName(a.config);
+        } catch (Throwable ignored) {
+        }
+        if (name == null || name.trim().isEmpty()) name = "未命名";
+        int total = 0, searchable = 0;
+        if (a.config != null) {
+            total = a.config.sites.size();
+            for (Cms.Site s : a.config.sites) if (s.searchable) searchable++;
+        }
+        StringBuilder out = new StringBuilder("当前片源包：").append(name.trim());
+        if (total == 1) {
+            out.append(" · 1 个源");
+        } else if (total > 1 && searchable != total) {
+            out.append("（可搜索 ").append(searchable).append("）");
+        }
+        return out.toString();
+    }
+
     private View buildCuratedHeroCard(final List<Cms.Video> heroList) {
         float density = Math.max(0.5f, a.getResources().getDisplayMetrics().density);
         int winHDp = Math.round(a.windowHeight() / density);
@@ -887,10 +914,50 @@ final class HomeScreen {
         info.setClipChildren(false);
         info.setClipToPadding(false);
 
-        TextView eyebrow = a.text("首页推荐 · 近期热门", 12f, 0xdceef4ff);
-        eyebrow.setTypeface(null, Typeface.BOLD);
-        eyebrow.setShadowLayer(a.dp(6), 0, a.dp(1), 0xb0000000);
-        info.addView(eyebrow);
+        // Active source package: the saved subscription currently feeding this home. The name
+        // comes from SourceController.configName(), which already appends the total site count;
+        // the searchable count is only added when some sites opt out of search.
+        LinearLayout packageRow = a.row();
+        packageRow.setGravity(Gravity.CENTER_VERTICAL);
+        packageRow.setClipChildren(false);
+        final TextView packageName = a.text(sourcePackageLabel(), 12f, 0xdceef4ff);
+        packageName.setTypeface(null, Typeface.BOLD);
+        packageName.setSingleLine(true);
+        packageName.setEllipsize(TextUtils.TruncateAt.END);
+        packageName.setMaxWidth(a.dp(460));
+        packageName.setShadowLayer(a.dp(6), 0, a.dp(1), 0xb0000000);
+        packageRow.addView(packageName, new LinearLayout.LayoutParams(-2, -2));
+
+        final TextView packageSwitch = a.text("⟩ 切换", 11.5f, 0xdceef4ff);
+        packageSwitch.setGravity(Gravity.CENTER);
+        packageSwitch.setIncludeFontPadding(false);
+        packageSwitch.setPadding(a.dp(10), 0, a.dp(10), 0);
+        packageSwitch.setContentDescription("切换当前片源包");
+        packageSwitch.setShadowLayer(a.dp(6), 0, a.dp(1), 0xb0000000);
+        focusable(packageSwitch, "home-source-package-switch");
+        packageSwitch.setBackground(a.bg(0x33ffffff, 999));
+        packageSwitch.setOnClickListener(v -> SourceSwitchDialog.show(a));
+        packageSwitch.setOnFocusChangeListener(
+                (v, f) ->
+                        FocusMotion.style(
+                                a,
+                                packageSwitch,
+                                f,
+                                0x33ffffff,
+                                0xffffffff,
+                                13,
+                                0xffdceef4,
+                                0xff111318,
+                                true,
+                                1.04f));
+        LinearLayout.LayoutParams packageSwitchLp = new LinearLayout.LayoutParams(-2, a.dp(26));
+        packageSwitchLp.leftMargin = a.dp(10);
+        packageRow.addView(packageSwitch, packageSwitchLp);
+        info.addView(packageRow, new LinearLayout.LayoutParams(-2, -2));
+        // The pill sits above the hero title, and D-pad focus search from the play button is
+        // geometric: it jumps to the top dock instead of landing here. Wire the pair explicitly so
+        // the switch is always reachable with one UP from play (and back down again).
+        heroPackageSwitchId = packageSwitch.getId();
         a.gap(info, 5);
 
         final TextView titleTv = a.text("", fullBleedTvHero ? 31f : 28f, MainActivity.WHITE);
@@ -933,6 +1000,31 @@ final class HomeScreen {
         actionRow.setClipChildren(false);
 
         final TextView playBtn = a.text("▶  立即观看", 14.5f, 0xff111318);
+        playBtn.setId(View.generateViewId());
+        // Geometric focus search from play jumps to the top dock, so wire UP/DOWN by hand. A key
+        // listener is used instead of nextFocusUpId because the pill's position on screen makes
+        // the FocusFinder prefer the dock even when the id link is set.
+        final View switchPill = info.findViewWithTag("home-source-package-switch");
+        if (switchPill != null) {
+            playBtn.setOnKeyListener(
+                    (v, keyCode, event) -> {
+                        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
+                                && event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
+                            switchPill.requestFocus();
+                            return true;
+                        }
+                        return false;
+                    });
+            switchPill.setOnKeyListener(
+                    (v, keyCode, event) -> {
+                        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN
+                                && event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
+                            playBtn.requestFocus();
+                            return true;
+                        }
+                        return false;
+                    });
+        }
         playBtn.setTypeface(null, Typeface.BOLD);
         playBtn.setGravity(Gravity.CENTER);
         playBtn.setPadding(a.dp(26), 0, a.dp(26), 0);
@@ -2504,6 +2596,8 @@ final class HomeScreen {
         text.setSingleLine(true);
         text.setEllipsize(TextUtils.TruncateAt.END);
     }
+
+    private int heroPackageSwitchId;
 
     void focusable(View view, String tag) {
         view.setTag(tag);

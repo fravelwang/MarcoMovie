@@ -179,13 +179,6 @@ final class TvV17MineScreen {
                                     new MainActivity.Screen(() -> new TvLocalDriveScreen(a).show()),
                                     true)),
             buildActionTile(
-                    ICON_CLOUD,
-                    0xff34d399,
-                    "网盘与账号",
-                    "扫码登录",
-                    "mine-accounts",
-                    () -> AccountPanel.show(a, null)),
-            buildActionTile(
                     ICON_CAST,
                     0xff38bdf8,
                     "无线投屏",
