@@ -866,6 +866,7 @@ final class HomeScreen {
         drawGrid(false);
         updateMore();
         wireNavigation();
+        refreshWallLayout();
         if (a.current != null && a.current.focus == null && !rows.isEmpty()) {
             List<View> firstRow = rows.get(0);
             View first = firstRow.isEmpty() ? source : firstRow.get(0);
@@ -874,6 +875,29 @@ final class HomeScreen {
                 restoreFocus();
             }
         }
+    }
+
+    /**
+     * The wall cards are appended into {@code content}, the same vertical host the single-site list
+     * used inside the scroll page. A wall that arrives after the page was measured can leave the
+     * scroll range and the filter pill's DOWN target stuck on the pre-wall layout, so ask for one
+     * more measure and rebind the pill on the next frame.
+     */
+    void refreshWallLayout() {
+        if (content == null) return;
+        content.requestLayout();
+        if (a.body != null) a.body.requestLayout();
+        final LinearLayout wallHost = content;
+        content.postOnAnimation(
+                () -> {
+                    if (!active() || content != wallHost) return;
+                    content.requestLayout();
+                    if (a.body != null) a.body.requestLayout();
+                    wireNavigation();
+                    if (source != null && !rows.isEmpty() && !rows.get(0).isEmpty()) {
+                        source.setNextFocusDownId(rows.get(0).get(0).getId());
+                    }
+                });
     }
 
     void updateLibraryFilterPill() {

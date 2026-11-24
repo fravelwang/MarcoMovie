@@ -31,6 +31,10 @@ import java.util.concurrent.TimeUnit;
  * {@link #MIN_OK_SITES} usable sites does wave 2 retry up to {@link #MAX_RETRY_SITES} previously
  * failing sites, oldest failure first, and only while at least {@link #MIN_RETRY_BUDGET_MS} of the
  * shared 15 s budget is left. Whatever has arrived when the budget ends is merged and rendered.
+ *
+ * <p>Both waves rotate. Wave 1 walks never-tried sites through {@link #CURSOR_KEY}; wave 2 walks
+ * the failed set through {@link #RETRY_CURSOR_KEY}, so a long failure list is covered by
+ * successive rounds instead of retrying the same oldest batch every time.
  */
 final class LibraryAggregator {
     static final String TAG = "LibraryAgg";
@@ -45,6 +49,9 @@ final class LibraryAggregator {
 
     /** Prefs key holding the rotation cursor over never-tried sites. */
     static final String CURSOR_KEY = "library_agg_cursor";
+
+    /** Prefs key holding the rotation cursor over previously failing sites (wave 2). */
+    static final String RETRY_CURSOR_KEY = "library_agg_retry_cursor";
     static final long TOTAL_TIMEOUT_MS = 15000L;
     static final int MAX_ITEMS = 200;
 
@@ -56,6 +63,9 @@ final class LibraryAggregator {
 
     /** Wave 2 is skipped when the remaining budget cannot give a site a fair chance. */
     static final long MIN_RETRY_BUDGET_MS = 2000L;
+
+    /** Slack on top of the retry slice so wave 1's reserved deadline cannot fail the 2 s check. */
+    static final long RETRY_SLICE_SLACK_MS = 250L;
 
     /** Home screen reuses a finished wall for this long before aggregating again. */
     static final long CACHE_TTL_MS = 5 * 60 * 1000L;
@@ -213,29 +223,49 @@ final class LibraryAggregator {
         int wave1Ok = 0;
         int retried = 0;
         int retriedOk = 0;
+        int retryStart = -1;
         try {
-            wave1Ok = fetchWave(a, result, healthy, outcomes, tasks, pool, timer, deadline);
+            // A site that ignores the per-site watchdog can keep wave 1 waiting until the shared
+            // deadline. Reserve the retry slice up front so a failed site list still gets its
+            // rotation instead of wave 2 being skipped every round.
+            final long wave1Deadline =
+                    retry.isEmpty()
+                            ? deadline
+                            : deadline - MIN_RETRY_BUDGET_MS - RETRY_SLICE_SLACK_MS;
+            wave1Ok = fetchWave(a, result, healthy, outcomes, tasks, pool, timer, wave1Deadline);
             if (wave1Ok < MIN_OK_SITES
                     && !retry.isEmpty()
                     && deadline - android.os.SystemClock.elapsedRealtime() >= MIN_RETRY_BUDGET_MS) {
-                // Oldest failure first so successive rounds rotate through the failed set.
+                // Oldest failure first keeps the order stable across rounds; the cursor then walks
+                // that order so successive rounds sample the whole failed set instead of retrying
+                // the same first batch forever.
                 Collections.sort(
                         retry,
                         (left, right) ->
                                 Long.compare(
                                         SiteHealth.failedAt(a, result.targets.get(left).key),
                                         SiteHealth.failedAt(a, result.targets.get(right).key)));
+                final int start =
+                        Math.max(0, a.prefs == null ? 0 : a.prefs.getInt(RETRY_CURSOR_KEY, 0))
+                                % retry.size();
+                retryStart = start;
                 retried = Math.min(MAX_RETRY_SITES, retry.size());
+                final List<Integer> batch = new ArrayList<>(retried);
+                for (int taken = 0; taken < retried; taken++) {
+                    batch.add(retry.get((start + taken) % retry.size()));
+                }
+                if (a.prefs != null) {
+                    a.prefs.edit()
+                            .putInt(RETRY_CURSOR_KEY, (start + retried) % retry.size())
+                            .apply();
+                }
+                // Free the pool slots wave 1 left behind; a cancelled fetch reports no outcome, so
+                // nothing is written to SiteHealth for it.
+                for (FutureTask<SiteOutcome> task : tasks) {
+                    if (!task.isDone()) task.cancel(true);
+                }
                 retriedOk =
-                        fetchWave(
-                                a,
-                                result,
-                                retry.subList(0, retried),
-                                outcomes,
-                                tasks,
-                                pool,
-                                timer,
-                                deadline);
+                        fetchWave(a, result, batch, outcomes, tasks, pool, timer, deadline);
             }
         } catch (Throwable failure) {
             result.timedOut = true;
@@ -300,7 +330,9 @@ final class LibraryAggregator {
                         + retried
                         + " -> "
                         + retriedOk
-                        + " ok, ok sites "
+                        + " ok, retry from "
+                        + (retryStart < 0 ? "-" : String.valueOf(retryStart))
+                        + ", ok sites "
                         + result.okSites);
         return result;
     }
