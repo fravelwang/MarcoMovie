@@ -2431,6 +2431,20 @@ final class PlaybackControls {
         return skipCountdownPill != null && skipCountdownPill.isActive();
     }
 
+    /** True when two episodes carry the same size in their share ident (same file on the drive). */
+    static boolean sameShareSize(Cms.Episode left, Cms.Episode right) {
+        String a = shareIdentSize(left);
+        String b = shareIdentSize(right);
+        return !a.isEmpty() && a.equals(b);
+    }
+
+    /** Fifth {@code ++} segment of a netdisk episode id (the file size in bytes). */
+    static String shareIdentSize(Cms.Episode episode) {
+        if (episode == null || episode.url == null) return "";
+        String[] parts = episode.url.split("\\+\\+", -1);
+        return parts.length == 5 ? parts[4].trim() : "";
+    }
+
     /** First 1-3 digit run in a name ("03.mp4", "quark原画12", "E07"), 0 when there is none. */
     static int episodeNumber(String name) {
         if (name == null || name.isEmpty()) return 0;
@@ -2461,6 +2475,25 @@ final class PlaybackControls {
             // several lines instead of one list. When this line runs out, continue on the
             // neighbouring line that actually has episodes; looping mode stays inside the line.
             if (a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 2) return false;
+            // The source spreads a show over several single-episode lines that all point at the same
+            // share directory, so the real next episode is the next file inside that share. The
+            // resolver leaves its ident on the played episode.
+            Cms.Episode playing = playbackEpisode();
+            String nextShareUrl =
+                    playing == null ? "" : playing.media.optString("_nextShareUrl", "");
+            if (direction > 0 && !nextShareUrl.trim().isEmpty()) {
+                Cms.Episode synthetic = new Cms.Episode();
+                synthetic.url = nextShareUrl.trim();
+                String nextName = playing.media.optString("_nextShareName", "");
+                synthetic.name = nextName.trim().isEmpty() ? "下一集" : nextName;
+                AppLog.w("TransStep", "pick next-in-share " + synthetic.name);
+                transitioning = true;
+                resetEpisodeTransientState();
+                markSleepTimerInPlaceSwitch();
+                if (a.touchPlayerGesture != null) a.touchPlayerGesture.onEpisodeSwitch();
+                a.changeEpisode(site, video, line, synthetic, 0);
+                return true;
+            }
             // Some netdisk sources expose one file per line, so "next" must be chosen by episode
             // number and not by line order: walking the line list wraps back to episode 1 and
             // replays it forever. Pick the smallest number above the current one (largest below for
@@ -2476,6 +2509,9 @@ final class PlaybackControls {
                         if (candidateEpisode == null) continue;
                         int number = episodeNumber(candidateEpisode.name);
                         if (number <= 0) continue;
+                        // Several single-episode lines can point at the very same file; advancing to
+                        // one of those replays what just finished. Same byte size means same file.
+                        if (sameShareSize(playing, candidateEpisode)) continue;
                         if (direction > 0) {
                             if (number > current && number < bestNumber) {
                                 bestNumber = number;

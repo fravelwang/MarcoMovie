@@ -942,6 +942,18 @@ final class PlaybackController {
                 // episode as its origin so auto-next advances through the real episode list and
                 // resolves the next episode natively again.
                 nativeEp.origin = ep;
+        // Auto-next needs the next file inside the same share; carry it on both objects because
+        // playback state keeps the original episode while the address lives on the synthesized one.
+        String nextShareUrl = nativeEp.media.optString("_nextShareUrl", "");
+        if (!nextShareUrl.isEmpty()) {
+            try {
+                ep.media.put("_nextShareUrl", nextShareUrl);
+                String nextShareName = nativeEp.media.optString("_nextShareName", "");
+                if (!nextShareName.isEmpty()) ep.media.put("_nextShareName", nextShareName);
+            } catch (org.json.JSONException ignored) {
+                // Auto-next simply falls back to the episode list when this copy fails.
+            }
+        }
                 AppLog.w("QuarkShare", "native episode ready name=" + nativeEp.name);
                 return nativeEp;
             }

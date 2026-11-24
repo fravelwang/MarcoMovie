@@ -265,7 +265,19 @@ final class QuarkShareResolver {
             AppLog.w(TAG, "step4/5 failed: no playable url after the save");
             return null;
         }
-        return episode(lineName, hit.name, url, credential.cookie);
+        Cms.Episode playable = episode(lineName, hit.name, url, credential.cookie);
+        if (playable != null) {
+            String nextIdent = identFor(ident, hit.next);
+            if (!nextIdent.isEmpty()) {
+                try {
+                    playable.media.put("_nextShareUrl", nextIdent);
+                    playable.media.put("_nextShareName", hit.next.name);
+                } catch (org.json.JSONException ignored) {
+                    // Auto-next then just stops at the end of this episode.
+                }
+            }
+        }
+        return playable;
     }
 
     // ---------------------------------------------------------------- step 3: share listing
@@ -275,12 +287,26 @@ final class QuarkShareResolver {
         final String fid;
         final String token;
         final String name;
+        final long size;
+        /** Next file in the same share directory, in name order (null on the last one). */
+        final ShareHit next;
 
-        ShareHit(String fid, String token, String name) {
+        ShareHit(String fid, String token, String name, long size, ShareHit next) {
             this.fid = fid;
             this.token = token;
             this.name = name;
+            this.size = size;
+            this.next = next;
         }
+    }
+
+    /**
+     * Ident string for the next file of the same share, in the same {@code ++} shape the plugin
+     * hands us: fid + file token + pwd_id + stoken + size.
+     */
+    private static String identFor(Ident ident, ShareHit hit) {
+        if (hit == null) return "";
+        return hit.fid + "++" + hit.token + "++" + ident.pwdId + "++" + ident.stoken + "++" + hit.size;
     }
 
     /**
@@ -301,6 +327,7 @@ final class QuarkShareResolver {
             JsonObject body = shareDetail(cookie, ident, dir);
             JsonArray list = dataList(body);
             if (list == null) continue;
+            final List<ShareHit> files = new ArrayList<>();
             for (JsonElement item : list) {
                 if (item == null || !item.isJsonObject()) continue;
                 JsonObject obj = item.getAsJsonObject();
@@ -312,12 +339,25 @@ final class QuarkShareResolver {
                 String fid = optString(obj, "fid");
                 String token = optString(obj, "share_fid_token");
                 if (fid.isEmpty() || token.isEmpty()) continue;
-                if (fid.equals(ident.fid)) {
-                    return new ShareHit(fid, token, optString(obj, "file_name"));
-                }
-                if (bySize == null && optLong(obj, "size", -1L) == ident.size) {
-                    bySize = new ShareHit(fid, token, optString(obj, "file_name"));
-                }
+                files.add(
+                        new ShareHit(
+                                fid,
+                                token,
+                                optString(obj, "file_name"),
+                                optLong(obj, "size", -1L),
+                                null));
+            }
+            // The listing is sorted by name, so the file after the matched one is the next episode
+            // inside this share. That is what auto-next follows when the source spreads a show over
+            // several single-episode lines that all point at the same directory.
+            for (int index = 0; index < files.size(); index++) {
+                ShareHit candidate = files.get(index);
+                boolean match = candidate.fid.equals(ident.fid);
+                if (!match && bySize == null && candidate.size == ident.size) bySize = candidate;
+                if (!match) continue;
+                ShareHit next = index + 1 < files.size() ? files.get(index + 1) : null;
+                return new ShareHit(
+                        candidate.fid, candidate.token, candidate.name, candidate.size, next);
             }
         }
         return bySize;
