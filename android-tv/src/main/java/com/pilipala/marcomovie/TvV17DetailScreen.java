@@ -15,6 +15,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -47,6 +48,9 @@ final class TvV17DetailScreen {
         0xff2b4c6f, 0xff4b3a69, 0xff28544b, 0xff6b4431, 0xff3b4c63, 0xff5a374b
     };
 
+    /** Site names shown inline before the source line falls back to "等". */
+    private static final int SOURCE_NAMES_INLINE = 4;
+
     final FrameLayout view;
     final ImmersivePoster cover;
     final LinearLayout seasonHost;
@@ -56,6 +60,7 @@ final class TvV17DetailScreen {
     final Button seasonsBtn;
     final Button scrapeBtn;
     final Button switchSourceBtn;
+    final Button sourceRow;
     final Button favorite;
     final TextView episodeFileView;
     final TextView historyView;
@@ -187,6 +192,20 @@ final class TvV17DetailScreen {
         favLp.leftMargin = a.dp(12);
         titleRow.addView(favorite, favLp);
         heroColumn.addView(titleRow, new LinearLayout.LayoutParams(-1, -2));
+
+        // 1b. "来自 N 个站点：…" — every site the library wall knows for this title; tap to switch.
+        sourceRow =
+                DetailScreen.glassNavButton(
+                        a, "", "detail-sources", false, this::openSourcePicker);
+        sourceRow.setId(View.generateViewId());
+        sourceRow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        sourceRow.setMinHeight(a.dp(32));
+        sourceRow.setMinimumHeight(a.dp(32));
+        sourceRow.setPadding(a.dp(14), a.dp(5), a.dp(14), a.dp(5));
+        sourceRow.setVisibility(View.GONE);
+        LinearLayout.LayoutParams sourceLp = new LinearLayout.LayoutParams(-2, a.dp(32));
+        sourceLp.topMargin = a.dp(10);
+        heroColumn.addView(sourceRow, sourceLp);
 
         // 2. Unified Nameplate Badges Row: Year · Country/Region · Seasons · Episodes ·
         // 4K/HDR/Dolby · Ratings · Source
@@ -391,6 +410,7 @@ final class TvV17DetailScreen {
         applyRatings(0.0, -1);
         rebuildNameplateBadges();
         populateCast(ImmersivePoster.parseCastNamesFallback(video.director, video.actor));
+        refreshSourceRow();
 
         // Kick off verified official HD landscape artwork, ratings, and Douban metadata/cast
         boolean likelyTv =
@@ -460,6 +480,94 @@ final class TvV17DetailScreen {
         } else if (switchSourceBtn.getVisibility() == View.VISIBLE) {
             favorite.setNextFocusDownId(switchSourceBtn.getId());
         }
+        // The source line sits between the title and the action row; it takes the first D-pad step.
+        if (sourceRow != null && sourceRow.getVisibility() == View.VISIBLE) {
+            sourceRow.setNextFocusUpId(favorite.getId());
+            sourceRow.setNextFocusDownId(play.isEnabled() ? play.getId() : View.NO_ID);
+            favorite.setNextFocusDownId(sourceRow.getId());
+        }
+    }
+
+    /** Sites the library wall knows for this title; the wall is the one fact source for switching. */
+    private List<Cms.Site> knownSources() {
+        MainActivity a = host;
+        if (a == null || video == null) return Collections.emptyList();
+        LibraryAggregator.Result wall = a.libraryWall;
+        if (wall == null || a.libraryWallEpoch != a.engineEpoch) return Collections.emptyList();
+        return wall.sourcesOf(video);
+    }
+
+    /** Shows "来自 N 个站点：…" only when switching would actually do something. */
+    private void refreshSourceRow() {
+        List<Cms.Site> sources = knownSources();
+        if (sources.size() < 2) {
+            sourceRow.setText("");
+            sourceRow.setVisibility(View.GONE);
+            wireHeroFocus();
+            return;
+        }
+        StringBuilder label = new StringBuilder();
+        label.append("来自 ").append(sources.size()).append(" 个站点：");
+        int shown = Math.min(SOURCE_NAMES_INLINE, sources.size());
+        for (int i = 0; i < shown; i++) {
+            if (i > 0) label.append(" / ");
+            label.append(siteDisplayName(sources.get(i)));
+        }
+        if (sources.size() > shown) label.append(" 等");
+        sourceRow.setText(label.toString());
+        sourceRow.setContentDescription(label + "，按确认键换站");
+        sourceRow.setVisibility(View.VISIBLE);
+        wireHeroFocus();
+    }
+
+    /** Picker over the wall-known sites; choosing one reopens this title on that site. */
+    private void openSourcePicker() {
+        final MainActivity a = host;
+        if (a == null) return;
+        final LibraryAggregator.Result wall = a.libraryWall;
+        final List<Cms.Site> sources =
+                wall == null || a.libraryWallEpoch != a.engineEpoch
+                        ? Collections.emptyList()
+                        : wall.sourcesOf(video);
+        if (sources.size() < 2) {
+            // The wall may have been rebuilt since this row was drawn; say so instead of opening an
+            // empty picker.
+            a.toast("这部片暂时没有可切换的站点");
+            return;
+        }
+        String[] labels = new String[sources.size()];
+        int checked = -1;
+        for (int i = 0; i < sources.size(); i++) {
+            Cms.Site candidate = sources.get(i);
+            boolean current = site != null && candidate.key.equals(site.key);
+            labels[i] = siteDisplayName(candidate) + (current ? "（当前）" : "");
+            if (current) checked = i;
+        }
+        new AppDialog.Builder(a)
+                .setTitle("换站观看")
+                .setSingleChoiceItems(
+                        labels,
+                        checked,
+                        (dialog, which) -> {
+                            if (which < 0 || which >= sources.size()) return;
+                            Cms.Site target = sources.get(which);
+                            if (site != null && target.key.equals(site.key)) return;
+                            Cms.Video listing = wall.videoAt(video, target.key);
+                            if (listing == null) {
+                                a.toast("「" + siteDisplayName(target) + "」里没有找到这部剧");
+                                return;
+                            }
+                            a.openListing(target, listing);
+                        })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private static String siteDisplayName(Cms.Site candidate) {
+        if (candidate == null) return "";
+        String name = candidate.name == null ? "" : candidate.name.trim();
+        if (!name.isEmpty()) return name;
+        return candidate.key == null ? "" : candidate.key;
     }
 
     static String cleanSynopsisText(String raw) {
@@ -594,6 +702,7 @@ final class TvV17DetailScreen {
                     hasMultipleEpisodes(this.video));
         }
         rebuildNameplateBadges();
+        refreshSourceRow();
         wireHeroFocus();
     }
 

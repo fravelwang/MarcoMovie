@@ -61,9 +61,6 @@ final class HomeScreen {
     /** Library wall filter: empty lists every aggregated site, otherwise a single site key. */
     String librarySiteFilter = "";
 
-    final Map<Cms.Video, Cms.Site> wallSiteByVideo = new IdentityHashMap<>();
-    final Map<Cms.Video, Integer> wallSourcesByVideo = new IdentityHashMap<>();
-
     static final class Snapshot {
         long time = System.currentTimeMillis();
         final List<Cms.Video> videos;
@@ -827,13 +824,6 @@ final class HomeScreen {
 
     void applyLibraryWall(LibraryAggregator.Result result) {
         if (result == null || state == null || content == null) return;
-        wallSiteByVideo.clear();
-        wallSourcesByVideo.clear();
-        for (LibraryAggregator.Item item : result.items) {
-            if (item == null || item.video == null || item.sites.isEmpty()) continue;
-            wallSiteByVideo.put(item.video, item.sites.get(0));
-            wallSourcesByVideo.put(item.video, item.sites.size());
-        }
         List<Cms.Video> videos = new ArrayList<>();
         for (LibraryAggregator.Item item : result.items) {
             if (item == null || item.video == null) continue;
@@ -2880,19 +2870,22 @@ final class HomeScreen {
         return card;
     }
 
+    /** The sites that carried this card, straight from the aggregation result. */
+    List<Cms.Site> wallSources(Cms.Video video) {
+        if (video == null) return Collections.emptyList();
+        LibraryAggregator.Result wall = a.libraryWall;
+        if (wall == null || a.libraryWallEpoch != a.engineEpoch) return Collections.emptyList();
+        return wall.sourcesOf(video);
+    }
+
     /** The site a wall card opens with: its first aggregated source, or the screen site. */
     Cms.Site siteFor(Cms.Video video) {
-        if (video != null) {
-            Cms.Site first = wallSiteByVideo.get(video);
-            if (first != null) return first;
-        }
-        return site;
+        List<Cms.Site> sources = wallSources(video);
+        return sources.isEmpty() ? site : sources.get(0);
     }
 
     int librarySourceCount(Cms.Video video) {
-        if (video == null) return 0;
-        Integer count = wallSourcesByVideo.get(video);
-        return count == null ? 0 : count;
+        return wallSources(video).size();
     }
 
     /** Small "N 源" corner pill, styled like the existing Douban badge. */

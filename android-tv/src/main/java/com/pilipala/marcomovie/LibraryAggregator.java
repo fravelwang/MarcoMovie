@@ -3,6 +3,7 @@ package com.pilipala.marcomovie;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,14 +25,37 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Numbers are product decisions, not tuning knobs: 12 items per site, 6 concurrent fetches, 8 s
  * per site, 15 s for the whole aggregation, 200 cards at most.
+ *
+ * <p>A round runs in two waves. Wave 1 only touches sites that worked last time or were never
+ * tried; its outcome per site is written to {@link SiteHealth}. Only when wave 1 yields fewer than
+ * {@link #MIN_OK_SITES} usable sites does wave 2 retry up to {@link #MAX_RETRY_SITES} previously
+ * failing sites, oldest failure first, and only while at least {@link #MIN_RETRY_BUDGET_MS} of the
+ * shared 15 s budget is left. Whatever has arrived when the budget ends is merged and rendered.
  */
 final class LibraryAggregator {
     static final String TAG = "LibraryAgg";
     static final int PER_SITE_LIMIT = 12;
     static final int MAX_CONCURRENCY = 6;
-    static final long SITE_TIMEOUT_MS = 8000L;
+    // A shorter per-site timeout lets one 15 s budget reach ~18 sites instead of ~11; sites that
+    // need longer than this are usually dead or engine-backed anyway.
+    static final long SITE_TIMEOUT_MS = 5000L;
+
+    /** Wave 1 only looks at this many sites per round; a cursor rotates through the rest. */
+    static final int MAX_WAVE1_SITES = 36;
+
+    /** Prefs key holding the rotation cursor over never-tried sites. */
+    static final String CURSOR_KEY = "library_agg_cursor";
     static final long TOTAL_TIMEOUT_MS = 15000L;
     static final int MAX_ITEMS = 200;
+
+    /** Wave 2 only starts when wave 1 produced fewer usable sites than this. */
+    static final int MIN_OK_SITES = 8;
+
+    /** Wave 2 is capped so a bad config cannot stretch a single round far beyond the budget. */
+    static final int MAX_RETRY_SITES = 60;
+
+    /** Wave 2 is skipped when the remaining budget cannot give a site a fair chance. */
+    static final long MIN_RETRY_BUDGET_MS = 2000L;
 
     /** Home screen reuses a finished wall for this long before aggregating again. */
     static final long CACHE_TTL_MS = 5 * 60 * 1000L;
@@ -72,6 +96,10 @@ final class LibraryAggregator {
     static final class Result {
         final List<Item> items = new ArrayList<>();
         final List<Cms.Site> targets = new ArrayList<>();
+        /** Card index by exact listing object and by merge key, so any Cms.Video can ask. */
+        private final Map<Cms.Video, Item> itemsByVideo = new IdentityHashMap<>();
+        private final Map<String, Item> itemsByTitle = new LinkedHashMap<>();
+
         int okSites, emptySites, failedSites;
         boolean timedOut;
         long loadedAt;
@@ -86,6 +114,30 @@ final class LibraryAggregator {
 
         boolean hasContent() {
             return !items.isEmpty();
+        }
+
+        /**
+         * The card holding this listing. Wall cards resolve by object identity; search results,
+         * curated recommendations and history entries resolve by the same normalized title the wall
+         * merges on, so all three entry points share one source list.
+         */
+        Item itemFor(Cms.Video video) {
+            if (video == null) return null;
+            Item item = itemsByVideo.get(video);
+            if (item != null) return item;
+            return itemsByTitle.get(normalizeTitle(video.title));
+        }
+
+        /** Every site carrying this title, in config order; empty when the wall never saw it. */
+        List<Cms.Site> sourcesOf(Cms.Video video) {
+            Item item = itemFor(video);
+            return item == null ? Collections.emptyList() : Collections.unmodifiableList(item.sites);
+        }
+
+        /** That site's own listing entry, or null when the site did not carry the title. */
+        Cms.Video videoAt(Cms.Video video, String siteKey) {
+            Item item = itemFor(video);
+            return item == null || siteKey == null ? null : item.videosBySite.get(siteKey);
         }
     }
 
@@ -121,7 +173,6 @@ final class LibraryAggregator {
 
         final int count = result.targets.size();
         final SiteOutcome[] outcomes = new SiteOutcome[count];
-        final BlockingQueue<SiteOutcome> finished = new LinkedBlockingQueue<>();
         final ScheduledExecutorService timer =
                 Executors.newSingleThreadScheduledExecutor(daemonFactory("movie-library-timer"));
         final ExecutorService pool =
@@ -130,33 +181,63 @@ final class LibraryAggregator {
         final List<FutureTask<SiteOutcome>> tasks = new ArrayList<>(count);
         final long deadline = android.os.SystemClock.elapsedRealtime() + TOTAL_TIMEOUT_MS;
 
+        // Wave 1 takes sites remembered as healthy or never tried; wave 2 is the failed retry batch.
+        // Known-good sites always come first so the wall stays stable, then never-tried sites in a
+        // rotating window: one round cannot try 400+ sites inside the budget, but successive rounds
+        // walk through them and the good ones stick.
+        final List<Integer> knownOk = new ArrayList<>(count);
+        final List<Integer> untried = new ArrayList<>(count);
+        final List<Integer> retry = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            String state = SiteHealth.state(a, result.targets.get(i).key);
+            if (SiteHealth.OK.equals(state)) knownOk.add(i);
+            else if (SiteHealth.FAIL.equals(state)) retry.add(i);
+            else untried.add(i);
+        }
+        final List<Integer> healthy = new ArrayList<>(MAX_WAVE1_SITES);
+        healthy.addAll(knownOk.size() > MAX_WAVE1_SITES
+                ? knownOk.subList(0, MAX_WAVE1_SITES)
+                : knownOk);
+        int room = MAX_WAVE1_SITES - healthy.size();
+        if (room > 0 && !untried.isEmpty()) {
+            int cursor = Math.max(0, a.prefs == null ? 0 : a.prefs.getInt(CURSOR_KEY, 0));
+            int start = cursor % untried.size();
+            for (int taken = 0; taken < room && taken < untried.size(); taken++) {
+                healthy.add(untried.get((start + taken) % untried.size()));
+            }
+            if (a.prefs != null) {
+                a.prefs.edit().putInt(CURSOR_KEY, (start + room) % Math.max(1, untried.size())).apply();
+            }
+        }
+
+        int wave1Ok = 0;
+        int retried = 0;
+        int retriedOk = 0;
         try {
-            for (int i = 0; i < count; i++) {
-                SiteTask callable = new SiteTask(a, result.targets.get(i), i, timer, finished);
-                FutureTask<SiteOutcome> task = new FutureTask<SiteOutcome>(callable);
-                callable.task = task;
-                tasks.add(task);
-                pool.execute(task);
+            wave1Ok = fetchWave(a, result, healthy, outcomes, tasks, pool, timer, deadline);
+            if (wave1Ok < MIN_OK_SITES
+                    && !retry.isEmpty()
+                    && deadline - android.os.SystemClock.elapsedRealtime() >= MIN_RETRY_BUDGET_MS) {
+                // Oldest failure first so successive rounds rotate through the failed set.
+                Collections.sort(
+                        retry,
+                        (left, right) ->
+                                Long.compare(
+                                        SiteHealth.failedAt(a, result.targets.get(left).key),
+                                        SiteHealth.failedAt(a, result.targets.get(right).key)));
+                retried = Math.min(MAX_RETRY_SITES, retry.size());
+                retriedOk =
+                        fetchWave(
+                                a,
+                                result,
+                                retry.subList(0, retried),
+                                outcomes,
+                                tasks,
+                                pool,
+                                timer,
+                                deadline);
             }
-            int received = 0;
-            while (received < count) {
-                long remaining = deadline - android.os.SystemClock.elapsedRealtime();
-                if (remaining <= 0) {
-                    result.timedOut = true;
-                    break;
-                }
-                SiteOutcome outcome = finished.poll(remaining, TimeUnit.MILLISECONDS);
-                if (outcome == null) {
-                    result.timedOut = true;
-                    break;
-                }
-                received++;
-                if (outcomes[outcome.index] == null) outcomes[outcome.index] = outcome;
-            }
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            result.timedOut = true;
-        } catch (Throwable ignored) {
+        } catch (Throwable failure) {
             result.timedOut = true;
         } finally {
             for (FutureTask<SiteOutcome> task : tasks) {
@@ -167,26 +248,34 @@ final class LibraryAggregator {
         }
 
         // Merge in config order so the first source of a card is stable across runs.
-        Map<String, Item> merged = new LinkedHashMap<>();
         for (int i = 0; i < count; i++) {
             Cms.Site site = result.targets.get(i);
             SiteOutcome outcome = outcomes[i];
-            if (outcome == null || outcome.videos == null || outcome.elapsedMs > SITE_TIMEOUT_MS) {
+            if (outcome == null) {
+                // The round ended before this site started or answered: no evidence, no health write.
                 result.failedSites++;
                 AppLog.w(TAG, site.key + " -> fail");
                 continue;
             }
+            if (!outcome.usable()) {
+                result.failedSites++;
+                SiteHealth.markFailed(a, site);
+                AppLog.w(TAG, site.key + " -> fail");
+                continue;
+            }
             result.okSites++;
+            SiteHealth.markOk(a, site);
             if (outcome.videos.isEmpty()) result.emptySites++;
             AppLog.w(TAG, site.key + " -> ok");
             for (Cms.Video video : outcome.videos) {
                 String key = normalizeTitle(video.title);
                 if (key.isEmpty()) continue;
-                Item item = merged.get(key);
+                Item item = result.itemsByTitle.get(key);
                 if (item == null) {
                     item = new Item(video);
-                    merged.put(key, item);
+                    result.itemsByTitle.put(key, item);
                 }
+                result.itemsByVideo.put(video, item);
                 if (!item.videosBySite.containsKey(site.key)) {
                     item.sites.add(site);
                     item.videosBySite.put(site.key, video);
@@ -194,13 +283,78 @@ final class LibraryAggregator {
             }
         }
 
-        result.items.addAll(merged.values());
+        result.items.addAll(result.itemsByTitle.values());
         Collections.sort(result.items, WALL_ORDER);
         while (result.items.size() > MAX_ITEMS) {
             result.items.remove(result.items.size() - 1);
         }
         result.loadedAt = System.currentTimeMillis();
+        // Last line of the round so it survives the bounded in-memory log ring.
+        AppLog.w(
+                TAG,
+                "round: wave1 "
+                        + healthy.size()
+                        + " -> "
+                        + wave1Ok
+                        + " ok, wave2 "
+                        + retried
+                        + " -> "
+                        + retriedOk
+                        + " ok, ok sites "
+                        + result.okSites);
         return result;
+    }
+
+    /**
+     * Fetches one batch of sites against the shared deadline. Outcomes land in {@code outcomes} by
+     * config index; returns how many sites produced a usable listing.
+     */
+    private static int fetchWave(
+            MainActivity a,
+            Result result,
+            List<Integer> indexes,
+            SiteOutcome[] outcomes,
+            List<FutureTask<SiteOutcome>> tasks,
+            ExecutorService pool,
+            ScheduledExecutorService timer,
+            long deadline) {
+        if (indexes.isEmpty()) return 0;
+        final BlockingQueue<SiteOutcome> finished = new LinkedBlockingQueue<>();
+        for (int index : indexes) {
+            SiteTask callable = new SiteTask(a, result.targets.get(index), index, timer, finished);
+            FutureTask<SiteOutcome> task = new FutureTask<SiteOutcome>(callable);
+            callable.task = task;
+            tasks.add(task);
+            pool.execute(task);
+        }
+        int received = 0;
+        while (received < indexes.size()) {
+            long remaining = deadline - android.os.SystemClock.elapsedRealtime();
+            if (remaining <= 0) {
+                result.timedOut = true;
+                break;
+            }
+            SiteOutcome outcome;
+            try {
+                outcome = finished.poll(remaining, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                result.timedOut = true;
+                break;
+            }
+            if (outcome == null) {
+                result.timedOut = true;
+                break;
+            }
+            received++;
+            if (outcomes[outcome.index] == null) outcomes[outcome.index] = outcome;
+        }
+        int ok = 0;
+        for (int index : indexes) {
+            SiteOutcome outcome = outcomes[index];
+            if (outcome != null && outcome.usable()) ok++;
+        }
+        return ok;
     }
 
     /** Whitespace-insensitive title key; Chinese titles often differ only by spaces. */
@@ -247,6 +401,11 @@ final class LibraryAggregator {
             this.index = index;
             this.videos = videos;
             this.elapsedMs = elapsedMs;
+        }
+
+        /** A listing that arrived inside the per-site budget counts as healthy, empty or not. */
+        boolean usable() {
+            return videos != null && elapsedMs <= SITE_TIMEOUT_MS;
         }
     }
 
