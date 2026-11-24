@@ -1,3 +1,4 @@
+import 'cookie_client.dart';
 import 'netdisk_session.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -259,7 +260,7 @@ class NetdiskService {
   }
 
   NetdiskService({http.Client? httpClient, QuarkAccountProvider? quarkAccounts})
-      : _http = httpClient ?? http.Client(),
+      : _http = httpClient ?? CookieClient(),
         _ownsClient = httpClient == null {
     _quarkAccounts = quarkAccounts ??
         QuarkAccountProvider(
@@ -295,6 +296,13 @@ class NetdiskService {
   /// tokens must never be sent to a third-party QR image service.
   static String buildQrRenderUrl(String content) => '';
 
+  /// A replacement QR code must never inherit the previous attempt's session
+  /// cookies: Quark/UC bind the QR token to the cookies of the creating request.
+  void _resetCookies() {
+    final client = _http;
+    if (client is CookieClient) client.clear();
+  }
+
   /// Starts a real QR login session with the official cloud drive passport API.
   Future<NetdiskQrSession> createQrSession(String driveKey) =>
       startQrSession(driveKey);
@@ -303,6 +311,7 @@ class NetdiskService {
 
   Future<NetdiskQrSession> startQrSession(String driveKey) async {
     if (_closed) throw const FormatException('网盘登录已关闭，请重新打开');
+    _resetCookies();
     final baiduGeneration = driveKey == 'baidu' ? ++_baiduGeneration : null;
     final ts = DateTime.now().millisecondsSinceEpoch;
     try {
