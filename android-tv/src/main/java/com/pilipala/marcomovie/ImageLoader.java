@@ -486,6 +486,7 @@ final class ImageLoader {
                         byte[] bytes = out.toByteArray();
                         if (bytes.length > 128) {
                             writeDiskCachedPoster(a, candidate, bytes);
+                            PosterHostHealth.markOk(a, candidate);
                             return bytes;
                         }
                     }
@@ -569,6 +570,7 @@ final class ImageLoader {
                 }
             }
         }
+        PosterHostHealth.markFailed(a, candidates.length > 0 ? candidates[0] : "");
         if (lastError != null) {
             AppLog.w(
                     "Poster",

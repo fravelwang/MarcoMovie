@@ -2821,7 +2821,7 @@ final class HomeScreen {
         // The wall appends rows lazily, so the art view has no size yet when this runs. Loading at
         // w=0 means the decode target collapses and nothing is ever drawn; defer until laid out.
         final java.util.Map<String, String> deferredHeaders = posterHeaders;
-        final String deferredPoster = video.poster;
+        final String deferredPoster = bestWallPoster(a, video);
         loadCardPoster(a, art, deferredPoster, deferredHeaders, 0);
         TextView title = a.text(video.title, 13, 0xffc8c8d0);
         single(title);
@@ -2882,6 +2882,26 @@ final class HomeScreen {
     Cms.Site siteFor(Cms.Video video) {
         List<Cms.Site> sources = wallSources(video);
         return sources.isEmpty() ? site : sources.get(0);
+    }
+
+    /**
+     * Poster to try first for a wall card: the aggregated item carries every source of this title,
+     * and some hosts are known dead from this box, so prefer a poster whose host has not failed.
+     */
+    String bestWallPoster(MainActivity a, Cms.Video video) {
+        String primary = video == null ? null : video.poster;
+        if (a.libraryWall == null || video == null) return primary;
+        if (!PosterHostHealth.suspect(a, primary)) return primary;
+        for (Cms.Site source : a.libraryWall.sourcesOf(video)) {
+            if (source == null) continue;
+            Cms.Video candidate = a.libraryWall.videoAt(video, source.key);
+            if (candidate == null) continue;
+            String poster = candidate.poster;
+            if (poster == null || poster.trim().isEmpty()) continue;
+            if (PosterHostHealth.suspect(a, poster)) continue;
+            return poster;
+        }
+        return primary;
     }
 
     /** Solid gradient + first title character, used until (or instead of) the real artwork. */
