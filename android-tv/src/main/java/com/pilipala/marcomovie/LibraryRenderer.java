@@ -828,7 +828,12 @@ final class LibraryRenderer {
         // video object belongs to whichever site the wall sampled first, so opening its id against
         // another site would fail — the default site must be opened with its own listing.
         SourceLedger.Sources resolved = SourceLedger.resolve(host.a, video);
-        Cms.Site cardSite = resolved.defaultSite != null ? resolved.defaultSite : host.site;
+        // A catalog-only card has no listing of its own: it must not fall back to the screen's
+        // site, or prefetch/warm would ask that site for a "curated:" id. It opens through
+        // TvDetailHost.openCurated, which itself reads the ledger first.
+        final boolean curatedCard = TvCuratedHome.isCuratedVideo(video);
+        Cms.Site ledgerSite = resolved.defaultSite;
+        final Cms.Site cardSite = ledgerSite != null ? ledgerSite : (curatedCard ? null : host.site);
         Cms.Video cardVideo = resolved.defaultListing != null ? resolved.defaultListing : video;
         boolean showDoubanBadge =
                 !SourceController.isConfigOrNetdiskActionCard(cardSite, cardVideo);
@@ -879,6 +884,12 @@ final class LibraryRenderer {
         // and the page still opens 王子｜APP.
         card.setOnClickListener(
                 v -> {
+                    if (TvCuratedHome.isCuratedVideo(video)) {
+                        // Metadata-only card: the recommendation page is the open path. It reads
+                        // the ledger first, so once a real source is known this opens that source.
+                        TvDetailHost.openCurated(host.a, video);
+                        return;
+                    }
                     SourceLedger.Sources now = SourceLedger.resolve(host.a, video);
                     Cms.Site target = now.defaultSite != null ? now.defaultSite : cardSite;
                     Cms.Video listing = now.defaultListing != null ? now.defaultListing : cardVideo;
@@ -913,7 +924,7 @@ final class LibraryRenderer {
                                         if (v.hasFocus() && host.active()) {
                                             SourceController.warmEngineOnFocus(host.a, cardSite);
                                             SourceController.prefetchDetail(
-                                                    host.a, cardSite, video);
+                                                    host.a, cardSite, cardVideo);
                                             SourceController.expandFocusedSources(
                                                     host.a, cardSite, video);
                                         }

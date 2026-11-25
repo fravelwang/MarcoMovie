@@ -586,6 +586,12 @@ public final class MainActivity extends Activity {
     int libraryWallEpoch = -1;
     /** The one source ledger of the process; see {@link SourceLedger}. */
     final SourceLedger sourceLedger = new SourceLedger();
+    /** Debounced ledger writer; every "补源" path re-posts it instead of writing per hit. */
+    private final Runnable ledgerSave = this::saveLedgerNow;
+    /** False while no config was available at startup: never overwrite a ledger we did not read. */
+    private boolean ledgerLoaded;
+    /** Whether the ledger file already existed when this session started. */
+    private boolean ledgerFileExisted;
     boolean libraryWallLoading;
     /**
      * Library source selection, kept on the activity because every home rebuild constructs a new
@@ -1106,6 +1112,15 @@ public final class MainActivity extends Activity {
         } catch (Exception e) {
             AppLog.w("MainActivity", "load saved config failed", e);
             config = null;
+        }
+        // The source ledger survives restarts: what a site was verified to carry must not fall
+        // back to "1 源" after a cold start. Read synchronously (a small JSON file) so the first
+        // wall round already sees it; pruning drops sites from packages the config no longer has.
+        File ledgerFile = new File(getFilesDir(), SourceLedger.FILE_NAME);
+        ledgerFileExisted = ledgerFile.isFile();
+        if (!privateMode && config != null && config.sites != null && !config.sites.isEmpty()) {
+            sourceLedger.loadFrom(ledgerFile, config.sites);
+            ledgerLoaded = true;
         }
         // Phone / tablet only: restore the offline download queue (never started on TV).
         if (!isTvDevice()) DownloadManager.get(this);
@@ -1651,6 +1666,64 @@ public final class MainActivity extends Activity {
 
     void closeEngines() {
         SourceController.closeEngines(this);
+    }
+
+    /**
+     * A source was learned or invalidated: schedule the debounced disk write. Cheap to call from
+     * any thread; the file is rewritten 5 s after the last change, and again on stop.
+     */
+    void onLedgerChanged() {
+        if (privateMode || isFinishing() || isDestroyed()) return;
+        ui.removeCallbacks(ledgerSave);
+        ui.postDelayed(ledgerSave, SourceLedger.SAVE_DEBOUNCE_MS);
+    }
+
+    /**
+     * Serializes and writes the ledger. The debounced background path runs the prune + JSON on the
+     * worker (a large ledger must not jank a render); the stop path runs it inline because the
+     * process may be killed before a worker gets scheduled.
+     */
+    void saveLedgerNow() {
+        saveLedgerNow(false);
+    }
+
+    void saveLedgerNow(boolean inStop) {
+        ui.removeCallbacks(ledgerSave);
+        if (privateMode) return;
+        // No config at startup means the file was never read; do not clobber it from a session
+        // that only saw part of the library. A file that did not exist is safe to create.
+        if (!ledgerLoaded && ledgerFileExisted) return;
+        if (!sourceLedger.dirty()) return;
+        final List<Cms.Site> sites = config == null ? null : config.sites;
+        final File file = new File(getFilesDir(), SourceLedger.FILE_NAME);
+        if (inStop) {
+            writeLedger(file, sites);
+            return;
+        }
+        try {
+            worker.execute(() -> writeLedger(file, sites));
+        } catch (Throwable rejected) {
+            AppLog.w("MainActivity", "source ledger write rejected", rejected);
+        }
+    }
+
+    private void writeLedger(File file, List<Cms.Site> sites) {
+        SourceLedger.Snapshot snapshot =
+                sourceLedger.snapshot(sites, System.currentTimeMillis());
+        if (snapshot == null) return;
+        if (SourceLedger.writeAtomic(file, snapshot.json)) {
+            AppLog.w(
+                    "MainActivity",
+                    "source ledger saved: titles="
+                            + sourceLedger.titleCount()
+                            + " sources="
+                            + sourceLedger.sourceCount()
+                            + " bytes="
+                            + file.length());
+            ui.post(() -> sourceLedger.markSaved(snapshot.revision));
+        } else {
+            AppLog.w("MainActivity", "source ledger write failed");
+        }
     }
 
     void capturePendingDetailOrigin(View sourceCard) {
@@ -3373,6 +3446,9 @@ public final class MainActivity extends Activity {
         }
         stopCastService();
         clearLiveNumber();
+        // Last reliable moment to persist the ledger before the process may be killed; inline
+        // because a worker task would race the kill.
+        saveLedgerNow(true);
         if (startupIntro != null) startupIntro.cancel();
         introSkipKey = false;
         savePlaybackHistory(true);

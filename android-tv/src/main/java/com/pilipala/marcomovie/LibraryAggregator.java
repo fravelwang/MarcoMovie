@@ -19,12 +19,18 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Builds the cross-site library wall: every searchable, playable site contributes the first page of
- * its home listing (or its first category), entries are merged by normalized title and sorted by
- * source count. All work is bounded so the wall can never stall the home screen.
+ * Builds the cross-site library wall as a stable index: every searchable, playable site contributes
+ * the first page of its home listing (or its first category), the recommendation catalog contributes
+ * metadata-only cards, and both are merged by normalized title. All work is bounded so the wall can
+ * never stall the home screen.
+ *
+ * <p>Why metadata cards: a site's home page is a 40-item sample, so a show can be on the wall one
+ * round and gone the next (《两京十五日》 disappeared across two scans). The catalog adds the titles
+ * Boss expects to see, as cards that open through the recommendation path until the ledger learns a
+ * real source for them.
  *
  * <p>Numbers are product decisions, not tuning knobs: 12 items per site, 6 concurrent fetches, 8 s
- * per site, 15 s for the whole aggregation, 200 cards at most.
+ * per site, 15 s for the whole aggregation, 240 cards at most (200 sampled + ~40 catalog titles).
  *
  * <p>A round runs in two waves. Wave 1 only touches sites that worked last time or were never
  * tried; its outcome per site is written to {@link SiteHealth}. Only when wave 1 yields fewer than
@@ -71,7 +77,12 @@ final class LibraryAggregator {
     /** Prefs key holding the rotation cursor over previously failing sites (wave 2). */
     static final String RETRY_CURSOR_KEY = "library_agg_retry_cursor";
     static final long TOTAL_TIMEOUT_MS = 18000L;
-    static final int MAX_ITEMS = 200;
+    /**
+     * The wall's hard card cap. 200 sampled cards (the old limit) plus the recommendation catalog
+     * (hero + up to 18 dramas + up to 18 movies, deduplicated) so metadata cards never push a
+     * sampled card off the wall. This is the only place the number lives.
+     */
+    static final int MAX_ITEMS = 240;
 
     /** Wave 2 only starts when wave 1 produced fewer usable sites than this. */
     static final int MIN_OK_SITES = 8;
@@ -110,6 +121,11 @@ final class LibraryAggregator {
         final Cms.Video video;
         final List<Cms.Site> sites = new ArrayList<>();
         final Map<String, Cms.Video> videosBySite = new LinkedHashMap<>();
+        /**
+         * True when only the recommendation catalog carries this title (no site sampled it). Its
+         * poster and metadata come from Douban; the ledger decides whether any source can open it.
+         */
+        boolean curated;
 
         Item(Cms.Video video) {
             this.video = video;
@@ -347,8 +363,12 @@ final class LibraryAggregator {
             mergeSite(result, site, outcome.videos);
         }
 
+        // The stable index: sampled cards in wall order, then catalog-only cards in catalog order,
+        // then one stable pass by source tier (multi → single → metadata-only).
         result.items.addAll(result.itemsByTitle.values());
         Collections.sort(result.items, WALL_ORDER);
+        addCuratedItems(a, result);
+        sortByIndexTier(a, result);
         while (result.items.size() > MAX_ITEMS) {
             result.items.remove(result.items.size() - 1);
         }
@@ -367,8 +387,94 @@ final class LibraryAggregator {
                         + " ok, retry from "
                         + (retryStart < 0 ? "-" : String.valueOf(retryStart))
                         + ", ok sites "
-                        + result.okSites);
+                        + result.okSites
+                        + ", cards "
+                        + result.items.size()
+                        + " (catalog-only "
+                        + countCurated(result.items)
+                        + ")");
         return result;
+    }
+
+    private static int countCurated(List<Item> items) {
+        int count = 0;
+        for (Item item : items) if (item != null && item.curated) count++;
+        return count;
+    }
+
+    /**
+     * Adds one metadata-only card per recommendation title the site sample did not already carry.
+     * Order is hero → recent dramas → hot movies, deduplicated by normalized title, which is also
+     * the order those cards keep inside the metadata tier. Rate/review data can be absent (offline
+     * seeds); the card then falls back to the placeholder poster.
+     */
+    private static void addCuratedItems(MainActivity a, Result result) {
+        if (a == null || a.privateMode) return;
+        TvCuratedHome.Catalog catalog;
+        try {
+            catalog = TvCuratedHome.peekOrSeed();
+        } catch (Throwable ignored) {
+            return;
+        }
+        if (catalog == null) return;
+        List<Cms.Video> all = new ArrayList<>();
+        all.addAll(catalog.hero);
+        all.addAll(catalog.hotDramas);
+        all.addAll(catalog.hotMovies);
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (Cms.Video video : all) {
+            if (video == null || video.title == null || video.title.trim().isEmpty()) continue;
+            String key = normalizeTitle(video.title);
+            if (key.isEmpty() || result.itemsByTitle.containsKey(key) || !seen.add(key)) continue;
+            Item item = new Item(video);
+            item.curated = true;
+            result.itemsByTitle.put(key, item);
+            result.itemsByVideo.put(video, item);
+            // The catalog tier has to reach the rendered list: registering it in the title index
+            // alone left every recommendation card invisible and the wall a pure site sample.
+            result.items.add(item);
+        }
+    }
+
+    /**
+     * Re-merges the recommendation catalog into an already-built wall. The catalog is fetched
+     * asynchronously and usually lands after the round, so without this the first wall of a session
+     * is a pure site sample and the hot titles the home page shows are missing from 片库.
+     */
+    static void refreshCatalog(MainActivity a, Result result) {
+        if (a == null || result == null || result.items == null) return;
+        int before = result.items.size();
+        try {
+            addCuratedItems(a, result);
+        } catch (Throwable ignored) {
+            return;
+        }
+        if (result.items.size() == before) return;
+        sortByIndexTier(a, result);
+        while (result.items.size() > MAX_ITEMS) result.items.remove(result.items.size() - 1);
+    }
+
+    /**
+     * Tier order for the stable index: a title with two or more known sources first, then exactly
+     * one, then metadata-only cards nothing can open yet. The sort is stable, so each tier keeps
+     * the order it arrived in (sampled by source count then title, catalog by catalog order).
+     *
+     * <p>Counts include the ledger on purpose: a card whose sites were sampled in an earlier round
+     * must not slide down to the metadata tier just because this round's home listing missed it.
+     */
+    private static void sortByIndexTier(MainActivity a, Result result) {
+        final java.util.Map<Item, Integer> tiers = new IdentityHashMap<>();
+        for (Item item : result.items) {
+            int count = item.sites.size();
+            if (a != null) {
+                for (Cms.Site site : a.sourceLedger.sourcesOf(item.video)) {
+                    if (site == null || site.key == null) continue;
+                    if (!item.videosBySite.containsKey(site.key)) count++;
+                }
+            }
+            tiers.put(item, count >= 2 ? 2 : (count == 1 ? 1 : 0));
+        }
+        Collections.sort(result.items, (left, right) -> Integer.compare(tiers.get(right), tiers.get(left)));
     }
 
     /**

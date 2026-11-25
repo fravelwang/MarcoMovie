@@ -588,6 +588,9 @@ final class TvV17DetailScreen {
                             if (site != null && target.key.equals(site.key)) return;
                             Cms.Video listing = known.listingAt(target.key);
                             if (listing == null) {
+                                // A stale ledger entry: remember the miss so the cleanup pass
+                                // drops the source after its second failure.
+                                SourceLedger.markFailed(a, video, target.key);
                                 a.toast("「" + siteDisplayName(target) + "」里没有找到这部剧");
                                 return;
                             }

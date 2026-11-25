@@ -1891,7 +1891,8 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
             // The results page is a ledger writer, not a second source model: folding the merge in
             // teaches the ledger the titles the 200-card wall never aggregated, and the cards below
             // then read back through SourceLedger.resolve like every other card in the app.
-            a.sourceLedger.absorb(mergedNow);
+            a.sourceLedger.absorb(mergedNow, true);
+            a.onLedgerChanged();
             for (LibraryAggregator.Item item : mergedNow.items) {
                 SourceLedger.Sources resolved = SourceLedger.resolve(a, item.video);
                 Cms.Site site = resolved.defaultSite;

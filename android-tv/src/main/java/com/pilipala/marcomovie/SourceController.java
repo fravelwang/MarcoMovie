@@ -280,9 +280,9 @@ final class SourceController {
         final List<SourceEngine> old;
         synchronized (a) {
             a.engineEpoch++;
-            // Sites from the old config are not the same objects; the ledger's keys would answer
-            // with dead site references, so it starts over with the new epoch.
-            a.sourceLedger.clear();
+            // The ledger is deliberately NOT cleared here: a package switch only drops sites the
+            // new config no longer has (SourceLedger.syncConfig / prune compare by siteKey), so
+            // the titles the user already verified survive the switch and age out by TTL.
             old = new ArrayList<>(a.engines.values());
             a.engines.clear();
             a.engineWarmAttempts.clear();
@@ -685,7 +685,10 @@ final class SourceController {
     static void expandSourcesAsync(MainActivity a, Cms.Site site, Cms.Video video) {
         if (a == null || video == null || a.config == null) return;
         final SourceLedger.Sources known = SourceLedger.resolve(a, video);
-        if (known.isEmpty()) {
+        if (known.isEmpty() && !TvCuratedHome.isCuratedVideo(video)) {
+            // Nothing on the wall knows this title yet. A catalog-only wall card is the exception:
+            // focusing it is exactly the moment to look for its first real source, so the wall
+            // stops showing a metadata-only card for something the user's sites actually carry.
             AppLog.w("SourceExpand", "skip: title not in source ledger: " + video.title);
             return;
         }
@@ -885,6 +888,12 @@ final class SourceController {
                                         });
                             } catch (Throwable error) {
                                 if (Thread.currentThread().isInterrupted()) return;
+                                // "打开某源失败" is one half of compare & refresh: the ledger
+                                // remembers the miss so two consecutive failures prune the source.
+                                if (detailContext.matches(
+                                        a.config, a.privateMode, a.engineEpoch)) {
+                                    SourceLedger.markFailed(a, site == null ? null : site.key, id);
+                                }
                                 a.ui.post(
                                         () -> {
                                             if (a.isFinishing()

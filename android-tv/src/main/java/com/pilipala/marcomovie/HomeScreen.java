@@ -214,6 +214,16 @@ final class HomeScreen {
                                         : null;
                         curatedCatalog = fresh;
                         renderCuratedSection(fresh);
+                        // The wall's catalog tier can only be built once the catalog exists; the
+                        // round usually finished before this, so merge the hot titles into the
+                        // index that is already on screen instead of waiting for the next round.
+                        LibraryAggregator.Result wallNow = a.libraryWall;
+                        if (usesLibraryWall()
+                                && wallNow != null
+                                && a.libraryWallEpoch == a.engineEpoch) {
+                            LibraryAggregator.refreshCatalog(a, wallNow);
+                            applyLibraryWall(wallNow);
+                        }
                         wireNavigation();
                         if (restoreCuratedTag != null && curatedHost != null) {
                             View match = curatedHost.findViewWithTag(restoreCuratedTag);
@@ -803,6 +813,9 @@ final class HomeScreen {
      * ledger survives either way: a failed round is no reason to forget a site that carries a title.
      */
     void ensureLibraryWall(boolean force) {
+        // A package switch may have landed since the last read; re-point the ledger at the new
+        // Site objects (sources from removed packages are dropped, not the whole ledger).
+        a.sourceLedger.syncConfig(a);
         if (!force) {
             LibraryAggregator.Result cached = freshLibraryWall();
             if (cached != null) {
@@ -842,18 +855,22 @@ final class HomeScreen {
                         a.ui.post(
                                 () -> {
                                     List<Runnable> waiters;
+                                    boolean ledgerChanged = false;
                                     synchronized (a) {
                                         if (epoch == a.engineEpoch) {
                                             a.libraryWall = loaded;
                                             a.libraryWallEpoch = epoch;
-                                            // The wall round is one of the four ledger writers: its
-                                            // cards' sites are what "the wall knows" means.
-                                            a.sourceLedger.absorb(loaded);
+                                            // The wall round is one of the four ledger writers: a
+                                            // live round re-verifies the (title, site) pairs it
+                                            // hit, but does not reset a failure counter.
+                                            a.sourceLedger.absorb(loaded, false);
+                                            ledgerChanged = true;
                                         }
                                         a.libraryWallLoading = false;
                                         waiters = new ArrayList<>(a.libraryWallWaiters);
                                         a.libraryWallWaiters.clear();
                                     }
+                                    if (ledgerChanged) a.onLedgerChanged();
                                     for (Runnable waiter : waiters) waiter.run();
                                     if (active() && epoch == a.engineEpoch) {
                                         applyLibraryWall(loaded);
@@ -2973,6 +2990,23 @@ final class HomeScreen {
             if (state.videos.get(i) == video) {
                 index = i;
                 break;
+            }
+        }
+        if (index < 0) {
+            // The detail page reports the site's own listing object; the wall card holds the
+            // catalog/sample object for the same title. Match by the ledger's merge key so a
+            // background match still updates the visible card instead of doing nothing.
+            String key = LibraryAggregator.normalizeTitle(video.title);
+            if (!key.isEmpty()) {
+                for (int i = 0; i < state.videos.size(); i++) {
+                    Cms.Video card = state.videos.get(i);
+                    if (card == null) continue;
+                    if (key.equals(LibraryAggregator.normalizeTitle(card.title))) {
+                        video = card;
+                        index = i;
+                        break;
+                    }
+                }
             }
         }
         if (index < 0) return;

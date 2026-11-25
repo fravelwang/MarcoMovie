@@ -78,6 +78,15 @@ final class TvCuratedHome {
         return site != null && CURATED_SITE_KEY.equals(site.key);
     }
 
+    /**
+     * True for a catalog entry (Douban metadata, no site listing of its own). Its id carries the
+     * {@code curated:} prefix set by {@code parseCollectionVideos} and {@code makeSeed}; the wall
+     * uses this to send the click through {@link TvDetailHost#openCurated} instead of a site open.
+     */
+    static boolean isCuratedVideo(Cms.Video video) {
+        return video != null && video.id != null && video.id.startsWith("curated:");
+    }
+
     static Catalog peekOrSeed() {
         Catalog cached = memoryCatalog;
         if (cached != null && (!cached.hotDramas.isEmpty() || !cached.hotMovies.isEmpty())) {
