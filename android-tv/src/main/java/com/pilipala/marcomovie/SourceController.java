@@ -713,16 +713,21 @@ final class SourceController {
         if (budget <= 0) return;
         final java.util.concurrent.atomic.AtomicInteger pending =
                 new java.util.concurrent.atomic.AtomicInteger(budget);
+        // "向站点要数据" goes through the anti-corruption seam; the decision to search, the
+        // candidate order/budget and the hit rule stay here.
+        final FongMiGateway gateway = new FongMiGateway(a);
         for (int i = 0; i < budget; i++) {
             final Cms.Site candidate = candidates.get(i);
+            final SiteRef siteRef = new SiteRef(candidate.key, candidate.name);
             RequestScope.submit(
                     a.details,
                     () -> {
                         try {
                             if (epoch != a.engineEpoch) return;
-                            Cms.Listing listing =
-                                    Cms.listing(engine(a, candidate).search(title, 1));
-                            for (Cms.Video hit : listing.videos) {
+                            for (MediaRef found : gateway.search(siteRef, title, 1)) {
+                                // The gateway maps a hit back to the base listing; that conversion
+                                // happens only there.
+                                Cms.Video hit = gateway.toListing(found);
                                 if (hit == null) continue;
                                 // Same acceptance rule the curated detail page uses, so a site
                                 // that lists this title with a suffix still lands in the ledger.
@@ -737,8 +742,23 @@ final class SourceController {
                                                 + TvCuratedHome.scoreSourceMatch(video, hit));
                                 break;
                             }
-                        } catch (Throwable ignored) {
-                            // A site that cannot answer is simply not a source for this title.
+                        } catch (GatewayException failure) {
+                            // No more silent swallowing: one bounded line per failure kind.
+                            AppLog.w(
+                                    "SourceGateway",
+                                    siteRef.key
+                                            + " search: "
+                                            + failure.kind
+                                            + " "
+                                            + failure.getMessage());
+                        } catch (Throwable failure) {
+                            AppLog.w(
+                                    "SourceGateway",
+                                    siteRef.key
+                                            + " search: "
+                                            + GatewayException.Kind.OTHER
+                                            + " "
+                                            + failure);
                         } finally {
                             if (pending.decrementAndGet() == 0) {
                                 a.ui.post(
