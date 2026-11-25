@@ -3046,13 +3046,19 @@ final class HomeScreen {
     void updateCardSourceBadge(View card, Cms.Video video) {
         if (card == null || video == null) return;
         int count = librarySourceCount(video);
-        if (count <= 0) return;
-        card.setContentDescription(video.title + "，" + count + " 个来源");
+        // Outside the wall the cards are one site's own listings and carry no source pill at all;
+        // inside it, a zero count means a metadata-only card waiting for its first source.
+        if (count <= 0 && !usesLibraryWall()) return;
+        card.setContentDescription(
+                count > 0
+                        ? video.title + "，" + count + " 个来源"
+                        : video.title + "，待匹配片源");
         if (!(card instanceof android.view.ViewGroup)) return;
         android.view.ViewGroup group = (android.view.ViewGroup) card;
         if (group.getChildCount() == 0) return;
         View artwork = group.getChildAt(0);
         if (!(artwork instanceof FrameLayout)) return;
+        // Upsert: the same tagged pill is restyled, so 待匹配 is replaced by "N 源".
         PosterCard.attachCount(a, (FrameLayout) artwork, count);
     }
 

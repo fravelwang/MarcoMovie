@@ -58,33 +58,53 @@ final class PosterCard {
         return wrap;
     }
 
+    /** Same tag for both states, so an existing pill is restyled instead of duplicated. */
+    static final String TAG_SOURCE_BADGE = "card-source-count";
+
     /**
-     * The bottom-left "N 源" pill: updates the existing one when the card already carries it,
-     * otherwise attaches it. No-op for a zero count (the wall never draws a "0 源" badge).
+     * The bottom-left source pill. {@code count > 0} reads "N 源"; a zero count reads "待匹配" in
+     * the same place — a metadata-only wall card must not look broken. Size, padding, corner and
+     * position are identical for both states; only the text and colours differ (the pending state
+     * is dimmer, never a warning colour).
+     *
+     * <p>Upsert: an existing pill (either state) is restyled in place, so a card that gains a
+     * source later goes 待匹配 → "N 源" without a second badge.
      */
     static void attachCount(MainActivity a, FrameLayout wrap, int count) {
-        if (a == null || wrap == null || count <= 0) return;
-        View existing = wrap.findViewWithTag("card-source-count");
+        if (a == null || wrap == null) return;
+        View existing = wrap.findViewWithTag(TAG_SOURCE_BADGE);
         if (existing instanceof TextView) {
-            ((TextView) existing).setText(count + " 源");
+            styleSourceBadge(a, (TextView) existing, count);
             return;
         }
-        TextView badge = a.text(count + " 源", 10.5f, 0xffe8eef6);
-        badge.setTag("card-source-count");
+        TextView badge = a.text("", 10.5f, 0xffe8eef6);
+        badge.setTag(TAG_SOURCE_BADGE);
         badge.setSingleLine(true);
         badge.setIncludeFontPadding(false);
         badge.setPadding(a.dp(6), a.dp(2.5f), a.dp(6), a.dp(2.5f));
-        android.graphics.drawable.GradientDrawable background =
-                new android.graphics.drawable.GradientDrawable();
-        background.setColor(0xd010141c);
-        background.setCornerRadius(a.dp(6));
-        background.setStroke(Math.max(1, a.dp(0.8f)), 0x443b82f6);
-        badge.setBackground(background);
         FrameLayout.LayoutParams params =
                 new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
         params.leftMargin = a.dp(6);
         params.bottomMargin = a.dp(6);
         wrap.addView(badge, params);
+        styleSourceBadge(a, badge, count);
+    }
+
+    /**
+     * Text + colours for the current count. Layout values (10.5sp / 6,2.5 dp padding / 6 dp corner
+     * / bottom-start, 6+6 dp margins) are set once in {@link #attachCount} and never differ; the
+     * pending state only dims the text and the blue stroke.
+     */
+    private static void styleSourceBadge(MainActivity a, TextView badge, int count) {
+        boolean pending = count <= 0;
+        badge.setText(pending ? "待匹配" : count + " 源");
+        badge.setTextColor(pending ? 0xff8f96a3 : 0xffe8eef6);
+        android.graphics.drawable.GradientDrawable background =
+                new android.graphics.drawable.GradientDrawable();
+        background.setColor(0xd010141c);
+        background.setCornerRadius(a.dp(6));
+        background.setStroke(Math.max(1, a.dp(0.8f)), pending ? 0x223b82f6 : 0x443b82f6);
+        badge.setBackground(background);
     }
 
     /**

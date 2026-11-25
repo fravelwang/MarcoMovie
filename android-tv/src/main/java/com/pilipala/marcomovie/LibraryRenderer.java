@@ -710,8 +710,10 @@ final class LibraryRenderer {
                 artWrap,
                 new LinearLayout.LayoutParams(
                         host.a.dp(host.posterWidth), host.a.dp(host.posterWidth * 1.5f)));
-        int sourceCount = host.usesLibraryWall() ? host.librarySourceCount(video) : 0;
-        if (sourceCount > 0) PosterCard.attachCount(host.a, artWrap, sourceCount);
+        final boolean wallMode = host.usesLibraryWall();
+        int sourceCount = wallMode ? host.librarySourceCount(video) : 0;
+        // Wall cards always carry the pill: "N 源", or "待匹配" while the ledger knows none.
+        if (wallMode) PosterCard.attachCount(host.a, artWrap, sourceCount);
         // Pass the source's headers so poster hosts that require a referer still render, and fall
         // back to a site-derived referer when the spider provides none.
         java.util.Map<String, String> posterHeaders =
@@ -740,7 +742,9 @@ final class LibraryRenderer {
         if (host.a.isTvDevice()) TvFocusFrame.attachCard(card, "home-library-grid");
         host.outline(card, false, 13, Color.TRANSPARENT);
         card.setContentDescription(
-                sourceCount > 0 ? video.title + "，" + sourceCount + " 个来源" : video.title);
+                sourceCount > 0
+                        ? video.title + "，" + sourceCount + " 个来源"
+                        : wallMode ? video.title + "，待匹配片源" : video.title);
         // 打开某部片只有一个入口：openTitle 在按下这一下时重新查账本（账本会在聚焦补搜/搜索/
         // 详情匹配期间增长），所以点位与"谁排第一"永远一致；没有来源的目录卡由它转推荐匹配页。
         card.setOnClickListener(v -> host.a.openTitle(video));
