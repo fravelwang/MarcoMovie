@@ -658,6 +658,21 @@ final class TvV17DetailScreen {
         wireHeroFocus();
     }
 
+    /**
+     * Offers the primary 切换来源 button as soon as the source ledger knows at least two sites for
+     * this title — before the detail binds. The picker only reads the ledger, so it already lists
+     * the other sites while the first one is still fetching its lines.
+     *
+     * @return true when the button was shown (i.e. the ledger knows ≥2 sources)
+     */
+    boolean showKnownSourceSwitch() {
+        if (host == null || video == null) return false;
+        int count = SourceLedger.resolve(host, video).count();
+        if (count < 2) return false;
+        setSourceSwitchAction("⇄ 切换来源 (" + count + ")", this::openSourcePicker);
+        return true;
+    }
+
     void setSourceSwitchAction(String label, Runnable action) {
         this.switchSourceAction = action;
         if (action == null || label == null || label.trim().isEmpty()) {

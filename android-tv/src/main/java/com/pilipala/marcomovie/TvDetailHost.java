@@ -13,6 +13,10 @@ import java.util.Objects;
 final class TvDetailHost {
     static final int CURATED_MAX_SOURCES = 4;
     static final int CURATED_MAX_CONCURRENCY = 1;
+    /** A detail that has not bound its lines after this long gets the slow-source hint. */
+    static final long SLOW_SOURCE_HINT_MS = 6000L;
+    /** Appended under the loading line; the loader itself keeps running. */
+    static final String SLOW_SOURCE_HINT = "当前源较慢，可按「切换来源」换一个";
 
     interface Valid {
         boolean get();
@@ -317,6 +321,8 @@ final class TvDetailHost {
         }
         final Cms.Video[] activeVideo = {initialVideo};
         final WatchHistory.Entry[] activeBookmark = {findBookmark(a, site, initialVideo)};
+        // Flips when the detail binds or fails, so the slow-source hint stops firing.
+        final boolean[] detailSettled = {false};
         final boolean initiallyPlayable = hasPlayableLines(initialVideo);
 
         int[] initSel =
@@ -470,6 +476,8 @@ final class TvDetailHost {
         a.body = ui.content;
 
         if (!initiallyPlayable) {
+            // The ledger already knows the other sites: offer 切换来源 before lines arrive.
+            ui.showKnownSourceSwitch();
             ui.setLoadingStatus("正在获取播放线路…");
             if (screen.focus == null || "detail-back".equals(screen.focus)) {
                 screen.focus = "detail-favorite";
@@ -485,6 +493,7 @@ final class TvDetailHost {
         MainActivity.Done<Cms.Video> bindInPlace =
                 resolved -> {
                     if (!valid.get() || resolved == null) return;
+                    detailSettled[0] = true;
                     mergeListingFallback(resolved, listing);
                     SeriesScrapeStore.OverrideRecord ov =
                             SeriesScrapeStore.load(
@@ -532,7 +541,11 @@ final class TvDetailHost {
                             return;
                         }
                         ui.setLoadingStatus("该来源没有返回可播放线路");
-                        if (resolved.title != null && !resolved.title.trim().isEmpty()) {
+                        // Prefer the ledger picker when another site is known; global search is
+                        // the fallback for a title with a single known source.
+                        if (!ui.showKnownSourceSwitch()
+                                && resolved.title != null
+                                && !resolved.title.trim().isEmpty()) {
                             ui.setSourceSwitchAction(
                                     "🔍 换其他源", () -> a.openSearch(resolved.title.trim()));
                         }
@@ -554,6 +567,7 @@ final class TvDetailHost {
         MainActivity.Done<Throwable> onDetailError =
                 error -> {
                     if (!valid.get()) return;
+                    detailSettled[0] = true;
                     WatchHistory.Entry fallbackBm =
                             activeBookmark[0] != null
                                     ? activeBookmark[0]
@@ -570,8 +584,12 @@ final class TvDetailHost {
                     ui.setLoadingStatus(a.message(error));
                     String fallbackTitle =
                             initialVideo.title != null ? initialVideo.title.trim() : "";
-                    if (!fallbackTitle.isEmpty()) {
+                    // A known alternative is the fastest recovery from a dead source; global
+                    // search stays the fallback when the ledger knows only this one.
+                    if (!ui.showKnownSourceSwitch() && !fallbackTitle.isEmpty()) {
                         ui.setSourceSwitchAction("🔍 全站搜其他源", () -> a.openSearch(fallbackTitle));
+                    }
+                    if (ui.switchSourceBtn.getVisibility() == android.view.View.VISIBLE) {
                         ui.switchSourceBtn.requestFocus();
                     }
                 };
@@ -589,8 +607,24 @@ final class TvDetailHost {
                 a.loadDetail(site, listing.id, bindInPlace, onDetailError);
             }
         } else {
+            scheduleSlowSourceHint(a, ui, detailSettled, valid);
             a.loadDetail(site, listing.id, bindInPlace, onDetailError);
         }
+    }
+
+    /**
+     * One delayed task: if the lines still have not bound after {@link #SLOW_SOURCE_HINT_MS},
+     * append the slow-source hint under the loading line. The loader keeps running; a bind or a
+     * failure marks the detail settled, so the hint never fires then (or is replaced in place).
+     */
+    private static void scheduleSlowSourceHint(
+            MainActivity a, TvV17DetailScreen ui, boolean[] settled, Valid valid) {
+        a.ui.postDelayed(
+                () -> {
+                    if (!valid.get() || settled[0]) return;
+                    ui.setLoadingStatus("正在获取播放线路…\n" + SLOW_SOURCE_HINT);
+                },
+                SLOW_SOURCE_HINT_MS);
     }
 
     /**

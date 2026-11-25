@@ -592,74 +592,134 @@ final class SourceController {
         }
     }
 
+    /** The prewarm budget: the card's default source plus one ledger alternative. */
+    static final int PREFETCH_SOURCE_LIMIT = 2;
+
+    /**
+     * Warms the detail payload of the card's default source and, when the ledger knows another
+     * one, of the next source too (at most {@link #PREFETCH_SOURCE_LIMIT}). Both run in the same
+     * single prefetch slot, one after the other: the queue and the concurrency limit are the ones
+     * that already existed, only one thread is used, and no new engine is initialized.
+     */
     static void prefetchDetail(MainActivity a, Cms.Site site, Cms.Video video) {
-        if (a == null
-                || a.reduced
-                || site == null
-                || video == null
-                || video.id == null
-                || video.id.isEmpty()) return;
-        if (isConfigOrNetdiskSite(site) || isConfigOrNetdiskActionCard(site, video)) return;
-        if (ListingRoute.isRedirect(video.tag, video.action, video.id)) return;
-        if (SearchCoordinator.isSiteWedged(site.key)) return;
-        // Speculation must never initialize a new source, and keeps at most one in-flight request.
-        // Already-initialized engines (including TV CSP/JS/CatPaw sites) may safely prefetch while
-        // idle so pressing OK opens the detail page immediately.
-        final SourceEngine source;
-        synchronized (a) {
-            source = a.engines.get(site.key);
-        }
-        if (source == null) return;
+        if (a == null || a.reduced || site == null || video == null) return;
         if (a.detailPrefetch != null && !a.detailPrefetch.isDone()) return;
+        final List<Cms.Site> sites = new ArrayList<>(PREFETCH_SOURCE_LIMIT);
+        final List<Cms.Video> videos = new ArrayList<>(PREFETCH_SOURCE_LIMIT);
+        if (prefetchEligible(a, site, video)) {
+            sites.add(site);
+            videos.add(video);
+        }
+        SourceLedger.Sources known = SourceLedger.resolve(a, video);
+        String coldNext = null;
+        if (known.count() >= 2) {
+            for (Cms.Site candidate : known.sites) {
+                if (sites.size() >= PREFETCH_SOURCE_LIMIT) break;
+                if (candidate == null || candidate.key == null) continue;
+                if (candidate.key.equals(site.key)) continue;
+                if (!engineWarm(a, candidate)) {
+                    // The next source exists but its engine is cold; speculation never starts one.
+                    if (coldNext == null) coldNext = candidate.key;
+                    continue;
+                }
+                Cms.Video listing = known.listingAt(candidate.key);
+                if (!prefetchEligible(a, candidate, listing)) continue;
+                sites.add(candidate);
+                videos.add(listing);
+            }
+        }
+        if (sites.isEmpty()) return;
+        StringBuilder warmed = new StringBuilder();
+        for (Cms.Site candidate : sites) {
+            if (warmed.length() > 0) warmed.append(", ");
+            warmed.append(candidate.key);
+        }
+        AppLog.w(
+                "DetailPrefetch",
+                "prefetch "
+                        + sites.size()
+                        + " sites: "
+                        + warmed
+                        + (coldNext == null ? "" : " (next cold, not warmed: " + coldNext + ")"));
+        final List<Cms.Site> targets = sites;
+        final List<Cms.Video> listings = videos;
+        a.detailPrefetch =
+                RequestScope.submit(
+                        a.details,
+                        () -> {
+                            // Sequential on purpose: one prefetch request in flight at a time,
+                            // exactly the budget the old single-site prefetch had.
+                            for (int i = 0; i < targets.size(); i++) {
+                                prefetchOne(a, targets.get(i), listings.get(i));
+                            }
+                        });
+    }
+
+    private static boolean engineWarm(MainActivity a, Cms.Site site) {
+        if (a == null || site == null || site.key == null) return false;
+        synchronized (a) {
+            return a.engines.get(site.key) != null;
+        }
+    }
+
+    /** Cheap per-site gates: speculation never initializes an engine and never prewarms twice. */
+    private static boolean prefetchEligible(MainActivity a, Cms.Site site, Cms.Video video) {
+        if (a == null || a.reduced || site == null || video == null) return false;
+        if (video.id == null || video.id.isEmpty()) return false;
+        if (isConfigOrNetdiskSite(site) || isConfigOrNetdiskActionCard(site, video)) return false;
+        if (ListingRoute.isRedirect(video.tag, video.action, video.id)) return false;
+        if (site.key == null || SearchCoordinator.isSiteWedged(site.key)) return false;
+        // Speculation must never initialize a new source: only already-warm engines are used.
+        synchronized (a) {
+            if (a.engines.get(site.key) == null) return false;
+        }
         if (video.lines != null
                 && !video.lines.isEmpty()
                 && video.description != null
-                && !video.description.trim().isEmpty()) return;
+                && !video.description.trim().isEmpty()) return false;
+        final String key = a.engineEpoch + ":" + site.key.length() + ":" + site.key + video.id;
+        return a.detailCache.get(key) == null;
+    }
+
+    /** One site's speculative detail fetch; the caller has already taken the single slot. */
+    private static void prefetchOne(MainActivity a, Cms.Site site, Cms.Video video) {
         final int epoch = a.engineEpoch;
         final boolean privateAtStart = a.privateMode;
         final String id = video.id;
         final String key = epoch + ":" + site.key.length() + ":" + site.key + id;
         if (a.detailCache.get(key) != null) return;
-        a.detailPrefetch =
-                RequestScope.submit(
-                        a.details,
-                        () -> {
-                            try {
-                                if (a.detailCache.get(key) != null) return;
-                                String disk = readDetailDiskCache(a, site, id);
-                                if (disk != null
-                                        && epoch == a.engineEpoch
-                                        && !Cms.listing(disk).videos.isEmpty()) {
-                                    a.detailCache.put(key, disk);
-                                    return;
-                                }
-                                String raw =
-                                        a.detailFlights.get(
-                                                key,
-                                                () -> {
-                                                    String cached = a.detailCache.get(key);
-                                                    if (cached != null) return cached;
-                                                    long[] phases = new long[2];
-                                                    String fetched =
-                                                            SourceGate.measured(
-                                                                    phases,
-                                                                    () -> source.detail(id));
-                                                    if (fetched != null
-                                                            && epoch == a.engineEpoch
-                                                            && !Cms.listing(fetched)
-                                                                    .videos
-                                                                    .isEmpty()) {
-                                                        a.detailCache.put(key, fetched);
-                                                        if (!privateAtStart && !a.privateMode) {
-                                                            writeDetailDiskCache(
-                                                                    a, site, id, fetched);
-                                                        }
-                                                    }
-                                                    return fetched;
-                                                });
-                            } catch (Throwable ignored) {
+        final SourceEngine source;
+        synchronized (a) {
+            source = a.engines.get(site.key);
+        }
+        if (source == null) return;
+        AppLog.w("DetailPrefetch", "site=" + site.key + " id=" + id);
+        try {
+            String disk = readDetailDiskCache(a, site, id);
+            if (disk != null && epoch == a.engineEpoch && !Cms.listing(disk).videos.isEmpty()) {
+                a.detailCache.put(key, disk);
+                return;
+            }
+            a.detailFlights.get(
+                    key,
+                    () -> {
+                        String cached = a.detailCache.get(key);
+                        if (cached != null) return cached;
+                        long[] phases = new long[2];
+                        String fetched = SourceGate.measured(phases, () -> source.detail(id));
+                        if (fetched != null
+                                && epoch == a.engineEpoch
+                                && !Cms.listing(fetched).videos.isEmpty()) {
+                            a.detailCache.put(key, fetched);
+                            if (!privateAtStart && !a.privateMode) {
+                                writeDetailDiskCache(a, site, id, fetched);
                             }
-                        });
+                        }
+                        return fetched;
+                    });
+        } catch (Throwable ignored) {
+            // Speculation: a site that cannot answer is simply not warmed.
+        }
     }
 
     /** Probe the first two lines of a freshly fetched detail, off the UI path. */
