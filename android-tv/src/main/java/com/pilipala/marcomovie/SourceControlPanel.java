@@ -30,7 +30,12 @@ final class SourceControlPanel {
         LinearLayout panel = a.vertical();
         panel.setPadding(a.dp(4), a.dp(2), a.dp(4), a.dp(2));
 
-        TextView lead = a.text("从上游订阅到这部剧实际播放的线路，三层都在这里切换。", 12.5f, MUTED_TEXT);
+        TextView lead =
+                a.text(
+                        "两层：片源包决定能搜到哪些站，站点偏好决定默认从哪些站取片（网盘在前、采集站补充）。"
+                                + "具体线路在详情页里换。",
+                        12.5f,
+                        MUTED_TEXT);
         lead.setLineSpacing(a.dp(3), 1.05f);
         panel.addView(lead);
         a.gap(panel, 10);
@@ -53,32 +58,15 @@ final class SourceControlPanel {
                 panel,
                 "source-control:site",
                 "第二层",
-                "站点",
+                "站点偏好",
                 selectedSiteName(a),
-                "切换站点",
-                "影响片库、分类与搜索结果来自哪个站点。",
+                "调整偏好",
+                "决定片库、分类与搜索默认用哪个站点；同一部剧有多个来源时，详情页按这里的偏好顺序挑网盘在前的那条。",
                 true,
                 a::chooseSources);
 
-        a.gap(panel, 8);
-        final Runnable seriesAction =
-                seriesReady ? () -> openLinePicker(a, seriesSite, seriesVideo) : null;
-        addLayer(
-                a,
-                panel,
-                "source-control:series",
-                "第三层",
-                "本剧线路",
-                seriesValue(a, seriesSite, seriesVideo),
-                seriesReady ? "选线路" : "不可用",
-                seriesReady
-                        ? "影响这部剧从哪条线路取剧集与播放。"
-                        : "打开一部剧后，回到这里即可进入它的线路选择。",
-                seriesReady,
-                seriesAction);
-
         new AppDialog.Builder(a)
-                .setTitle("源 · 三层切换")
+                .setTitle("源 · 两层切换")
                 .setView(panel)
                 .setWide(true)
                 .setNegativeButton("关闭", null)
