@@ -269,7 +269,7 @@ final class HomeScreen {
         } else {
             filterToggle =
                     a.isTvDevice()
-                            ? pill("筛选  ⌄", "home-wall-filters", this::showWallFilterDialog)
+                            ? pill("筛选  ⌄", "home-wall-filters", this::toggleWallFilters)
                             : null;
             if (filterToggle != null) {
                 filterToggle.setPadding(
@@ -302,8 +302,7 @@ final class HomeScreen {
         }
         inlineFilters = new InlineFilters(this);
         libraryParent.addView(inlineFilters, new LinearLayout.LayoutParams(-1, -2));
-        wallFilterRow = a.row();
-        wallFilterRow.setGravity(Gravity.CENTER_VERTICAL);
+        wallFilterRow = a.vertical();
         wallFilterRow.setClipChildren(false);
         wallFilterRow.setPadding(0, 0, 0, a.dp(8));
         wallFilterRow.setVisibility(View.GONE);
@@ -1632,6 +1631,7 @@ final class HomeScreen {
             card.setOnFocusChangeListener(
                     (v, f) -> {
                         TvV17PosterCard.focus(a, card, name, f);
+                        if (f) a.lastFocusMoveAt = android.os.SystemClock.elapsedRealtime();
                         if (f && ambient != null) ambient.follow(art);
                         if (f) {
                             int stepPx =
@@ -2964,9 +2964,9 @@ final class HomeScreen {
                         if (rightPin < 0) return -1;
                         return Integer.compare(leftPin, rightPin);
                     }
-                    boolean l = isNetdiskSite(left);
-                    boolean r = isNetdiskSite(right);
-                    if (l != r) return l ? -1 : 1;
+                    int leftRank = siteRank(left);
+                    int rightRank = siteRank(right);
+                    if (leftRank != rightRank) return Integer.compare(leftRank, rightRank);
                     return 0;
                 });
         return ordered;
@@ -2977,6 +2977,24 @@ final class HomeScreen {
         String name = site.name == null ? "" : site.name;
         String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
         return name.contains("网盘") || name.contains("盘搜") || api.contains("maccms");
+    }
+
+    /** Magnet sources stream over BitTorrent: slow to start, so they rank below a normal source. */
+    static boolean isMagnetSite(Cms.Site site) {
+        if (site == null) return false;
+        String name = site.name == null ? "" : site.name;
+        String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
+        return name.contains("磁力") || name.contains("P2P") || api.contains("magnet");
+    }
+
+    /**
+     * Playback preference: cloud drive first (original file, direct CDN), then ordinary site
+     * sources, then magnet (BitTorrent needs peers before the first frame).
+     */
+    static int siteRank(Cms.Site site) {
+        if (isNetdiskSite(site)) return 0;
+        if (isMagnetSite(site)) return 2;
+        return 1;
     }
 
     /** The site a wall card opens with: its first aggregated source, or the screen site. */
@@ -3112,78 +3130,108 @@ final class HomeScreen {
      * these chips give it back as local narrowing: netdisk-only, multi-source, and a name sort.
      * They never trigger a fetch.
      */
+    /**
+     * Inline multi-level filter panel under the 筛选 button: first level picks the source (the merged
+     * wall or one site), second level narrows/sorts the merged result. Everything is local: the
+     * panel only re-filters what the wall already fetched.
+     */
     void rebuildWallFilters() {
         if (wallFilterRow == null) return;
         wallFilterRow.removeAllViews();
-        // The chips live in a dialog now: the inline row scrolled away with the grid and the remote
-        // could not reach it once the wall was longer than one screen.
-        wallFilterRow.setVisibility(View.GONE);
-        if (!usesLibraryWall()) return;
-        if (true) return;
-        addWallChip("全部", "wall-all", !wallNetdiskOnly && !wallMultiOnly && !wallSortByName, () -> {
-            wallNetdiskOnly = false;
-            wallMultiOnly = false;
-            wallSortByName = false;
+        if (!usesLibraryWall()) {
+            wallFilterRow.setVisibility(View.GONE);
+            return;
+        }
+        wallFilterRow.setVisibility(state.filtersExpanded ? View.VISIBLE : View.GONE);
+        if (!state.filtersExpanded) return;
+
+        LinearLayout sourceRow = a.row();
+        sourceRow.setGravity(Gravity.CENTER_VERTICAL);
+        sourceRow.setClipChildren(false);
+        addWallChip(sourceRow, "合并墙", "wall-site-all", librarySiteFilter.isEmpty(), () -> {
+            librarySiteFilter = "";
+            rebuildWallFilters();
             applyWallFilterChange();
         });
-        addWallChip(
-                "只看网盘",
-                "wall-netdisk",
-                wallNetdiskOnly,
-                () -> {
-                    wallNetdiskOnly = !wallNetdiskOnly;
-                    applyWallFilterChange();
-                });
-        addWallChip(
-                "多源合并",
-                "wall-multi",
-                wallMultiOnly,
-                () -> {
-                    wallMultiOnly = !wallMultiOnly;
-                    applyWallFilterChange();
-                });
-        addWallChip(
-                "按名称",
-                "wall-sort",
-                wallSortByName,
-                () -> {
-                    wallSortByName = !wallSortByName;
-                    applyWallFilterChange();
-                });
+        for (Cms.Site target : wallChipSites()) {
+            String label = target.name == null ? target.key : target.name;
+            addWallChip(
+                    sourceRow,
+                    label,
+                    "wall-site:" + target.key,
+                    target.key.equals(librarySiteFilter),
+                    () -> {
+                        librarySiteFilter = target.key;
+                        rebuildWallFilters();
+                        applyWallFilterChange();
+                    });
+        }
+        wallFilterRow.addView(sourceRow, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout optionRow = a.row();
+        optionRow.setGravity(Gravity.CENTER_VERTICAL);
+        optionRow.setClipChildren(false);
+        addWallChip(optionRow, "只看网盘", "wall-netdisk", wallNetdiskOnly, () -> {
+            wallNetdiskOnly = !wallNetdiskOnly;
+            rebuildWallFilters();
+            applyWallFilterChange();
+        });
+        addWallChip(optionRow, "多源合并", "wall-multi", wallMultiOnly, () -> {
+            wallMultiOnly = !wallMultiOnly;
+            rebuildWallFilters();
+            applyWallFilterChange();
+        });
+        addWallChip(optionRow, "按名称", "wall-sort", wallSortByName, () -> {
+            wallSortByName = !wallSortByName;
+            rebuildWallFilters();
+            applyWallFilterChange();
+        });
+        wallFilterRow.addView(optionRow, new LinearLayout.LayoutParams(-1, -2));
     }
 
-    void addWallChip(String label, String tag, boolean active, Runnable action) {
+    /** Sites that actually contributed to the wall, most items first; at most ten chips. */
+    List<Cms.Site> wallChipSites() {
+        List<Cms.Site> out = new ArrayList<>();
+        LibraryAggregator.Result wall = a.libraryWall;
+        if (wall == null || wall.items == null) return out;
+        Map<Cms.Site, Integer> counts = new LinkedHashMap<>();
+        for (LibraryAggregator.Item item : wall.items) {
+            if (item == null) continue;
+            for (Cms.Site site : item.sites) {
+                if (site == null) continue;
+                counts.merge(site, 1, Integer::sum);
+            }
+        }
+        List<Map.Entry<Cms.Site, Integer>> ranked = new ArrayList<>(counts.entrySet());
+        ranked.sort((l, r) -> Integer.compare(r.getValue(), l.getValue()));
+        for (Map.Entry<Cms.Site, Integer> entry : ranked) {
+            if (out.size() >= 10) break;
+            out.add(entry.getKey());
+        }
+        return out;
+    }
+
+    void toggleWallFilters() {
+        state.filtersExpanded = !state.filtersExpanded;
+        rebuildWallFilters();
+        if (state.filtersExpanded && wallFilterRow != null && wallFilterRow.getChildCount() > 0) {
+            android.view.ViewGroup first =
+                    (android.view.ViewGroup) wallFilterRow.getChildAt(0);
+            if (first.getChildCount() > 0) first.getChildAt(0).requestFocus();
+        }
+    }
+
+    void addWallChip(LinearLayout row, String label, String tag, boolean active, Runnable action) {
         TextView chip = pill(label, tag, action);
         chip.setPadding(a.dp(13), 0, a.dp(13), 0);
         chip.setTextColor(active ? MainActivity.WHITE : 0xffc8c8d0);
         chip.setBackground(a.bg(active ? 0xff2f6bd8 : 0xff24242b, Math.round(18 * navScale)));
-        chip.setOnFocusChangeListener((v, f) -> outline(chip, f, Math.round(18 * navScale), 0xff24242b));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(Math.round(32 * navScale)));
+        chip.setOnFocusChangeListener(
+                (v, f) -> outline(chip, f, Math.round(18 * navScale), 0xff24242b));
+        LinearLayout.LayoutParams lp =
+                new LinearLayout.LayoutParams(-2, a.dp(Math.round(32 * navScale)));
         lp.rightMargin = a.dp(8);
-        wallFilterRow.addView(chip, lp);
-    }
-
-    /** Wall filters as a dialog behind the heading's 筛选 button. */
-    void showWallFilterDialog() {
-        final String[] names = {"全部", "只看网盘", "多源合并（≥2 源）", "按名称排序"};
-        int checked = 0;
-        if (wallSortByName) checked = 3;
-        else if (wallMultiOnly) checked = 2;
-        else if (wallNetdiskOnly) checked = 1;
-        new AppDialog.Builder(a)
-                .setTitle("片库筛选")
-                .wrapChoices()
-                .setSingleChoiceItems(
-                        names,
-                        checked,
-                        (d, which) -> {
-                            wallNetdiskOnly = which == 1;
-                            wallMultiOnly = which == 2;
-                            wallSortByName = which == 3;
-                            applyWallFilterChange();
-                        })
-                .setNegativeButton("关闭", null)
-                .show();
+        row.addView(chip, lp);
     }
 
     void applyWallFilterChange() {

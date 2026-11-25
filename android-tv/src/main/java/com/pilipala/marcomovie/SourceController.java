@@ -458,6 +458,9 @@ final class SourceController {
      * <p>Deliberately narrow: one attempt per site per config epoch, never for config/netdisk
      * folder entries, and the result is simply left in {@code engines} for the real open.
      */
+    private static final java.util.concurrent.atomic.AtomicBoolean WARM_INFLIGHT =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     static void warmEngineOnFocus(MainActivity a, Cms.Site site) {
         if (a == null || site == null || a.reduced) return;
         if (site.key == null || site.key.trim().isEmpty()) return;
@@ -467,6 +470,11 @@ final class SourceController {
             if (a.engines.containsKey(site.key)) return;
         }
         if (!a.engineWarmAttempts.add(site.key)) return;
+        if (!WARM_INFLIGHT.compareAndSet(false, true)) {
+            // Another warm is already running; let this card try again later.
+            a.engineWarmAttempts.remove(site.key);
+            return;
+        }
         final int epoch = a.engineEpoch;
         RequestScope.submit(
                 a.details,
@@ -479,6 +487,8 @@ final class SourceController {
                         engine(a, site);
                     } catch (Throwable ignored) {
                         // Speculative: a failure here is reported by the real open, not by warming.
+                    } finally {
+                        WARM_INFLIGHT.set(false);
                     }
                 });
     }
@@ -492,8 +502,8 @@ final class SourceController {
             new java.util.ArrayDeque<>();
     private static final java.util.Set<String> PREFETCH_SEEN =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
-    private static final int PREFETCH_MAX_PENDING = 24;
-    private static final int PREFETCH_WORKERS = 2;
+    private static final int PREFETCH_MAX_PENDING = 8;
+    private static final int PREFETCH_WORKERS = 1;
     private static int prefetchRunning;
 
     /**
@@ -503,6 +513,10 @@ final class SourceController {
      */
     static void prefetchVisible(MainActivity a, Cms.Site site, Cms.Video video) {
         if (a == null || a.reduced || site == null || video == null) return;
+        // Playback owns the device: no speculative inits while a player is up.
+        if (a.current != null && a.current.player) return;
+        // The user is moving through the wall: spend the next frames on drawing, not on inits.
+        if (android.os.SystemClock.elapsedRealtime() - a.lastFocusMoveAt < 500L) return;
         if (video.id == null || video.id.isEmpty()) return;
         if (isConfigOrNetdiskSite(site) || isConfigOrNetdiskActionCard(site, video)) return;
         if (ListingRoute.isRedirect(video.tag, video.action, video.id)) return;
@@ -533,7 +547,6 @@ final class SourceController {
                                                 && epoch == a.engineEpoch
                                                 && !Cms.listing(fetched).videos.isEmpty()) {
                                             a.detailCache.put(key, fetched);
-                                            probeDetailLines(a, site, fetched);
                                         }
                                         return fetched;
                                     });
@@ -739,6 +752,9 @@ final class SourceController {
                                 if ((video.id == null || video.id.trim().isEmpty()) && id != null) {
                                     video.id = id.trim();
                                 }
+                                // The user is actually opening this title: only now is a liveness
+                                // probe cheap enough to be worth it (two small Range requests).
+                                LineProbe.probeLines(a, site, video, 2);
                                 if (!timing.cached
                                         && hasPlayableDetailLines(video)
                                         && detailContext.matches(

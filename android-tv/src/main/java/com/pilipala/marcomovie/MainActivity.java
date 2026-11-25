@@ -31,6 +31,8 @@ public final class MainActivity extends Activity {
      * search result offer every site instead of only the one it was found on.
      */
     LibraryAggregator.Result searchWall;
+    /** Last time focus moved between cards/rows; background work backs off for a moment after. */
+    volatile long lastFocusMoveAt;
     int searchWallEpoch = -1;
     /**
      * Sites whose engine this session already tried to warm on focus. The engine itself lands in

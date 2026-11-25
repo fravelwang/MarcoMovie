@@ -42,7 +42,9 @@ final class LibraryAggregator {
 
     /** Channels tried when a site's home page carries no videos (see fetch). */
     static final int MAX_CATEGORY_PROBES = 3;
-    static final int MAX_CONCURRENCY = 6;
+    // Four workers leave headroom for the UI thread while the first wall is being laid out on a
+    // four-core box (measured: load average 2.6-3.4 with six).
+    static final int MAX_CONCURRENCY = 4;
     // A shorter per-site timeout lets one 15 s budget reach ~18 sites instead of ~11; sites that
     // need longer than this are usually dead or engine-backed anyway.
     static final long SITE_TIMEOUT_MS = 5000L;
@@ -472,13 +474,31 @@ final class LibraryAggregator {
     /** Titles carried by a cloud-drive source first: that source hands the player the original file. */
     static final Comparator<Item> NETDISK_FIRST =
             (left, right) -> {
-                boolean l = hasShareSource(left);
-                boolean r = hasShareSource(right);
-                if (l != r) return l ? -1 : 1;
+                int l = bestRank(left);
+                int r = bestRank(right);
+                if (l != r) return Integer.compare(l, r);
                 return Integer.compare(
                         right == null ? 0 : right.sites.size(),
                         left == null ? 0 : left.sites.size());
             };
+
+    /** Lowest rank among the item's sources: 0 cloud drive, 1 ordinary, 2 magnet. */
+    static int bestRank(Item item) {
+        if (item == null || item.sites.isEmpty()) return 1;
+        int best = 2;
+        for (Cms.Site site : item.sites) {
+            if (site == null) continue;
+            String name = site.name == null ? "" : site.name;
+            String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
+            int rank;
+            if (name.contains("网盘") || name.contains("盘搜") || api.contains("maccms")) rank = 0;
+            else if (name.contains("磁力") || name.contains("P2P") || api.contains("magnet"))
+                rank = 2;
+            else rank = 1;
+            if (rank < best) best = rank;
+        }
+        return best;
+    }
 
     static boolean hasShareSource(Item item) {
         if (item == null) return false;
@@ -494,12 +514,23 @@ final class LibraryAggregator {
     /** The site a merged card should open with: the share source when there is one. */
     static Cms.Site preferredSite(Item item) {
         if (item == null) return null;
+        Cms.Site best = null;
+        int bestRank = 3;
         for (Cms.Site site : item.sites) {
             if (site == null) continue;
             String name = site.name == null ? "" : site.name;
-            if (name.contains("网盘") || name.contains("盘搜")) return site;
+            String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
+            int rank;
+            if (name.contains("网盘") || name.contains("盘搜") || api.contains("maccms")) rank = 0;
+            else if (name.contains("磁力") || name.contains("P2P") || api.contains("magnet"))
+                rank = 2;
+            else rank = 1;
+            if (rank < bestRank) {
+                bestRank = rank;
+                best = site;
+            }
         }
-        return item.sites.isEmpty() ? null : item.sites.get(0);
+        return best == null ? (item.sites.isEmpty() ? null : item.sites.get(0)) : best;
     }
 
     static String normalizeTitle(String raw) {
