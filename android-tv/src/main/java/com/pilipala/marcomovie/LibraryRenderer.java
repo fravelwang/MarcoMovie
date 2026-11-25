@@ -9,7 +9,6 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -57,15 +56,6 @@ import java.util.Map;
 final class LibraryRenderer {
 
     private final HomeScreen host;
-
-    /**
-     * Model + visible slice of the last wall render. Step 2 does not read them back yet (the wall
-     * still renders from {@code state.videos}); they are kept so the header/facet panel of step 3
-     * can be generated from the same input that produced the grid instead of re-querying.
-     */
-    private LibraryModel model;
-
-    private List<LibraryModel.MergedItem> visible = Collections.emptyList();
 
     /** Panel host handed over by {@link HomeScreen#show()}; the renderer owns everything inside. */
     private LinearLayout panel;
@@ -117,16 +107,6 @@ final class LibraryRenderer {
         this.host = host;
     }
 
-    /** The model the grid was last built from, or null before the first wall render. */
-    LibraryModel model() {
-        return model;
-    }
-
-    /** The visible slice of {@link #model()} that produced the current grid. */
-    List<LibraryModel.MergedItem> visible() {
-        return visible;
-    }
-
     // -------------------------------------------------------------------------------------------
     // Facet panel (step 3): build once per wall result, then only restyle / show / hide.
     // -------------------------------------------------------------------------------------------
@@ -156,7 +136,6 @@ final class LibraryRenderer {
      * panel and its focused chip attached. {@code null} falls back to the facet fingerprint.
      */
     void bindModel(LibraryModel model, Object wallResult) {
-        this.model = model;
         if (panel == null) return;
         if (wallResult != null) {
             if (wallResult == wallToken && panelBuilt) return;
@@ -245,25 +224,11 @@ final class LibraryRenderer {
             return;
         }
         boolean pillShown = filterPillShown();
-        int oldRight = host.filterToggle.getNextFocusRightId();
-        int oldDown = host.filterToggle.getNextFocusDownId();
         host.filterToggle.setNextFocusLeftId(host.source.getId());
         host.filterToggle.setNextFocusRightId(host.filterToggle.getId());
         host.filterToggle.setNextFocusUpId(sourceUpId);
         host.filterToggle.setNextFocusDownId(downId);
         host.source.setNextFocusRightId(pillShown ? host.filterToggle.getId() : host.source.getId());
-        if (oldRight != host.filterToggle.getNextFocusRightId() || oldDown != downId) {
-            android.util.Log.i(
-                    "LibraryFocus",
-                    "header wire pillShown="
-                            + pillShown
-                            + " sourceRight="
-                            + host.source.getNextFocusRightId()
-                            + " pillDown="
-                            + downId
-                            + " expanded="
-                            + panelExpanded);
-        }
     }
 
     /** The wall 筛选 pill counts as part of the header whenever it is VISIBLE in the hierarchy. */
@@ -374,16 +339,6 @@ final class LibraryRenderer {
      */
     private void buildPanel(LibraryModel model) {
         if (panel == null) return;
-        android.util.Log.i(
-                "LibraryFocus",
-                "panel build mode="
-                        + (model == null ? "null" : model.mode)
-                        + " sources="
-                        + (model == null ? 0 : model.sources.size())
-                        + " years="
-                        + (model == null || model.facets == null ? 0 : model.facets.years().size())
-                        + " expanded="
-                        + panelExpanded);
         Chip focusedBefore = focusedPanelChip();
         panel.removeAllViews();
         panelRows.clear();
@@ -624,12 +579,6 @@ final class LibraryRenderer {
                     boolean stolen = current == null || (first != null && current == first);
                     if (!stolen) return;
                     chip.requestFocus();
-                    android.util.Log.i(
-                            "LibraryFocus",
-                            "press refocus chip="
-                                    + chip.getTag()
-                                    + " current="
-                                    + (current == null ? "null" : current.getTag()));
                 },
                 120);
     }
@@ -766,8 +715,8 @@ final class LibraryRenderer {
     }
 
     /**
-     * Full wall rebuild from the model and its visible slice; replaces the direct {@code
-     * drawGrid(false)} call that {@code HomeScreen.applyLibraryWall} used to make.
+     * Full wall rebuild from the model; replaces the direct {@code drawGrid(false)} call that
+     * {@code HomeScreen.applyLibraryWall} used to make.
      *
      * <p>The rebuild still runs through {@link HomeScreen#drawGrid(boolean)}: that method owns the
      * parts kept in the host (status text, 加载更多 visibility, focus restore, window reset). The
@@ -778,10 +727,7 @@ final class LibraryRenderer {
      * when the wall <em>result</em> changed ({@code wallResult} identity), so a filter press (which
      * lands here too) leaves the panel — and the focused chip — attached.
      */
-    void renderWall(
-            LibraryModel model, List<LibraryModel.MergedItem> visible, Object wallResult) {
-        this.model = model;
-        this.visible = visible == null ? Collections.<LibraryModel.MergedItem>emptyList() : visible;
+    void renderWall(LibraryModel model, Object wallResult) {
         bindModel(model, wallResult);
         host.drawGrid(false);
     }

@@ -82,11 +82,6 @@ final class HomeScreen {
     String wallSourceFilter = "";
     boolean wallMultiOnly;
     boolean wallSortByName;
-    /**
-     * Host of the inline facet panel. The screen only creates and places the container; {@link
-     * LibraryRenderer#attachPanel} owns every child inside it (built once per wall result).
-     */
-    LinearLayout wallFilterRow;
 
     static final class Snapshot {
         long time = System.currentTimeMillis();
@@ -324,12 +319,15 @@ final class HomeScreen {
         }
         inlineFilters = new InlineFilters(this);
         libraryParent.addView(inlineFilters, new LinearLayout.LayoutParams(-1, -2));
-        wallFilterRow = a.vertical();
-        wallFilterRow.setClipChildren(false);
-        wallFilterRow.setPadding(0, 0, 0, a.dp(8));
-        wallFilterRow.setVisibility(View.GONE);
-        libraryParent.addView(wallFilterRow, new LinearLayout.LayoutParams(-1, -2));
-        renderer.attachPanel(wallFilterRow);
+        // Host of the inline facet panel: the screen only creates and places this container,
+        // {@link LibraryRenderer#attachPanel} owns every child inside it (built once per wall
+        // result), so nothing after this point needs to hold the view.
+        LinearLayout wallPanel = a.vertical();
+        wallPanel.setClipChildren(false);
+        wallPanel.setPadding(0, 0, 0, a.dp(8));
+        wallPanel.setVisibility(View.GONE);
+        libraryParent.addView(wallPanel, new LinearLayout.LayoutParams(-1, -2));
+        renderer.attachPanel(wallPanel);
         status = a.text("正在整理片单…", 13, MainActivity.MUTED);
         status.setPadding(a.dp(4), a.dp(12), 0, a.dp(12));
         libraryParent.addView(status);
@@ -918,64 +916,6 @@ final class HomeScreen {
         List<LibraryModel.MergedItem> visible = LibraryQuery.visible(model, filter);
         for (LibraryModel.MergedItem item : visible) videos.add(item.video);
 
-        // TEMP equivalence check (step 1 only; step 4 deletes it): run the old inline loop once
-        // more and compare the video reference sequences. A mismatch only logs; the model result
-        // above is what the wall renders, so behavior stays identical either way.
-        List<LibraryAggregator.Item> legacyShown = new ArrayList<>();
-        for (LibraryAggregator.Item item : result.items) {
-            if (item == null || item.video == null) continue;
-            if (wall) {
-                if (!wallSourceFilter.isEmpty() && !item.hasSite(wallSourceFilter)) continue;
-            } else if (!librarySiteFilter.isEmpty() && !item.hasSite(librarySiteFilter)) continue;
-            if (wallNetdiskOnly && !LibraryAggregator.hasShareSource(item)) continue;
-            if (wallMultiOnly && item.sites.size() < 2) continue;
-            if (!wallYear.isEmpty() && !wallYear.equals(valueOf(item.video.year))) continue;
-            if (!wallArea.isEmpty() && !wallArea.equals(valueOf(item.video.area))) continue;
-            if (!wallGenre.isEmpty() && !genreContains(item.video.genre, wallGenre)) continue;
-            legacyShown.add(item);
-        }
-        if (wallSortByName) {
-            Collections.sort(
-                    legacyShown,
-                    (left, right) -> {
-                        String l = left.video.title == null ? "" : left.video.title;
-                        String r = right.video.title == null ? "" : right.video.title;
-                        return l.compareTo(r);
-                    });
-        }
-        List<Cms.Video> legacy = new ArrayList<>();
-        for (LibraryAggregator.Item item : legacyShown) legacy.add(item.video);
-        int firstDiff = -1;
-        if (legacy.size() == visible.size()) {
-            for (int i = 0; i < legacy.size(); i++) {
-                if (legacy.get(i) != visible.get(i).video) {
-                    firstDiff = i;
-                    break;
-                }
-            }
-        }
-        if (legacy.size() != visible.size() || firstDiff >= 0) {
-            String oldTitle = "";
-            String newTitle = "";
-            if (firstDiff >= 0) {
-                Cms.Video oldVideo = legacy.get(firstDiff);
-                Cms.Video newVideo = visible.get(firstDiff).video;
-                oldTitle = oldVideo == null || oldVideo.title == null ? "" : oldVideo.title;
-                newTitle = newVideo == null || newVideo.title == null ? "" : newVideo.title;
-            }
-            android.util.Log.w(
-                    "LibraryModel",
-                    "mismatch old="
-                            + legacy.size()
-                            + " new="
-                            + visible.size()
-                            + " first="
-                            + firstDiff
-                            + " oldTitle="
-                            + oldTitle
-                            + " newTitle="
-                            + newTitle);
-        }
         // The wall owns the flat list; category paging is bypassed while the filter is active.
         state.category = "";
         state.page = 1;
@@ -990,7 +930,7 @@ final class HomeScreen {
         updateLibraryFilterPill();
         // The aggregation result — not the facet fingerprint — is what "the wall changed" means, so
         // the renderer rebuilds the facet panel only when a different round arrives.
-        renderer.renderWall(model, visible, result);
+        renderer.renderWall(model, result);
         updateMore();
         wireNavigation();
         refreshWallLayout();
@@ -3066,84 +3006,6 @@ final class HomeScreen {
      * {@link #applyWallFilterChange()}, the single entry point that re-queries the cached wall and
      * rebuilds the grid.
      */
-    static String valueOf(String raw) {
-        return raw == null ? "" : raw.trim();
-    }
-
-    static boolean genreContains(String genre, String value) {
-        if (genre == null || value == null || value.isEmpty()) return false;
-        for (String part : genre.split("[/,、| ]+")) {
-            if (part.trim().equals(value)) return true;
-        }
-        return false;
-    }
-
-    /**
-     * Years/areas present in the cached wall. Only the step-4 dialog still calls this; the inline
-     * panel reads {@code LibraryModel.facets} instead.
-     */
-    List<String> wallTaxonomy(boolean years) {
-        java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
-        LibraryAggregator.Result wall = a.libraryWall;
-        if (wall == null || wall.items == null) return new ArrayList<>();
-        for (LibraryAggregator.Item item : wall.items) {
-            if (item == null || item.video == null) continue;
-            String value = valueOf(years ? item.video.year : item.video.area);
-            if (value.isEmpty() || value.length() > 8) continue;
-            counts.merge(value, 1, Integer::sum);
-        }
-        List<String> out = new ArrayList<>(counts.keySet());
-        if (years) out.sort((l, r) -> r.compareTo(l));
-        return out;
-    }
-
-    /**
-     * Genres present in the cached wall, most common first. Same note as {@link
-     * #wallTaxonomy(boolean)}: step-4 dialog only, the inline panel uses the model facets.
-     */
-    List<String> wallGenres() {
-        java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
-        LibraryAggregator.Result wall = a.libraryWall;
-        if (wall == null || wall.items == null) return new ArrayList<>();
-        for (LibraryAggregator.Item item : wall.items) {
-            if (item == null || item.video == null) continue;
-            String genre = valueOf(item.video.genre);
-            if (genre.isEmpty()) continue;
-            for (String part : genre.split("[/,、| ]+")) {
-                String value = part.trim();
-                if (value.isEmpty() || value.length() > 6) continue;
-                counts.merge(value, 1, Integer::sum);
-            }
-        }
-        List<java.util.Map.Entry<String, Integer>> ranked = new ArrayList<>(counts.entrySet());
-        ranked.sort((l, r) -> Integer.compare(r.getValue(), l.getValue()));
-        List<String> out = new ArrayList<>();
-        for (java.util.Map.Entry<String, Integer> entry : ranked) out.add(entry.getKey());
-        return out;
-    }
-
-    /** Sites that actually contributed to the wall, most items first; at most ten chips. */
-    List<Cms.Site> wallChipSites() {
-        List<Cms.Site> out = new ArrayList<>();
-        LibraryAggregator.Result wall = a.libraryWall;
-        if (wall == null || wall.items == null) return out;
-        Map<Cms.Site, Integer> counts = new LinkedHashMap<>();
-        for (LibraryAggregator.Item item : wall.items) {
-            if (item == null) continue;
-            for (Cms.Site site : item.sites) {
-                if (site == null) continue;
-                counts.merge(site, 1, Integer::sum);
-            }
-        }
-        List<Map.Entry<Cms.Site, Integer>> ranked = new ArrayList<>(counts.entrySet());
-        ranked.sort((l, r) -> Integer.compare(r.getValue(), l.getValue()));
-        for (Map.Entry<Cms.Site, Integer> entry : ranked) {
-            if (out.size() >= 10) break;
-            out.add(entry.getKey());
-        }
-        return out;
-    }
-
     /**
      * 筛选：内联面板的展开 / 收起（步骤 3）。面板内容归 {@link LibraryRenderer}，只在墙结果变化
      * 时构建一次；这里只改可见性，展开后焦点落面板第一项，收起后回到「筛选」pill。
@@ -3159,140 +3021,6 @@ final class HomeScreen {
      */
     boolean headerKey(int key) {
         return usesLibraryWall() && renderer.headerKey(key);
-    }
-
-    /**
-     * 旧的「筛选」对话框。墙模式已经不再走这里（步骤 3 换回内联面板），保留到步骤 4 统一删除。
-     * 下面的 pickWallSource / pickWallFacet / pickWallGenre 只被它调用。
-     */
-    void showWallFilterDialogLegacy() {
-        final String[] names = {
-            "全部（清除过滤）",
-            "只看网盘" + (wallNetdiskOnly ? "（已开）" : ""),
-            "多源合并" + (wallMultiOnly ? "（已开）" : ""),
-            "按名称" + (wallSortByName ? "（已开）" : ""),
-            "来源限制…",
-            "年份…",
-            "地区…",
-            "类别…"
-        };
-        new AppDialog.Builder(a)
-                .setTitle("片库筛选")
-                .wrapChoices()
-                .setItems(
-                        names,
-                        (d, which) -> {
-                            switch (which) {
-                                case 0:
-                                    wallNetdiskOnly = false;
-                                    wallMultiOnly = false;
-                                    wallSortByName = false;
-                                    wallSourceFilter = "";
-                                    wallYear = "";
-                                    wallArea = "";
-                                    wallGenre = "";
-                                    applyWallFilterChange();
-                                    break;
-                                case 1:
-                                    wallNetdiskOnly = !wallNetdiskOnly;
-                                    applyWallFilterChange();
-                                    break;
-                                case 2:
-                                    wallMultiOnly = !wallMultiOnly;
-                                    applyWallFilterChange();
-                                    break;
-                                case 3:
-                                    wallSortByName = !wallSortByName;
-                                    applyWallFilterChange();
-                                    break;
-                                case 4:
-                                    pickWallSource();
-                                    break;
-                                case 5:
-                                    pickWallFacet(true);
-                                    break;
-                                case 6:
-                                    pickWallFacet(false);
-                                    break;
-                                default:
-                                    pickWallGenre();
-                                    break;
-                            }
-                        })
-                .setNegativeButton("关闭", null)
-                .show();
-    }
-
-    void pickWallSource() {
-        List<Cms.Site> sites = wallChipSites();
-        String[] labels = new String[sites.size() + 1];
-        labels[0] = "合并墙（全部来源）";
-        int checked = wallSourceFilter.isEmpty() ? 0 : -1;
-        for (int i = 0; i < sites.size(); i++) {
-            labels[i + 1] = sites.get(i).name;
-            if (sites.get(i).key.equals(wallSourceFilter)) checked = i + 1;
-        }
-        new AppDialog.Builder(a)
-                .setTitle("来源限制")
-                .wrapChoices()
-                .setSingleChoiceItems(
-                        labels,
-                        checked,
-                        (d, which) -> {
-                            wallSourceFilter = which == 0 ? "" : sites.get(which - 1).key;
-                            applyWallFilterChange();
-                        })
-                .setNegativeButton("关闭", null)
-                .show();
-    }
-
-    void pickWallFacet(boolean years) {
-        List<String> values = wallTaxonomy(years);
-        String[] labels = new String[values.size() + 1];
-        labels[0] = "全部";
-        String active = years ? wallYear : wallArea;
-        int checked = 0;
-        for (int i = 0; i < values.size(); i++) {
-            labels[i + 1] = values.get(i);
-            if (values.get(i).equals(active)) checked = i + 1;
-        }
-        new AppDialog.Builder(a)
-                .setTitle(years ? "年份" : "地区")
-                .wrapChoices()
-                .setSingleChoiceItems(
-                        labels,
-                        checked,
-                        (d, which) -> {
-                            String value = which == 0 ? "" : values.get(which - 1);
-                            if (years) wallYear = value;
-                            else wallArea = value;
-                            applyWallFilterChange();
-                        })
-                .setNegativeButton("关闭", null)
-                .show();
-    }
-
-    void pickWallGenre() {
-        List<String> values = wallGenres();
-        String[] labels = new String[values.size() + 1];
-        labels[0] = "全部";
-        int checked = 0;
-        for (int i = 0; i < values.size(); i++) {
-            labels[i + 1] = values.get(i);
-            if (values.get(i).equals(wallGenre)) checked = i + 1;
-        }
-        new AppDialog.Builder(a)
-                .setTitle("类别")
-                .wrapChoices()
-                .setSingleChoiceItems(
-                        labels,
-                        checked,
-                        (d, which) -> {
-                            wallGenre = which == 0 ? "" : values.get(which - 1);
-                            applyWallFilterChange();
-                        })
-                .setNegativeButton("关闭", null)
-                .show();
     }
 
     /**
@@ -3642,24 +3370,6 @@ final class HomeScreen {
         if (id == View.NO_ID) return false;
         if (event.getAction() != android.view.KeyEvent.ACTION_DOWN) return true;
         View target = a.root.findViewById(id);
-        if (wallHome != null && (focus == wallHome.source || focus == wallHome.filterToggle)) {
-            // One line per D-pad press on the two header pills: enough to tell a stale wire (id
-            // missing / target invalid) from a focus that is stolen right after the move.
-            android.util.Log.i(
-                    "LibraryFocus",
-                    "key="
-                            + key
-                            + " tag="
-                            + focus.getTag()
-                            + " next="
-                            + id
-                            + " target="
-                            + (target == null ? "null" : target.getTag())
-                            + " shown="
-                            + (target != null && target.isShown())
-                            + " focusable="
-                            + (target != null && target.isFocusable()));
-        }
         if (target == null || !target.isShown() || !target.isFocusable()) return false;
         if (key == android.view.KeyEvent.KEYCODE_DPAD_DOWN
                 && target == focus

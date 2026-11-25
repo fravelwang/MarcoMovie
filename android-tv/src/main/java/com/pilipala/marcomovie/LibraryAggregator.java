@@ -514,17 +514,6 @@ final class LibraryAggregator {
         return best;
     }
 
-    static boolean hasShareSource(Item item) {
-        if (item == null) return false;
-        for (Cms.Site site : item.sites) {
-            if (site == null) continue;
-            String name = site.name == null ? "" : site.name;
-            String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
-            if (name.contains("网盘") || name.contains("盘搜") || api.contains("maccms")) return true;
-        }
-        return false;
-    }
-
     /** The site a merged card should open with: the share source when there is one. */
     /**
      * The merged sources for one title, each with that site's own listing, ordered for playback

@@ -64,8 +64,8 @@ final class LibraryModel {
 
     /**
      * Year / area / genre value sets for the wall filter panel, with the counts they were ranked
-     * on. Built from the whole wall (not from a filtered view), matching the old
-     * {@code HomeScreen.wallTaxonomy} / {@code wallGenres} helpers.
+     * on. Built from the whole wall (not from a filtered view), so a filter change never shifts
+     * the values on offer.
      */
     static final class Facets {
         final Map<String, Integer> yearCounts;
@@ -191,7 +191,10 @@ final class LibraryModel {
         return raw == null ? "" : raw.trim();
     }
 
-    /** Same rule as {@code LibraryAggregator.hasShareSource}, kept here so the model owns it. */
+    /**
+     * Netdisk rule, owned here since the model is what filtering reads: a site counts as a share
+     * source when its name says 网盘/盘搜 or its api points at a maccms endpoint.
+     */
     private static boolean hasShareSource(List<Cms.Site> sites) {
         for (Cms.Site site : sites) {
             if (site == null) continue;
