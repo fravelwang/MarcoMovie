@@ -1718,6 +1718,7 @@ final class HomeScreen {
                                                     listing.id = e.id;
                                                     listing.title = e.title;
                                                     listing.poster = e.poster;
+                                                    SourceController.warmEngineOnFocus(a, s);
                                                     SourceController.prefetchDetail(a, s, listing);
                                                     break;
                                                 }
@@ -2856,6 +2857,7 @@ final class HomeScreen {
                             v.postDelayed(
                                     () -> {
                                         if (v.hasFocus() && active()) {
+                                            SourceController.warmEngineOnFocus(a, cardSite);
                                             SourceController.prefetchDetail(a, cardSite, video);
                                         }
                                     },

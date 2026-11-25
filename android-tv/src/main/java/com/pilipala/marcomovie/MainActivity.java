@@ -25,6 +25,13 @@ public final class MainActivity extends Activity {
     final DetailCache detailCache = new DetailCache();
     final SingleFlight<String> detailFlights = new SingleFlight<>();
     Future<?> detailPrefetch;
+    /**
+     * Sites whose engine this session already tried to warm on focus. The engine itself lands in
+     * {@code engines}; this set only stops a focused card from re-submitting the same 8-second
+     * init while it is still running. Cleared whenever the config epoch changes.
+     */
+    final java.util.Set<String> engineWarmAttempts =
+            java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<>());
     final List<Future<?>> pageRequests = new ArrayList<>();
     final ExecutorService artwork = Executors.newFixedThreadPool(8);
     final List<Future<?>> artworkRequests = new ArrayList<>();

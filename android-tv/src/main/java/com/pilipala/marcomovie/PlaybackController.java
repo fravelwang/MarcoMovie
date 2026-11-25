@@ -278,6 +278,10 @@ final class PlaybackController {
         private boolean selfRequested;
         private String pendingLabel;
         private String pendingTarget;
+        /** Re-resolutions of the same episode after the CDN rejected a signed direct URL. */
+        private int freshResolves;
+        /** Set while our own re-resolve runs, so the counters survive the restart. */
+        private boolean freshResolveRequested;
 
         void reset(Cms.Video next) {
             video = next;
@@ -286,7 +290,23 @@ final class PlaybackController {
             selfRequested = false;
             pendingLabel = null;
             pendingTarget = null;
+            freshResolves = 0;
+            freshResolveRequested = false;
         }
+    }
+
+    /**
+     * True when the failure came from a signed netdisk address that a fresh resolve can replace:
+     * the CDN expires these URLs and answers 403/404/412 for the stale ticket.
+     */
+    private static boolean isExpiredDirectUrl(Cms.Episode ep, int httpStatus) {
+        if (ep == null) return false;
+        if (httpStatus != 403 && httpStatus != 404 && httpStatus != 412) return false;
+        boolean netdisk =
+                ep.media.optBoolean("_netdiskHls", false)
+                        || ep.media.optBoolean("_forceMpv", false)
+                        || ep.media.optBoolean("_noCache", false);
+        return netdisk && ep.origin != null && ep.origin.url != null && !ep.origin.url.trim().isEmpty();
     }
 
     /** Two hops show the feature without turning playback into a line roulette. */
@@ -486,7 +506,10 @@ final class PlaybackController {
 
     static void resolvePlayer(
             MainActivity a, Cms.Site s, Cms.Video v, Cms.Line line, Cms.Episode ep) {
-        if (lineFailover.selfRequested) {
+        if (lineFailover.freshResolveRequested) {
+            // Our own re-resolve: same episode, same line, so the attempt budgets must survive.
+            lineFailover.freshResolveRequested = false;
+        } else if (lineFailover.selfRequested) {
             // Our own automatic line switch: keep the attempt budget and the tried set.
             lineFailover.selfRequested = false;
         } else {
@@ -2528,6 +2551,46 @@ final class PlaybackController {
                                                             int httpStatus = mp.getLastHttpStatus();
                                                             logAttribution(
                                                                     a, s, kind, what, httpStatus);
+                                                            // A netdisk direct URL is signed and short
+                                                            // lived: quark answers 412 (and 403/404)
+                                                            // once the token went stale between the
+                                                            // resolve and the first frame. Re-resolve
+                                                            // the very same episode from its share id
+                                                            // before showing "片源服务器返回错误".
+                                                            if (kind
+                                                                            == PlaybackFailure
+                                                                                    .Attribution
+                                                                                    .SOURCE
+                                                                    && isExpiredDirectUrl(ep, httpStatus)
+                                                                    && lineFailover.freshResolves < 1) {
+                                                                lineFailover.freshResolves++;
+                                                                lineFailover.freshResolveRequested = true;
+                                                                final Cms.Episode again = ep.origin;
+                                                                a.resumeAt = 0;
+                                                                a.playStatus.setText("直链已过期，正在重新解析…");
+                                                                if (a.playerChrome != null) {
+                                                                    a.playerChrome.setLoading(true);
+                                                                }
+                                                                AppLog.w(
+                                                                        "PlaybackController",
+                                                                        "fresh resolve after http="
+                                                                                + httpStatus
+                                                                                + " site="
+                                                                                + (s == null ? "" : s.key));
+                                                                a.ui.post(
+                                                                        () -> {
+                                                                            if (ticket
+                                                                                    != a.generation)
+                                                                                return;
+                                                                            resolvePlayer(
+                                                                                    a,
+                                                                                    s,
+                                                                                    v,
+                                                                                    a.activeLine,
+                                                                                    again);
+                                                                        });
+                                                                return true;
+                                                            }
                                                             a.playStatus.setText(
                                                                     mp.getFailureMessage(what));
                                                             showControls(a, true);

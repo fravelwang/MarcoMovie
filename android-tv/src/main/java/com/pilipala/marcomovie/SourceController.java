@@ -282,6 +282,7 @@ final class SourceController {
             a.engineEpoch++;
             old = new ArrayList<>(a.engines.values());
             a.engines.clear();
+            a.engineWarmAttempts.clear();
         }
         if (!old.isEmpty())
             new Thread(
@@ -443,6 +444,39 @@ final class SourceController {
             }
         } catch (Throwable ignored) {
         }
+    }
+
+    /**
+     * Builds a site's engine while its card is focused, so pressing OK does not pay the one-off
+     * init cost. Measured on the box: the netdisk spider plugins spend 8.2-9.4 s in {@code init}
+     * (their own upstream times out first), which made every detail page look broken.
+     *
+     * <p>Deliberately narrow: one attempt per site per config epoch, never for config/netdisk
+     * folder entries, and the result is simply left in {@code engines} for the real open.
+     */
+    static void warmEngineOnFocus(MainActivity a, Cms.Site site) {
+        if (a == null || site == null || a.reduced) return;
+        if (site.key == null || site.key.trim().isEmpty()) return;
+        if (isConfigOrNetdiskSite(site)) return;
+        if (SearchCoordinator.isSiteWedged(site.key)) return;
+        synchronized (a) {
+            if (a.engines.containsKey(site.key)) return;
+        }
+        if (!a.engineWarmAttempts.add(site.key)) return;
+        final int epoch = a.engineEpoch;
+        RequestScope.submit(
+                a.details,
+                () -> {
+                    try {
+                        synchronized (a) {
+                            if (epoch != a.engineEpoch) return;
+                            if (a.engines.containsKey(site.key)) return;
+                        }
+                        engine(a, site);
+                    } catch (Throwable ignored) {
+                        // Speculative: a failure here is reported by the real open, not by warming.
+                    }
+                });
     }
 
     static void prefetchDetail(MainActivity a, Cms.Site site, Cms.Video video) {
