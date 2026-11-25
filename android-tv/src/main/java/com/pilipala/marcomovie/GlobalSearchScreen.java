@@ -1888,19 +1888,21 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
         final java.util.List<Object[]> work = new java.util.ArrayList<>();
         if (activeFilter.isEmpty()) {
             LibraryAggregator.Result mergedNow = mergeResults();
-            a.searchWall = mergedNow;
-            a.searchWallEpoch = a.engineEpoch;
+            // The results page is a ledger writer, not a second source model: folding the merge in
+            // teaches the ledger the titles the 200-card wall never aggregated, and the cards below
+            // then read back through SourceLedger.resolve like every other card in the app.
+            a.sourceLedger.absorb(mergedNow);
             for (LibraryAggregator.Item item : mergedNow.items) {
-                Cms.Site preferred = LibraryAggregator.preferredSite(item);
-                if (preferred == null) continue;
-                Cms.Video video = item.videosBySite.get(preferred.key);
-                if (video == null) continue;
+                SourceLedger.Sources resolved = SourceLedger.resolve(a, item.video);
+                Cms.Site site = resolved.defaultSite;
+                Cms.Video video = resolved.defaultListing;
+                if (site == null || video == null) continue;
                 work.add(
                         new Object[] {
-                            preferred,
+                            site,
                             video,
-                            item.sites.size(),
-                            "m:" + LibraryAggregator.normalizeTitle(video.title)
+                            resolved.count(),
+                            "m:" + LibraryAggregator.normalizeTitle(item.video.title)
                         });
             }
         } else {

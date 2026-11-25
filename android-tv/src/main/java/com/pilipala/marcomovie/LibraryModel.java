@@ -10,9 +10,9 @@ import java.util.Map;
  * Immutable snapshot of one merged-library round. Pure data: the class must not touch Android
  * views or framework types so the wall can be reasoned about (and compared) without rendering.
  *
- * <p>{@link #from} defensive-copies everything it keeps: the aggregator keeps mutating its result
- * after a round finishes ({@code Result.addSource}), so holding those lists would make an
- * already-built model change under the UI.
+ * <p>{@link #from} defensive-copies everything it keeps: {@link SourceLedger} keeps learning sites
+ * for a title after the round finished, so holding its live lists would make an already-built model
+ * change under the UI.
  */
 final class LibraryModel {
 
@@ -107,14 +107,23 @@ final class LibraryModel {
     }
 
     static LibraryModel from(LibraryAggregator.Result result) {
-        return from(result, Mode.WALL);
+        return from(result, Mode.WALL, null);
+    }
+
+    static LibraryModel from(LibraryAggregator.Result result, Mode mode) {
+        return from(result, mode, null);
     }
 
     /**
      * The card list is the same merged wall in both modes; {@code mode} only records which entry
      * point produced it, so the query layer can pick the matching source filter field.
+     *
+     * <p>{@code ledger} folds every source the process has learned for a title into its card, so
+     * the wall's own filters (只看网盘 / 多来源 / 按来源筛选) agree with the badge and the detail
+     * page. The card objects still come from this round only — the ledger never adds cards.
      */
-    static LibraryModel from(LibraryAggregator.Result result, Mode mode) {
+    static LibraryModel from(
+            LibraryAggregator.Result result, Mode mode, SourceLedger ledger) {
         if (result == null) return empty(mode);
         List<Cms.Site> sources = new ArrayList<>();
         if (result.targets != null) {
@@ -126,16 +135,26 @@ final class LibraryModel {
         if (result.items != null) {
             for (LibraryAggregator.Item item : result.items) {
                 if (item == null || item.video == null) continue;
-                List<Cms.Site> sites =
-                        item.sites == null
-                                ? Collections.<Cms.Site>emptyList()
-                                : Collections.unmodifiableList(new ArrayList<>(item.sites));
-                Map<String, Cms.Video> bySite =
-                        item.videosBySite == null
-                                ? Collections.<String, Cms.Video>emptyMap()
-                                : Collections.unmodifiableMap(
-                                        new LinkedHashMap<>(item.videosBySite));
-                items.add(new MergedItem(item.video, sites, bySite));
+                List<Cms.Site> sites = new ArrayList<>();
+                Map<String, Cms.Video> bySite = new LinkedHashMap<>();
+                if (item.sites != null) sites.addAll(item.sites);
+                if (item.videosBySite != null) bySite.putAll(item.videosBySite);
+                if (ledger != null) {
+                    for (Cms.Site site : ledger.sourcesOf(item.video)) {
+                        if (site == null || site.key == null || bySite.containsKey(site.key)) {
+                            continue;
+                        }
+                        Cms.Video listing = ledger.videoAt(item.video, site.key);
+                        if (listing == null) continue;
+                        sites.add(site);
+                        bySite.put(site.key, listing);
+                    }
+                }
+                items.add(
+                        new MergedItem(
+                                item.video,
+                                Collections.unmodifiableList(sites),
+                                Collections.unmodifiableMap(bySite)));
             }
         }
         return new LibraryModel(

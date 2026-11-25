@@ -795,10 +795,20 @@ final class HomeScreen {
 
     /** Applies the cached wall, joins a load already in flight, or starts a new aggregation. */
     void ensureLibraryWall() {
-        LibraryAggregator.Result cached = freshLibraryWall();
-        if (cached != null) {
-            applyLibraryWall(cached);
-            return;
+        ensureLibraryWall(false);
+    }
+
+    /**
+     * {@code force} re-aggregates even while a fresh wall is cached (the retry button). The source
+     * ledger survives either way: a failed round is no reason to forget a site that carries a title.
+     */
+    void ensureLibraryWall(boolean force) {
+        if (!force) {
+            LibraryAggregator.Result cached = freshLibraryWall();
+            if (cached != null) {
+                applyLibraryWall(cached);
+                return;
+            }
         }
         boolean joined = false;
         synchronized (a) {
@@ -836,6 +846,9 @@ final class HomeScreen {
                                         if (epoch == a.engineEpoch) {
                                             a.libraryWall = loaded;
                                             a.libraryWallEpoch = epoch;
+                                            // The wall round is one of the four ledger writers: its
+                                            // cards' sites are what "the wall knows" means.
+                                            a.sourceLedger.absorb(loaded);
                                         }
                                         a.libraryWallLoading = false;
                                         waiters = new ArrayList<>(a.libraryWallWaiters);
@@ -893,15 +906,11 @@ final class HomeScreen {
         wireNavigation();
     }
 
-    /** Rebuilds the wall after the retry button is pressed. */
+    /** Rebuilds the wall after the retry button is pressed; the source ledger is kept. */
     void retryLibraryWall() {
-        synchronized (a) {
-            a.libraryWall = null;
-            a.libraryWallEpoch = -1;
-        }
         if (state != null) state.categoryFailed = false;
         if (more != null) more.setText("加载更多");
-        ensureLibraryWall();
+        ensureLibraryWall(true);
     }
 
     void applyLibraryWall(LibraryAggregator.Result result) {
@@ -917,7 +926,9 @@ final class HomeScreen {
         filter.year = wallYear;
         filter.area = wallArea;
         filter.genre = wallGenre;
-        LibraryModel model = LibraryModel.from(result, filter.mode);
+        // The cards come from this round, but their source lists are merged from the one ledger:
+        // that is what makes a card's "N 源" agree with what the home page and detail page say.
+        LibraryModel model = LibraryModel.from(result, filter.mode, a.sourceLedger);
         List<LibraryModel.MergedItem> visible = LibraryQuery.visible(model, filter);
         for (LibraryModel.MergedItem item : visible) videos.add(item.video);
 
@@ -2812,17 +2823,9 @@ final class HomeScreen {
         }
     }
 
-    /** The sites that carried this card, straight from the aggregation result. */
+    /** The sites that carry this card, read from the one source ledger in playback order. */
     List<Cms.Site> wallSources(Cms.Video video) {
-        if (video == null) return Collections.emptyList();
-        LibraryAggregator.Result searched = a.searchWall;
-        if (searched != null && a.searchWallEpoch == a.engineEpoch) {
-            List<Cms.Site> fromSearch = searched.sourcesOf(video);
-            if (!fromSearch.isEmpty()) return netdiskFirst(a, fromSearch);
-        }
-        LibraryAggregator.Result wall = a.libraryWall;
-        if (wall == null || a.libraryWallEpoch != a.engineEpoch) return Collections.emptyList();
-        return netdiskFirst(a, wall.sourcesOf(video));
+        return SourceLedger.resolve(a, video).sites;
     }
 
     /**
@@ -2877,10 +2880,10 @@ final class HomeScreen {
         return 1;
     }
 
-    /** The site a wall card opens with: its first aggregated source, or the screen site. */
+    /** The site a wall card opens with: the ledger's default source, or the screen site. */
     Cms.Site siteFor(Cms.Video video) {
-        List<Cms.Site> sources = wallSources(video);
-        return sources.isEmpty() ? site : sources.get(0);
+        Cms.Site source = SourceLedger.resolve(a, video).defaultSite;
+        return source == null ? site : source;
     }
 
     /**
@@ -2888,12 +2891,13 @@ final class HomeScreen {
      * and some hosts are known dead from this box, so prefer a poster whose host has not failed.
      */
     String bestWallPoster(MainActivity a, Cms.Video video) {
-        String primary = video == null ? null : video.poster;
-        if (a.libraryWall == null || video == null) return primary;
-        if (!PosterHostHealth.suspect(a, primary)) return primary;
-        for (Cms.Site source : a.libraryWall.sourcesOf(video)) {
+        if (video == null) return null;
+        String primary = video.poster;
+        SourceLedger.Sources sources = SourceLedger.resolve(a, video);
+        if (sources.isEmpty() || !PosterHostHealth.suspect(a, primary)) return primary;
+        for (Cms.Site source : sources.sites) {
             if (source == null) continue;
-            Cms.Video candidate = a.libraryWall.videoAt(video, source.key);
+            Cms.Video candidate = sources.listingAt(source.key);
             if (candidate == null) continue;
             String poster = candidate.poster;
             if (poster == null || poster.trim().isEmpty()) continue;
@@ -2955,6 +2959,72 @@ final class HomeScreen {
 
     int librarySourceCount(Cms.Video video) {
         return wallSources(video).size();
+    }
+
+    /**
+     * Updates one card's "N 源" badge after a background source search found another site for it.
+     * Deliberately does not rebuild the page: {@code a.refresh()} constructs a new HomeScreen,
+     * which used to throw the wall back to the top and leave focus on a different card.
+     */
+    void refreshCardSourceBadge(Cms.Video video) {
+        if (video == null || state == null || a.root == null) return;
+        int index = -1;
+        for (int i = 0; i < state.videos.size(); i++) {
+            if (state.videos.get(i) == video) {
+                index = i;
+                break;
+            }
+        }
+        if (index < 0) return;
+        View card = a.root.findViewWithTag("home-video:" + index);
+        if (card == null) return;
+        updateCardSourceBadge(card, video);
+    }
+
+    /**
+     * Re-reads the source ledger for every card already on screen. The ledger grows in the
+     * background (search, detail matching, focus expansion); without this the wall keeps showing
+     * the count from the render it was built with, e.g. "1 源" for a title the detail page has
+     * already matched to two sites.
+     */
+    void refreshCardSourceBadges() {
+        if (state == null || state.videos == null) return;
+        final String prefix = "home-video:";
+        for (List<View> row : rows) {
+            if (row == null) continue;
+            for (View card : row) {
+                if (card == null) continue;
+                String tag = String.valueOf(card.getTag());
+                if (!tag.startsWith(prefix)) continue;
+                int index;
+                try {
+                    index = Integer.parseInt(tag.substring(prefix.length()));
+                } catch (NumberFormatException ignored) {
+                    continue;
+                }
+                if (index < 0 || index >= state.videos.size()) continue;
+                updateCardSourceBadge(card, state.videos.get(index));
+            }
+        }
+    }
+
+    /** Applies one card's current ledger count to its "N 源" pill and content description. */
+    void updateCardSourceBadge(View card, Cms.Video video) {
+        if (card == null || video == null) return;
+        int count = librarySourceCount(video);
+        if (count <= 0) return;
+        card.setContentDescription(video.title + "，" + count + " 个来源");
+        if (!(card instanceof android.view.ViewGroup)) return;
+        android.view.ViewGroup group = (android.view.ViewGroup) card;
+        if (group.getChildCount() == 0) return;
+        View artwork = group.getChildAt(0);
+        if (!(artwork instanceof android.view.ViewGroup)) return;
+        View badge = ((android.view.ViewGroup) artwork).findViewWithTag("card-source-count");
+        if (badge instanceof TextView) {
+            ((TextView) badge).setText(count + " 源");
+        } else if (artwork instanceof FrameLayout) {
+            attachSourceBadge((FrameLayout) artwork, count);
+        }
     }
 
     /** Small "N 源" corner pill, styled like the existing Douban badge. */

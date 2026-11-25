@@ -680,6 +680,30 @@ final class TvDetailHost {
         return out;
     }
 
+    /**
+     * Last resort for a curated page whose search found nothing: the ledger may still hold a
+     * playable listing for this title (the wall or the search page learned it earlier). Opening it
+     * is strictly better than telling the user there is no source. Returns true when it took over.
+     */
+    private static boolean openLedgerListing(
+            MainActivity a,
+            Cms.Video curated,
+            List<MatchedSource> matches,
+            MatchedSource[] pendingPick,
+            Runnable triggerLoadMatched) {
+        if (a == null || curated == null || pendingPick == null || triggerLoadMatched == null) {
+            return false;
+        }
+        SourceLedger.Sources known = SourceLedger.resolve(a, curated);
+        if (known.defaultSite == null || known.defaultListing == null) return false;
+        MatchedSource picked =
+                new MatchedSource(known.defaultSite, known.defaultListing, 100);
+        matches.add(picked);
+        pendingPick[0] = picked;
+        triggerLoadMatched.run();
+        return true;
+    }
+
     private static List<Cms.Site> collectUserSearchableSites(MainActivity a) {
         List<Cms.Site> sources = new ArrayList<>();
         if (a == null || a.config == null || a.config.sites == null) return sources;
@@ -716,9 +740,24 @@ final class TvDetailHost {
         final List<Cms.Site> targetSources =
                 selectCuratedSearchSources(allSources, selectedKey, CURATED_MAX_SOURCES);
 
+        // One ledger read decides where this recommendation opens. A curated card carries only
+        // metadata, so it can only open a source somebody already wrote down: the wall round, the
+        // search page, or an earlier match. When that default is a netdisk site there is nothing to
+        // search — open it and list the ledger's other sites in 换站观看. Otherwise fall through to
+        // the bounded cross-site search and write every hit back into the ledger, so the wall card
+        // and this page cannot end up naming different sources for the same show.
+        final SourceLedger.Sources known = SourceLedger.resolve(a, curated);
+        final Cms.Site ledgerSource = known.defaultSite;
+        final Cms.Video ledgerListing = known.defaultListing;
+        final boolean openFromLedger =
+                ledgerSource != null
+                        && ledgerListing != null
+                        && HomeScreen.siteRank(ledgerSource) == 0;
+
         final Cms.Site[] activeSite = {TvCuratedHome.curatedSite()};
         final Cms.Video[] activeVideo = {curated};
         final WatchHistory.Entry[] activeBookmark = {null};
+        final boolean[] playbackStarted = {false};
         final List<MatchedSource> matches = new ArrayList<>();
         final boolean[] detailBound = {false};
         final boolean[] detailLoading = {false};
@@ -730,7 +769,10 @@ final class TvDetailHost {
                     if (c != null) c.close();
                 };
 
-        final Cms.Site primarySource = targetSources.isEmpty() ? null : targetSources.get(0);
+        final Cms.Site primarySource =
+                openFromLedger
+                        ? ledgerSource
+                        : (targetSources.isEmpty() ? ledgerSource : targetSources.get(0));
         final List<Cms.Site> fallbackSources =
                 targetSources.size() > 1
                         ? new ArrayList<>(targetSources.subList(1, targetSources.size()))
@@ -739,7 +781,6 @@ final class TvDetailHost {
         final Runnable[] startFallbackSearchRef = new Runnable[1];
 
         final TvV17DetailScreen[] holder = new TvV17DetailScreen[1];
-        final Runnable[] openSourcePickerRef = new Runnable[1];
 
         TvV17DetailScreen ui =
                 new TvV17DetailScreen(
@@ -768,6 +809,7 @@ final class TvDetailHost {
                                         || !hasPlayableLines(v)) {
                                     return;
                                 }
+                                playbackStarted[0] = true;
                                 WatchHistory.Entry bm = activeBookmark[0];
                                 int[] sel =
                                         initialSelection(
@@ -889,6 +931,9 @@ final class TvDetailHost {
                     @Override
                     public void accept(MatchedSource picked) {
                         if (!valid.get() || picked == null) return;
+                        // A cross-site match is a ledger write even when it only ends up as a
+                        // 换站观看 entry; that is how the wall card learns this site too.
+                        SourceLedger.remember(a, picked.site, picked.listing);
                         detailLoading[0] = true;
                         ui.setLoadingStatus("正在从「" + picked.site.name + "」加载播放线路…");
                         MainActivity.Done<Cms.Video> applyLoaded =
@@ -956,14 +1001,12 @@ final class TvDetailHost {
                                             fileCap,
                                             histCap);
                                     ui.setLoadingStatus("");
-                                    if (matches.size() > 1 && openSourcePickerRef[0] != null) {
-                                        ui.setSourceSwitchAction(
-                                                "⇄ 切换来源 (" + matches.size() + ")",
-                                                openSourcePickerRef[0]);
-                                    } else {
-                                        final Cms.Video mergedVideo = loaded;
+                                    {
+                                        // The switch list is the ledger's, never the search hits':
+                                        // it must match the wall card's badge, the "来自 N 个站点"
+                                        // row and this page's own default source.
                                         final java.util.List<Object[]> merged =
-                                                LibraryAggregator.sourcesWithListings(a, mergedVideo);
+                                                SourceLedger.resolve(a, loaded).withListings();
                                         ui.setSourceSwitchAction(
                                                 merged.size() > 1
                                                         ? "⇄ 切换来源 (" + merged.size() + ")"
@@ -1037,40 +1080,30 @@ final class TvDetailHost {
                     }
                 };
 
-        openSourcePickerRef[0] =
+        // Before playback starts, a background match may make the ledger's default source better
+        // than the one this page opened with (an ordinary site -> the netdisk site the wall's own
+        // listing sample missed). Adopt it, so "当前来源" equals what every card would open.
+        ui.setSourceUpgradeAction(
                 () -> {
-                    closeCoordinator.run();
-                    if (!valid.get() || matches.isEmpty()) {
-                        a.openSearch(query);
+                    if (!valid.get()
+                            || !detailBound[0]
+                            || detailLoading[0]
+                            || playbackStarted[0]
+                            || activeSite[0] == null) {
                         return;
                     }
-                    String[] labels = new String[matches.size() + 1];
-                    for (int i = 0; i < matches.size(); i++) {
-                        MatchedSource m = matches.get(i);
-                        String activeMark =
-                                Objects.equals(m.site.key, activeSite[0].key) ? "（当前）" : "";
-                        String remark =
-                                m.listing.remarks != null && !m.listing.remarks.trim().isEmpty()
-                                        ? " · " + m.listing.remarks.trim()
-                                        : "";
-                        labels[i] = m.site.name + activeMark + remark;
+                    SourceLedger.Sources now = SourceLedger.resolve(a, curated);
+                    if (now.defaultSite == null || now.defaultListing == null) return;
+                    if (now.defaultSite.key.equals(activeSite[0].key)) return;
+                    if (HomeScreen.siteRank(now.defaultSite) >= HomeScreen.siteRank(activeSite[0])) {
+                        return;
                     }
-                    labels[matches.size()] = "🔍 前往全站搜索查看更多来源";
-                    new AppDialog.Builder(a)
-                            .setTitle("选择已添加片源")
-                            .setItems(
-                                    labels,
-                                    (d, which) -> {
-                                        if (which >= 0 && which < matches.size()) {
-                                            pendingPick[0] = matches.get(which);
-                                            triggerLoadMatched[0].run();
-                                        } else {
-                                            a.openSearch(query);
-                                        }
-                                    })
-                            .setNegativeButton("取消", null)
-                            .show();
-                };
+                    MatchedSource better =
+                            new MatchedSource(now.defaultSite, now.defaultListing, 100);
+                    matches.add(better);
+                    pendingPick[0] = better;
+                    triggerLoadMatched[0].run();
+                });
 
         if (primarySource == null) {
             ui.play.setText("暂未匹配片源");
@@ -1095,6 +1128,10 @@ final class TvDetailHost {
                     if (!valid.get() || detailBound[0] || fallbackStarted[0]) return;
                     fallbackStarted[0] = true;
                     if (fallbackSources.isEmpty()) {
+                        if (openLedgerListing(
+                                a, curated, matches, pendingPick, triggerLoadMatched[0])) {
+                            return;
+                        }
                         ui.play.setText("暂未匹配片源");
                         ui.setLoadingStatus("已添加的片源中暂未找到《" + query + "》，可点击「全站搜索」手动查找");
                         ui.setSourceSwitchAction("🔍 全站搜索", () -> a.openSearch(query));
@@ -1130,6 +1167,10 @@ final class TvDetailHost {
                                                                 }
                                                             }
                                                             if (bestCand != null) {
+                                                                // Write before it becomes the
+                                                                // default: the detail row and the
+                                                                // wall badge must read the same list.
+                                                                SourceLedger.remember(a, site, bestCand);
                                                                 matches.add(
                                                                         new MatchedSource(
                                                                                 site, bestCand,
@@ -1155,7 +1196,12 @@ final class TvDetailHost {
                                                             if (!matches.isEmpty()) {
                                                                 pendingPick[0] = matches.get(0);
                                                                 triggerLoadMatched[0].run();
-                                                            } else {
+                                                            } else if (!openLedgerListing(
+                                                                    a,
+                                                                    curated,
+                                                                    matches,
+                                                                    pendingPick,
+                                                                    triggerLoadMatched[0])) {
                                                                 ui.play.setText("暂未匹配片源");
                                                                 ui.setLoadingStatus(
                                                                         "已添加的片源中暂未找到《"
@@ -1175,6 +1221,17 @@ final class TvDetailHost {
                     coordinatorRef[0] = coordinator;
                     coordinator.start(fallbackSources, query);
                 };
+
+        if (openFromLedger) {
+            // The ledger knows a netdisk site for this title: open it immediately and let the
+            // switch list show the ledger's other sources. No per-open cross-site search, so the
+            // wall card and this page cannot disagree about which source is the default.
+            MatchedSource picked = new MatchedSource(ledgerSource, ledgerListing, 100);
+            matches.add(picked);
+            pendingPick[0] = picked;
+            triggerLoadMatched[0].run();
+            return;
+        }
 
         // Phase 1: Search ONLY the user's primary/selected source first so clicking a show on
         // low-RAM TVs never fans out into extra spider JARs / Node / WebView runtimes
@@ -1203,6 +1260,7 @@ final class TvDetailHost {
                             () -> {
                                 if (!valid.get() || detailBound[0]) return;
                                 if (found != null) {
+                                    SourceLedger.remember(a, primarySource, found);
                                     MatchedSource picked =
                                             new MatchedSource(primarySource, found, foundScore);
                                     matches.add(picked);

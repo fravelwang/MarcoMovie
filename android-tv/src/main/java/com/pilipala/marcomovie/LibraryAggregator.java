@@ -114,13 +114,14 @@ final class LibraryAggregator {
         Item(Cms.Video video) {
             this.video = video;
         }
-
-        boolean hasSite(String key) {
-            return key != null && videosBySite.containsKey(key);
-        }
     }
 
-    /** Immutable result of one aggregation round plus the counters the home screen reports. */
+    /**
+     * The wall's own result for one aggregation round: the cards it produced and the sites each
+     * card's listing sample happened to carry. It is deliberately <em>not</em> the source ledger —
+     * {@link SourceLedger} owns "which sites carry which title" for the whole process, so a search
+     * result or a detail match can never add a card the wall did not aggregate.
+     */
     static final class Result {
         final List<Item> items = new ArrayList<>();
         final List<Cms.Site> targets = new ArrayList<>();
@@ -144,37 +145,12 @@ final class LibraryAggregator {
             return !items.isEmpty();
         }
 
-        /**
-         * The card holding this listing. Wall cards resolve by object identity; search results,
-         * curated recommendations and history entries resolve by the same normalized title the wall
-         * merges on, so all three entry points share one source list.
-         */
+        /** The wall card holding this listing, by object identity or by the merge key. */
         Item itemFor(Cms.Video video) {
             if (video == null) return null;
             Item item = itemsByVideo.get(video);
             if (item != null) return item;
             return itemsByTitle.get(normalizeTitle(video.title));
-        }
-
-        /** Absorbs a source found later (on-demand per-title search from the detail page). */
-        synchronized void addSource(Item item, Cms.Site site, Cms.Video video) {
-            if (item == null || site == null || video == null) return;
-            if (site.key == null || item.videosBySite.containsKey(site.key)) return;
-            item.sites.add(site);
-            item.videosBySite.put(site.key, video);
-            itemsByVideo.put(video, item);
-        }
-
-        /** Every site carrying this title, in config order; empty when the wall never saw it. */
-        List<Cms.Site> sourcesOf(Cms.Video video) {
-            Item item = itemFor(video);
-            return item == null ? Collections.emptyList() : Collections.unmodifiableList(item.sites);
-        }
-
-        /** That site's own listing entry, or null when the site did not carry the title. */
-        Cms.Video videoAt(Cms.Video video, String siteKey) {
-            Item item = itemFor(video);
-            return item == null || siteKey == null ? null : item.videosBySite.get(siteKey);
         }
     }
 
@@ -194,6 +170,19 @@ final class LibraryAggregator {
             out.add(site);
         }
         return out;
+    }
+
+    /**
+     * The wall's current card result, or null when a config change invalidated it. This answers
+     * "which cards are on the wall", never "which sites carry this title" — that is
+     * {@link SourceLedger}.
+     */
+    static Result wallCards(MainActivity a) {
+        if (a == null) return null;
+        synchronized (a) {
+            Result result = a.libraryWall;
+            return result != null && a.libraryWallEpoch == a.engineEpoch ? result : null;
+        }
     }
 
     /**
@@ -514,12 +503,6 @@ final class LibraryAggregator {
         return best;
     }
 
-    /** The site a merged card should open with: the share source when there is one. */
-    /**
-     * The merged sources for one title, each with that site's own listing, ordered for playback
-     * (cloud drive first). The detail page's switch-source action lists these directly instead of
-     * sending the user into the search screen.
-     */
     /**
      * Copies year/area/genre from a fetched detail onto the merged item's card video.
      *
@@ -529,14 +512,9 @@ final class LibraryAggregator {
      */
     static void enrichMetadata(MainActivity a, Cms.Video detail) {
         if (a == null || detail == null) return;
-        Result merged =
-                a.searchWall != null && a.searchWallEpoch == a.engineEpoch
-                        ? a.searchWall
-                        : (a.libraryWall != null && a.libraryWallEpoch == a.engineEpoch
-                                ? a.libraryWall
-                                : null);
-        if (merged == null) return;
-        Item item = merged.itemFor(detail);
+        Result wall = wallCards(a);
+        if (wall == null) return;
+        Item item = wall.itemFor(detail);
         if (item == null || item.video == null) return;
         Cms.Video card = item.video;
         if (isEmpty(card.year) && !isEmpty(detail.year)) card.year = detail.year;
@@ -546,37 +524,6 @@ final class LibraryAggregator {
 
     private static boolean isEmpty(String value) {
         return value == null || value.trim().isEmpty();
-    }
-
-    static List<Object[]> sourcesWithListings(MainActivity a, Cms.Video video) {
-        List<Object[]> out = new ArrayList<>();
-        if (a == null || video == null) return out;
-        Result merged =
-                a.searchWall != null && a.searchWallEpoch == a.engineEpoch
-                        ? a.searchWall
-                        : (a.libraryWall != null && a.libraryWallEpoch == a.engineEpoch
-                                ? a.libraryWall
-                                : null);
-        if (merged == null) return out;
-        Item item = merged.itemFor(video);
-        if (item == null) return out;
-        List<Cms.Site> sites = new ArrayList<>(item.sites);
-        sites.sort((l, r) -> Integer.compare(rank(l), rank(r)));
-        for (Cms.Site site : sites) {
-            Cms.Video listing = item.videosBySite.get(site.key);
-            if (listing == null) continue;
-            out.add(new Object[] {site, listing});
-        }
-        return out;
-    }
-
-    private static int rank(Cms.Site site) {
-        if (site == null) return 1;
-        String name = site.name == null ? "" : site.name;
-        String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
-        if (name.contains("网盘") || name.contains("盘搜") || api.contains("maccms")) return 0;
-        if (name.contains("磁力") || name.contains("P2P")) return 2;
-        return 1;
     }
 
     static Cms.Site preferredSite(Item item) {

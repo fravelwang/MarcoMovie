@@ -78,6 +78,7 @@ final class TvV17DetailScreen {
     private Runnable seasonsAction;
     private Runnable scrapeAction;
     private Runnable switchSourceAction;
+    private Runnable sourceUpgradeAction;
     private ImmersivePoster.SubjectDetails officialDetails;
     private int detectedSeasonCount;
     private double resolvedDouban = 0.0;
@@ -106,6 +107,21 @@ final class TvV17DetailScreen {
         view = new FrameLayout(a);
         view.setTag("tv-v17-detail");
         view.setBackgroundColor(initialAmbient);
+        view.addOnAttachStateChangeListener(
+                new View.OnAttachStateChangeListener() {
+                    @Override
+                    public void onViewAttachedToWindow(View v) {
+                        active = new java.lang.ref.WeakReference<>(TvV17DetailScreen.this);
+                    }
+
+                    @Override
+                    public void onViewDetachedFromWindow(View v) {
+                        TvV17DetailScreen screen = active == null ? null : active.get();
+                        if (screen == TvV17DetailScreen.this) {
+                            active = new java.lang.ref.WeakReference<>(null);
+                        }
+                    }
+                });
 
         // Full-bleed cinema backdrop with Apple TV+ left-aligned directional vignette
         cover = new ImmersivePoster(a, "detail-cover");
@@ -488,15 +504,34 @@ final class TvV17DetailScreen {
         }
     }
 
-    /** Sites the library wall knows for this title; the wall is the one fact source for switching. */
+    /**
+     * The attached detail page, so a ledger write can refresh its source row in place. A page
+     * rebuild here is exactly what used to throw the wall back to the top.
+     */
+    private static java.lang.ref.WeakReference<TvV17DetailScreen> active =
+            new java.lang.ref.WeakReference<>(null);
+
+    /**
+     * Re-reads the one source ledger on the open page after a background match landed: the
+     * "来自 N 个站点" row refreshes in place, and a page that has not started playing may adopt
+     * the ledger's better default source, so what is on screen matches what every card would open.
+     */
+    static void reloadActiveSources() {
+        TvV17DetailScreen screen = active == null ? null : active.get();
+        if (screen == null) return;
+        screen.refreshSourceRow();
+        if (screen.sourceUpgradeAction != null) screen.sourceUpgradeAction.run();
+    }
+
+    /** Set by the curated page: adopt the ledger default when it outranks the current source. */
+    void setSourceUpgradeAction(Runnable action) {
+        this.sourceUpgradeAction = action;
+    }
+
+    /** Sites the one source ledger knows for this title, in playback order. */
     private List<Cms.Site> knownSources() {
-        MainActivity a = host;
-        if (a == null || video == null) return Collections.emptyList();
-        LibraryAggregator.Result wall = a.libraryWall;
-        if (wall == null || a.libraryWallEpoch != a.engineEpoch) return Collections.emptyList();
-        // Same order the wall uses to pick a default source: cloud drive first, then pinned
-        // preferences, so the row and the picker never disagree about which site is "first".
-        return HomeScreen.netdiskFirst(a, wall.sourcesOf(video));
+        if (host == null || video == null) return Collections.emptyList();
+        return SourceLedger.resolve(host, video).sites;
     }
 
     /** Shows "来自 N 个站点：…" only when switching would actually do something. */
@@ -526,11 +561,8 @@ final class TvV17DetailScreen {
     private void openSourcePicker() {
         final MainActivity a = host;
         if (a == null) return;
-        final LibraryAggregator.Result wall = a.libraryWall;
-        final List<Cms.Site> sources =
-                wall == null || a.libraryWallEpoch != a.engineEpoch
-                        ? Collections.emptyList()
-                        : HomeScreen.netdiskFirst(a, wall.sourcesOf(video));
+        final SourceLedger.Sources known = SourceLedger.resolve(a, video);
+        final List<Cms.Site> sources = known.sites;
         if (sources.size() < 2) {
             // The wall may have been rebuilt since this row was drawn; say so instead of opening an
             // empty picker.
@@ -554,7 +586,7 @@ final class TvV17DetailScreen {
                             if (which < 0 || which >= sources.size()) return;
                             Cms.Site target = sources.get(which);
                             if (site != null && target.key.equals(site.key)) return;
-                            Cms.Video listing = wall.videoAt(video, target.key);
+                            Cms.Video listing = known.listingAt(target.key);
                             if (listing == null) {
                                 a.toast("「" + siteDisplayName(target) + "」里没有找到这部剧");
                                 return;

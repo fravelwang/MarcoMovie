@@ -25,15 +25,8 @@ public final class MainActivity extends Activity {
     final DetailCache detailCache = new DetailCache();
     final SingleFlight<String> detailFlights = new SingleFlight<>();
     Future<?> detailPrefetch;
-    /**
-     * Latest search-page merge (one entry per title, netdisk sources first). The detail page asks
-     * {@code wallSources} for the sources of whatever it opens, so feeding it here is what lets a
-     * search result offer every site instead of only the one it was found on.
-     */
-    LibraryAggregator.Result searchWall;
     /** Last time focus moved between cards/rows; background work backs off for a moment after. */
     volatile long lastFocusMoveAt;
-    int searchWallEpoch = -1;
     /**
      * Sites whose engine this session already tried to warm on focus. The engine itself lands in
      * {@code engines}; this set only stops a focused card from re-submitting the same 8-second
@@ -586,9 +579,13 @@ public final class MainActivity extends Activity {
                             return size() > MAX_HOME_SNAPSHOTS;
                         }
                     });
-    // Cross-site library wall shared by home rebuilds; a config change bumps engineEpoch.
+    // The wall's card sample, shared by home rebuilds; a config change bumps engineEpoch and the
+    // source ledger is cleared with it. This is not the source ledger: SourceLedger answers "which
+    // sites carry this title" for every entry point, and holds titles the wall never aggregated.
     LibraryAggregator.Result libraryWall;
     int libraryWallEpoch = -1;
+    /** The one source ledger of the process; see {@link SourceLedger}. */
+    final SourceLedger sourceLedger = new SourceLedger();
     boolean libraryWallLoading;
     /**
      * Library source selection, kept on the activity because every home rebuild constructs a new

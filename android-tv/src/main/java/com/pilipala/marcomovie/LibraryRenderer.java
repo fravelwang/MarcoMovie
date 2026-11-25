@@ -824,8 +824,14 @@ final class LibraryRenderer {
             art.setBackground(host.a.bg(0xff25252d, 10));
             art.setClipToOutline(true);
         }
-        Cms.Site cardSite = host.siteFor(video);
-        boolean showDoubanBadge = !SourceController.isConfigOrNetdiskActionCard(cardSite, video);
+        // One ledger read: which site this card opens on, and that site's own listing. The card's
+        // video object belongs to whichever site the wall sampled first, so opening its id against
+        // another site would fail — the default site must be opened with its own listing.
+        SourceLedger.Sources resolved = SourceLedger.resolve(host.a, video);
+        Cms.Site cardSite = resolved.defaultSite != null ? resolved.defaultSite : host.site;
+        Cms.Video cardVideo = resolved.defaultListing != null ? resolved.defaultListing : video;
+        boolean showDoubanBadge =
+                !SourceController.isConfigOrNetdiskActionCard(cardSite, cardVideo);
         FrameLayout artWrap =
                 TvV17PosterCard.wrapArtworkWithDoubanBadge(host.a, art, video, showDoubanBadge);
         card.addView(
@@ -855,7 +861,7 @@ final class LibraryRenderer {
         // w=0 means the decode target collapses and nothing is ever drawn; defer until laid out.
         final java.util.Map<String, String> deferredHeaders = posterHeaders;
         // Warm this card's detail while the user is still browsing, so pressing OK is instant.
-        SourceController.prefetchVisible(host.a, cardSite, video);
+        SourceController.prefetchVisible(host.a, cardSite, cardVideo);
         final String deferredPoster = host.bestWallPoster(host.a, video);
         host.loadCardPoster(host.a, art, deferredPoster, deferredHeaders, 0);
         TextView title = host.a.text(video.title, 13, 0xffc8c8d0);
@@ -867,7 +873,17 @@ final class LibraryRenderer {
         host.outline(card, false, 13, Color.TRANSPARENT);
         card.setContentDescription(
                 sourceCount > 0 ? video.title + "，" + sourceCount + " 个来源" : video.title);
-        card.setOnClickListener(v -> host.a.openListing(cardSite, video));
+        // Resolve again on the press: the ledger grows while the card sits there (focus expansion,
+        // search, detail matching), and the default source must be the one the ledger holds now —
+        // not the one captured when this view was built. Otherwise the list says 虎斑｜网盘 first
+        // and the page still opens 王子｜APP.
+        card.setOnClickListener(
+                v -> {
+                    SourceLedger.Sources now = SourceLedger.resolve(host.a, video);
+                    Cms.Site target = now.defaultSite != null ? now.defaultSite : cardSite;
+                    Cms.Video listing = now.defaultListing != null ? now.defaultListing : cardVideo;
+                    host.a.openListing(target, listing);
+                });
         card.setOnFocusChangeListener(
                 (v, f) -> {
                     if (host.a.isTvDevice()) TvV17PosterCard.focus(host.a, card, title, f);

@@ -280,6 +280,9 @@ final class SourceController {
         final List<SourceEngine> old;
         synchronized (a) {
             a.engineEpoch++;
+            // Sites from the old config are not the same objects; the ledger's keys would answer
+            // with dead site references, so it starts over with the new epoch.
+            a.sourceLedger.clear();
             old = new ArrayList<>(a.engines.values());
             a.engines.clear();
             a.engineWarmAttempts.clear();
@@ -681,22 +684,12 @@ final class SourceController {
 
     static void expandSourcesAsync(MainActivity a, Cms.Site site, Cms.Video video) {
         if (a == null || video == null || a.config == null) return;
-        final LibraryAggregator.Result wall =
-                a.searchWall != null && a.searchWallEpoch == a.engineEpoch
-                        ? a.searchWall
-                        : (a.libraryWall != null && a.libraryWallEpoch == a.engineEpoch
-                                ? a.libraryWall
-                                : null);
-        if (wall == null) {
-            AppLog.w("SourceExpand", "skip: no merged wall");
+        final SourceLedger.Sources known = SourceLedger.resolve(a, video);
+        if (known.isEmpty()) {
+            AppLog.w("SourceExpand", "skip: title not in source ledger: " + video.title);
             return;
         }
-        final LibraryAggregator.Item item = wall.itemFor(video);
-        if (item == null) {
-            AppLog.w("SourceExpand", "skip: title not in merged wall: " + video.title);
-            return;
-        }
-        if (item.sites.size() >= 6) return;
+        if (known.count() >= 6) return;
         final String title = video.title;
         final String key = LibraryAggregator.normalizeTitle(title);
         if (key == null || key.isEmpty()) return;
@@ -704,7 +697,7 @@ final class SourceController {
         java.util.List<Cms.Site> candidates = new java.util.ArrayList<>();
         for (Cms.Site candidate : a.config.sites) {
             if (candidate == null || !candidate.searchable) continue;
-            if (item.hasSite(candidate.key)) continue;
+            if (known.listingAt(candidate.key) != null) continue;
             if (!available(a, candidate)) continue;
             if (site != null && candidate.key.equals(site.key)) continue;
             candidates.add(candidate);
@@ -713,7 +706,7 @@ final class SourceController {
         final int budget = Math.min(10, candidates.size());
         AppLog.w(
                 "SourceExpand",
-                "title=" + title + " had=" + item.sites.size() + " candidates=" + budget);
+                "title=" + title + " had=" + known.count() + " candidates=" + budget);
         if (budget <= 0) return;
         final java.util.concurrent.atomic.AtomicInteger pending =
                 new java.util.concurrent.atomic.AtomicInteger(budget);
@@ -728,9 +721,17 @@ final class SourceController {
                                     Cms.listing(engine(a, candidate).search(title, 1));
                             for (Cms.Video hit : listing.videos) {
                                 if (hit == null) continue;
-                                if (!key.equals(LibraryAggregator.normalizeTitle(hit.title))) continue;
-                                wall.addSource(item, candidate, hit);
-                                AppLog.w("SourceExpand", "source added: " + candidate.key);
+                                // Same acceptance rule the curated detail page uses, so a site
+                                // that lists this title with a suffix still lands in the ledger.
+                                // Exact title equality here was why a wall card the home page had
+                                // already matched to 虎斑 kept reporting "1 源".
+                                if (TvCuratedHome.scoreSourceMatch(video, hit) <= 39) continue;
+                                // A hit is a ledger write, nothing else: no page rebuild here.
+                                SourceLedger.remember(a, candidate, hit);
+                                AppLog.w(
+                                        "SourceExpand",
+                                        "source added: " + candidate.key + " score="
+                                                + TvCuratedHome.scoreSourceMatch(video, hit));
                                 break;
                             }
                         } catch (Throwable ignored) {
@@ -739,9 +740,16 @@ final class SourceController {
                             if (pending.decrementAndGet() == 0) {
                                 a.ui.post(
                                         () -> {
-                                            if (epoch == a.engineEpoch && a.current != null) {
-                                                a.refresh();
-                                            }
+                                            if (epoch != a.engineEpoch || a.current == null) return;
+                                            // Refresh the one card in place. Rebuilding the page
+                                            // here used to yank the wall back to the top mid-scroll
+                                            // (a.refresh always constructs a new HomeScreen) and
+                                            // land focus on whatever index the old tag pointed at.
+                                            HomeScreen home = a.current.retainedHome;
+                                            if (home != null) home.refreshCardSourceBadge(video);
+                                            // An open detail page re-reads its "来自 N 个站点"
+                                            // row in place; no page rebuild either.
+                                            TvV17DetailScreen.reloadActiveSources();
                                         });
                             }
                         }
