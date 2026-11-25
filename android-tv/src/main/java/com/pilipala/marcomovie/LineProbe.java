@@ -111,6 +111,17 @@ final class LineProbe {
                 });
     }
 
+    /** Last measured first-byte latency for this site+line, or -1 when never probed. */
+    static long latencyMs(Cms.Site site, Cms.Line line) {
+        if (line == null) return -1;
+        String key =
+                (site == null || site.key == null ? "" : site.key)
+                        + "|"
+                        + (line.name == null ? "" : line.name);
+        Long value = LATENCY.get(key);
+        return value == null ? -1 : value;
+    }
+
     /** Probe up to {@code limit} lines, default ordering first; free of charge when nothing to do. */
     static void probeLines(MainActivity a, Cms.Site site, Cms.Video video, int limit) {
         if (video == null || video.lines == null) return;

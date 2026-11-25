@@ -61,9 +61,15 @@ final class SourceControlPanel {
                 "站点偏好",
                 selectedSiteName(a),
                 "调整偏好",
-                "决定片库、分类与搜索默认用哪个站点；同一部剧有多个来源时，详情页按这里的偏好顺序挑网盘在前的那条。",
+                "决定片库、分类与搜索默认用哪个站点；同一部剧有多个来源时，详情页按这里的偏好顺序挑网盘在前的那条。点按可置顶站点。",
                 true,
-                a::chooseSources);
+                () ->
+                        new AppDialog.Builder(a)
+                                .setTitle("站点偏好")
+                                .setMessage("选择默认浏览的站点，或调整多来源时的优先顺序。")
+                                .setNegativeButton("选择站点", (d, i) -> a.chooseSources())
+                                .setPositiveButton("调整优先级", (d, i) -> SourcePreferences.editOrder(a))
+                                .show());
 
         new AppDialog.Builder(a)
                 .setTitle("源 · 两层切换")

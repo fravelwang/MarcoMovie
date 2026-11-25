@@ -79,6 +79,9 @@ final class Prefs {
     static final String LIVE_LAST_SOURCE_URL = "live_last_source_url";
     static final String SELECTED_SITE = "selected_site";
     static final String PREFERRED_SITE = "preferred_site_identity";
+    /** "
+"-joined site keys, front = highest priority. Empty means "config order". */
+    static final String SITE_ORDER = "site_preference_order";
     static final String PREFERRED_LINE = "preferred_line";
     static final String LOADING_SITE = "loading_site";
     static final String EXPERIMENTAL_CSP = "experimental_csp";

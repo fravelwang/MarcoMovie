@@ -274,7 +274,7 @@ final class DetailScreen {
                                     () -> {
                                         if (remembered != null) a.playBookmark(s, v, remembered);
                                         else {
-                                            int prefIdx = SourcePreferences.lineIndex(a, v);
+                                            int prefIdx = SourcePreferences.lineIndex(a, s, v);
                                             a.resolvePlayer(
                                                     s,
                                                     v,
@@ -297,7 +297,7 @@ final class DetailScreen {
                         lastLp.topMargin = a.dp(6);
                         hero.addView(last, lastLp);
                     }
-                    int rememberedLine = SourcePreferences.lineIndex(a, v), rememberedPage = 0;
+                    int rememberedLine = SourcePreferences.lineIndex(a, s, v), rememberedPage = 0;
                     if (remembered != null)
                         for (int i = 0; i < v.lines.size(); i++)
                             if (v.lines.get(i).name.equals(remembered.line)) {

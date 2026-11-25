@@ -56,6 +56,16 @@ final class SourcePreferences {
     }
 
     static int lineIndex(MainActivity a, Cms.Video video) {
+        return lineIndex(a, null, video);
+    }
+
+    /**
+     * Same choice, but able to use what {@link LineProbe} already measured for this site: a line the
+     * picker marks 可用 (or one with a small first-byte latency) wins over an unknown line of the
+     * same class, so plain "play" stops spending its first attempt on a dead address.
+     */
+    static int lineIndex(MainActivity a, Cms.Site site, Cms.Video video) {
+        if (video == null || video.lines == null || video.lines.isEmpty()) return 0;
         String preferred = a.prefs.getString(Prefs.PREFERRED_LINE, "");
         for (int i = 0; i < video.lines.size(); i++) {
             if (video.lines.get(i).name.equals(preferred) && !video.lines.get(i).episodes.isEmpty())
@@ -84,8 +94,31 @@ final class SourcePreferences {
                 richest = i;
             }
         }
-        if (share >= 0) return share;
-        return richest >= 0 ? richest : 0;
+        int chosen = share >= 0 ? share : (richest >= 0 ? richest : 0);
+        if (site == null) return chosen;
+        // Same class only: a proven line beats an unproven one, then the faster first byte wins.
+        int best = chosen;
+        long bestLatency = LineProbe.latencyMs(site, video.lines.get(chosen));
+        boolean bestProven = "可用".equals(LineHealth.badge(a, site, video.lines.get(chosen)));
+        for (int i = 0; i < video.lines.size(); i++) {
+            if (i == chosen) continue;
+            Cms.Line line = video.lines.get(i);
+            if (line == null || line.episodes == null || line.episodes.isEmpty()) continue;
+            if (isShareLine(line) != isShareLine(video.lines.get(chosen))) continue;
+            boolean proven = "可用".equals(LineHealth.badge(a, site, line));
+            long latency = LineProbe.latencyMs(site, line);
+            if (proven && !bestProven) {
+                best = i;
+                bestProven = true;
+                bestLatency = latency;
+            } else if (proven == bestProven
+                    && latency > 0
+                    && (bestLatency <= 0 || latency < bestLatency)) {
+                best = i;
+                bestLatency = latency;
+            }
+        }
+        return best;
     }
 
     /**
@@ -113,10 +146,71 @@ final class SourcePreferences {
         return false;
     }
 
+    /** Site keys the user pinned, front = highest priority. */
+    static List<String> order(MainActivity a) {
+        List<String> keys = new ArrayList<>();
+        if (a == null || a.prefs == null) return keys;
+        String raw = a.prefs.getString(Prefs.SITE_ORDER, "");
+        if (raw == null || raw.isEmpty()) return keys;
+        for (String part : raw.split("\n")) {
+            String key = part == null ? "" : part.trim();
+            if (!key.isEmpty() && !keys.contains(key)) keys.add(key);
+        }
+        return keys;
+    }
+
+    /** Moves a site to the front of the queue, or removes it when it is already pinned. */
+    static void togglePin(MainActivity a, Cms.Site site) {
+        if (a == null || site == null || site.key == null) return;
+        List<String> keys = order(a);
+        if (keys.remove(site.key)) {
+            // Un-pinning keeps the rest of the order.
+        } else {
+            keys.add(0, site.key);
+        }
+        StringBuilder out = new StringBuilder();
+        for (String key : keys) {
+            if (out.length() > 0) out.append('\n');
+            out.append(key);
+        }
+        a.prefs.edit().putString(Prefs.SITE_ORDER, out.toString()).apply();
+    }
+
+    /** Small editor: tap a site to pin it to the front, tap again to release it. */
+    static void editOrder(MainActivity a) {
+        if (a == null || a.config == null) return;
+        List<Cms.Site> sites = new ArrayList<>();
+        for (Cms.Site site : a.config.sites) if (a.available(site)) sites.add(site);
+        List<String> pinned = order(a);
+        String[] names = new String[sites.size()];
+        for (int i = 0; i < sites.size(); i++) {
+            String key = sites.get(i).key;
+            int at = pinned.indexOf(key);
+            names[i] = (at >= 0 ? "★" + (at + 1) + " " : "　 ") + sites.get(i).name;
+        }
+        new AppDialog.Builder(a)
+                .wrapChoices()
+                .setTitle("站点优先级（点击置顶，再点取消）")
+                .setItems(
+                        names,
+                        (d, index) -> {
+                            togglePin(a, sites.get(index));
+                            editOrder(a);
+                        })
+                .setNegativeButton("完成", null)
+                .show();
+    }
+
     static List<Cms.Site> prioritized(MainActivity a, List<Cms.Site> sites) {
+        List<String> pinned = order(a);
         List<Cms.Site> ordered = new ArrayList<>();
-        for (Cms.Site site : sites) if (isPreferred(a, site)) ordered.add(site);
-        for (Cms.Site site : sites) if (!isPreferred(a, site)) ordered.add(site);
+        for (String key : pinned) {
+            for (Cms.Site site : sites) {
+                if (site != null && key.equals(site.key) && !ordered.contains(site)) ordered.add(site);
+            }
+        }
+        for (Cms.Site site : sites) if (isPreferred(a, site) && !ordered.contains(site)) ordered.add(site);
+        for (Cms.Site site : sites) if (!ordered.contains(site)) ordered.add(site);
         return ordered;
     }
 

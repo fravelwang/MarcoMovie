@@ -2906,11 +2906,11 @@ final class HomeScreen {
         LibraryAggregator.Result searched = a.searchWall;
         if (searched != null && a.searchWallEpoch == a.engineEpoch) {
             List<Cms.Site> fromSearch = searched.sourcesOf(video);
-            if (!fromSearch.isEmpty()) return netdiskFirst(fromSearch);
+            if (!fromSearch.isEmpty()) return netdiskFirst(a, fromSearch);
         }
         LibraryAggregator.Result wall = a.libraryWall;
         if (wall == null || a.libraryWallEpoch != a.engineEpoch) return Collections.emptyList();
-        return netdiskFirst(wall.sourcesOf(video));
+        return netdiskFirst(a, wall.sourcesOf(video));
     }
 
     /**
@@ -2918,12 +2918,20 @@ final class HomeScreen {
      * card opens by default and what the "来自 K 个站点" row lists first, so ordering here decides
      * both the default source and the switch order.
      */
-    static List<Cms.Site> netdiskFirst(List<Cms.Site> sources) {
+    static List<Cms.Site> netdiskFirst(MainActivity a, List<Cms.Site> sources) {
         if (sources == null || sources.size() < 2) return sources;
         List<Cms.Site> ordered = new ArrayList<>(sources);
+        final List<String> pinned = SourcePreferences.order(a);
         Collections.sort(
                 ordered,
                 (left, right) -> {
+                    int leftPin = left == null ? -1 : pinned.indexOf(left.key);
+                    int rightPin = right == null ? -1 : pinned.indexOf(right.key);
+                    if (leftPin >= 0 || rightPin >= 0) {
+                        if (leftPin < 0) return 1;
+                        if (rightPin < 0) return -1;
+                        return Integer.compare(leftPin, rightPin);
+                    }
                     boolean l = isNetdiskSite(left);
                     boolean r = isNetdiskSite(right);
                     if (l != r) return l ? -1 : 1;
