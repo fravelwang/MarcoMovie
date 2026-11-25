@@ -961,9 +961,54 @@ final class TvDetailHost {
                                                 "⇄ 切换来源 (" + matches.size() + ")",
                                                 openSourcePickerRef[0]);
                                     } else {
+                                        final Cms.Video mergedVideo = loaded;
+                                        final java.util.List<Object[]> merged =
+                                                LibraryAggregator.sourcesWithListings(a, mergedVideo);
                                         ui.setSourceSwitchAction(
-                                                "🔍 更多来源",
+                                                merged.size() > 1
+                                                        ? "⇄ 切换来源 (" + merged.size() + ")"
+                                                        : "🔍 更多来源",
                                                 () -> {
+                                                    if (merged.size() > 1) {
+                                                        String[] names = new String[merged.size()];
+                                                        for (int i = 0; i < merged.size(); i++) {
+                                                            Cms.Site s2 = (Cms.Site) merged.get(i)[0];
+                                                            String mark =
+                                                                    activeSite[0] != null
+                                                                                    && s2.key.equals(
+                                                                                            activeSite[0]
+                                                                                                    .key)
+                                                                            ? "（当前）"
+                                                                            : "";
+                                                            names[i] =
+                                                                    s2.name
+                                                                            + mark
+                                                                            + (i == 0
+                                                                                    ? " · 网盘优先"
+                                                                                    : "");
+                                                        }
+                                                        new AppDialog.Builder(a)
+                                                                .setTitle("切换来源")
+                                                                .setItems(
+                                                                        names,
+                                                                        (d, which) -> {
+                                                                            Cms.Site target =
+                                                                                    (Cms.Site)
+                                                                                            merged.get(
+                                                                                                            which)
+                                                                                                    [0];
+                                                                            Cms.Video listing =
+                                                                                    (Cms.Video)
+                                                                                            merged.get(
+                                                                                                            which)
+                                                                                                    [1];
+                                                                            closeCoordinator.run();
+                                                                            a.detail(target, listing);
+                                                                        })
+                                                                .setNegativeButton("取消", null)
+                                                                .show();
+                                                        return;
+                                                    }
                                                     closeCoordinator.run();
                                                     a.openSearch(query);
                                                 });

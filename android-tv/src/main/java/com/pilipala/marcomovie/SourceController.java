@@ -660,6 +660,19 @@ final class SourceController {
      * remaining sources for that exact title and fold them into the merged item, so "来自 K 个站点"
      * grows from two to what the config can really offer.
      */
+    private static volatile long lastSourceExpandAt;
+
+    /**
+     * Reverse matching for the card the user is resting on. Throttled to one title at a time: ten
+     * site searches per card would otherwise turn a scroll into a hundred background requests.
+     */
+    static void expandFocusedSources(MainActivity a, Cms.Site site, Cms.Video video) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastSourceExpandAt < 1200L) return;
+        lastSourceExpandAt = now;
+        expandSourcesAsync(a, site, video);
+    }
+
     static void expandSourcesAsync(MainActivity a, Cms.Site site, Cms.Video video) {
         if (a == null || video == null || a.config == null) return;
         final LibraryAggregator.Result wall =

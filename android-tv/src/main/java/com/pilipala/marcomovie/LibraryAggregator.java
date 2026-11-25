@@ -526,6 +526,42 @@ final class LibraryAggregator {
     }
 
     /** The site a merged card should open with: the share source when there is one. */
+    /**
+     * The merged sources for one title, each with that site's own listing, ordered for playback
+     * (cloud drive first). The detail page's switch-source action lists these directly instead of
+     * sending the user into the search screen.
+     */
+    static List<Object[]> sourcesWithListings(MainActivity a, Cms.Video video) {
+        List<Object[]> out = new ArrayList<>();
+        if (a == null || video == null) return out;
+        Result merged =
+                a.searchWall != null && a.searchWallEpoch == a.engineEpoch
+                        ? a.searchWall
+                        : (a.libraryWall != null && a.libraryWallEpoch == a.engineEpoch
+                                ? a.libraryWall
+                                : null);
+        if (merged == null) return out;
+        Item item = merged.itemFor(video);
+        if (item == null) return out;
+        List<Cms.Site> sites = new ArrayList<>(item.sites);
+        sites.sort((l, r) -> Integer.compare(rank(l), rank(r)));
+        for (Cms.Site site : sites) {
+            Cms.Video listing = item.videosBySite.get(site.key);
+            if (listing == null) continue;
+            out.add(new Object[] {site, listing});
+        }
+        return out;
+    }
+
+    private static int rank(Cms.Site site) {
+        if (site == null) return 1;
+        String name = site.name == null ? "" : site.name;
+        String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
+        if (name.contains("网盘") || name.contains("盘搜") || api.contains("maccms")) return 0;
+        if (name.contains("磁力") || name.contains("P2P")) return 2;
+        return 1;
+    }
+
     static Cms.Site preferredSite(Item item) {
         if (item == null) return null;
         Cms.Site best = null;

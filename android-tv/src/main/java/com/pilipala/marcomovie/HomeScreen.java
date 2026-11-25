@@ -70,6 +70,8 @@ final class HomeScreen {
     boolean libraryPerSite;
     /** Wall-local filters: no request, they only narrow the merged result already on screen. */
     boolean wallNetdiskOnly;
+    /** Multi-level classification filters, applied together (empty = 不限). */
+    String wallYear = "", wallArea = "", wallGenre = "";
     boolean wallMultiOnly;
     boolean wallSortByName;
     LinearLayout wallFilterRow;
@@ -889,6 +891,9 @@ final class HomeScreen {
             if (!librarySiteFilter.isEmpty() && !item.hasSite(librarySiteFilter)) continue;
             if (wallNetdiskOnly && !LibraryAggregator.hasShareSource(item)) continue;
             if (wallMultiOnly && item.sites.size() < 2) continue;
+            if (!wallYear.isEmpty() && !wallYear.equals(valueOf(item.video.year))) continue;
+            if (!wallArea.isEmpty() && !wallArea.equals(valueOf(item.video.area))) continue;
+            if (!wallGenre.isEmpty() && !genreContains(item.video.genre, wallGenre)) continue;
             shown.add(item);
         }
         if (wallSortByName) {
@@ -2919,6 +2924,8 @@ final class HomeScreen {
                                         if (v.hasFocus() && active()) {
                                             SourceController.warmEngineOnFocus(a, cardSite);
                                             SourceController.prefetchDetail(a, cardSite, video);
+                                            SourceController.expandFocusedSources(
+                                                    a, cardSite, video);
                                         }
                                     },
                                     360);
@@ -3187,6 +3194,92 @@ final class HomeScreen {
             applyWallFilterChange();
         });
         wallFilterRow.addView(optionRow, new LinearLayout.LayoutParams(-1, -2));
+
+        addTaxonomyRow("年份", wallTaxonomy(true), wallYear, value -> {
+            wallYear = wallYear.equals(value) ? "" : value;
+            rebuildWallFilters();
+            applyWallFilterChange();
+        });
+        addTaxonomyRow("地区", wallTaxonomy(false), wallArea, value -> {
+            wallArea = wallArea.equals(value) ? "" : value;
+            rebuildWallFilters();
+            applyWallFilterChange();
+        });
+        addTaxonomyRow("类别", wallGenres(), wallGenre, value -> {
+            wallGenre = wallGenre.equals(value) ? "" : value;
+            rebuildWallFilters();
+            applyWallFilterChange();
+        });
+    }
+
+    /** One classification row: label + 不限 + the values actually present in the wall, by count. */
+    void addTaxonomyRow(String label, List<String> values, String active, java.util.function.Consumer<String> pick) {
+        if (values.isEmpty()) return;
+        LinearLayout row = a.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setClipChildren(false);
+        TextView head = a.text(label, 12f * navScale, MainActivity.MUTED);
+        head.setPadding(0, 0, a.dp(8), 0);
+        row.addView(head);
+        addWallChip(row, "不限", "wall-" + label + "-all", active.isEmpty(), () -> {
+            if (!active.isEmpty()) pick.accept(active);
+        });
+        int shown = 0;
+        for (String value : values) {
+            if (shown++ >= 10) break;
+            addWallChip(row, value, "wall-" + label + ":" + value, value.equals(active), () -> pick.accept(value));
+        }
+        wallFilterRow.addView(row, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    static String valueOf(String raw) {
+        return raw == null ? "" : raw.trim();
+    }
+
+    static boolean genreContains(String genre, String value) {
+        if (genre == null || value == null || value.isEmpty()) return false;
+        for (String part : genre.split("[/,、| ]+")) {
+            if (part.trim().equals(value)) return true;
+        }
+        return false;
+    }
+
+    /** Distinct years present in the wall, newest first. */
+    List<String> wallTaxonomy(boolean years) {
+        java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
+        LibraryAggregator.Result wall = a.libraryWall;
+        if (wall == null || wall.items == null) return new ArrayList<>();
+        for (LibraryAggregator.Item item : wall.items) {
+            if (item == null || item.video == null) continue;
+            String value = valueOf(years ? item.video.year : item.video.area);
+            if (value.isEmpty() || value.length() > 8) continue;
+            counts.merge(value, 1, Integer::sum);
+        }
+        List<String> out = new ArrayList<>(counts.keySet());
+        if (years) out.sort((l, r) -> r.compareTo(l));
+        return out;
+    }
+
+    /** Distinct genres present in the wall, most common first. */
+    List<String> wallGenres() {
+        java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
+        LibraryAggregator.Result wall = a.libraryWall;
+        if (wall == null || wall.items == null) return new ArrayList<>();
+        for (LibraryAggregator.Item item : wall.items) {
+            if (item == null || item.video == null) continue;
+            String genre = valueOf(item.video.genre);
+            if (genre.isEmpty()) continue;
+            for (String part : genre.split("[/,、| ]+")) {
+                String value = part.trim();
+                if (value.isEmpty() || value.length() > 6) continue;
+                counts.merge(value, 1, Integer::sum);
+            }
+        }
+        List<java.util.Map.Entry<String, Integer>> ranked = new ArrayList<>(counts.entrySet());
+        ranked.sort((l, r) -> Integer.compare(r.getValue(), l.getValue()));
+        List<String> out = new ArrayList<>();
+        for (java.util.Map.Entry<String, Integer> entry : ranked) out.add(entry.getKey());
+        return out;
     }
 
     /** Sites that actually contributed to the wall, most items first; at most ten chips. */
