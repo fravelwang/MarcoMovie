@@ -63,6 +63,11 @@ final class HomeScreen {
      * otherwise it holds one site key picked in the filter menu.
      */
     String librarySiteFilter = "";
+    /**
+     * False = merged wall (default). True = browse one site with its own categories and filter
+     * schema, which is the only way 类型/地区/年份 filters make sense: those ids belong to a site.
+     */
+    boolean libraryPerSite;
     /** Wall-local filters: no request, they only narrow the merged result already on screen. */
     boolean wallNetdiskOnly;
     boolean wallMultiOnly;
@@ -231,7 +236,7 @@ final class HomeScreen {
         // merged wall back even when a config/netdisk site is the filter target.
         source =
                 pill(
-                        usesLibraryWall() ? "全部站点" : librarySiteName(librarySiteFilter),
+                        usesLibraryWall() ? "合并墙" : librarySiteName(librarySiteFilter),
                         "source-switcher",
                         this::showLibraryFilter);
         source.setPadding(a.dp(Math.round(14 * navScale)), 0, a.dp(Math.round(14 * navScale)), 0);
@@ -242,10 +247,10 @@ final class HomeScreen {
         source.setMaxWidth(a.dp(Math.round(220 * Math.max(1f, navScale))));
         source.setContentDescription(
                 usesLibraryWall()
-                        ? "片库筛选：全部站点，按确认键切换（片源与站点在 dock「源」里）"
-                        : "片库筛选："
+                        ? "片库来源：合并墙，按确认键切换"
+                        : "片库来源："
                                 + librarySiteName(librarySiteFilter)
-                                + "，按确认键切换（片源与站点在 dock「源」里）");
+                                + "，按确认键切换；同一行右侧可展开分类筛选");
         LinearLayout.LayoutParams sourceSize =
                 new LinearLayout.LayoutParams(-2, a.dp(Math.round(34 * navScale)));
         sourceSize.leftMargin = a.dp(14);
@@ -262,7 +267,21 @@ final class HomeScreen {
             filterSize.leftMargin = a.dp(10);
             heading.addView(filterToggle, filterSize);
         } else {
-            filterToggle = null;
+            filterToggle =
+                    a.isTvDevice()
+                            ? pill("筛选  ⌄", "home-wall-filters", this::showWallFilterDialog)
+                            : null;
+            if (filterToggle != null) {
+                filterToggle.setPadding(
+                        a.dp(Math.round(14 * navScale)), 0, a.dp(Math.round(14 * navScale)), 0);
+                UiCompat.setDefaultFocusHighlightEnabled(filterToggle, false);
+                filterToggle.setOnFocusChangeListener((v, f) -> styleFilterToggle(f));
+                styleFilterToggle(false);
+                LinearLayout.LayoutParams wallFilterSize =
+                        new LinearLayout.LayoutParams(-2, a.dp(Math.round(34 * navScale)));
+                wallFilterSize.leftMargin = a.dp(10);
+                heading.addView(filterToggle, wallFilterSize);
+            }
         }
         libraryParent.addView(heading);
         filters = new CategoryFlow(a, this::wireNavigation);
@@ -717,9 +736,11 @@ final class HomeScreen {
      * default "全部站点" filter is always the wall.
      */
     boolean usesLibraryWall() {
-        if (librarySiteFilter == null || librarySiteFilter.isEmpty()) return true;
-        Cms.Site filtered = siteForLibraryFilter(librarySiteFilter);
-        return filtered == null || !SourceController.isConfigOrNetdiskSite(filtered);
+        if (libraryPerSite && librarySiteFilter != null && !librarySiteFilter.isEmpty()) {
+            Cms.Site filtered = siteForLibraryFilter(librarySiteFilter);
+            if (filtered != null) return false;
+        }
+        return true;
     }
 
     /** Resolves a filter key against the active config; null when no such site exists. */
@@ -739,7 +760,11 @@ final class HomeScreen {
         if (filters != null) filters.setVisibility(View.GONE);
         if (categoryScroll != null) categoryScroll.setVisibility(View.GONE);
         if (inlineFilters != null) inlineFilters.setVisibility(View.GONE);
-        if (filterToggle != null) filterToggle.setVisibility(View.GONE);
+        // The wall's own 筛选 button lives in this same slot; only the per-site category toggle
+        // belongs to the chrome that the wall hides.
+        if (filterToggle != null) {
+            filterToggle.setVisibility(usesLibraryWall() ? View.VISIBLE : View.GONE);
+        }
         if (more != null) more.setVisibility(View.GONE);
         updateLibraryFilterPill();
         wireNavigation();
@@ -928,9 +953,15 @@ final class HomeScreen {
 
     void updateLibraryFilterPill() {
         if (source == null) return;
-        String label = librarySiteFilter.isEmpty() ? "全部站点" : librarySiteName(librarySiteFilter);
+        String label =
+                usesLibraryWall()
+                        ? "合并墙"
+                        : (librarySiteFilter.isEmpty() ? "全部站点" : librarySiteName(librarySiteFilter));
         source.setText(label);
-        source.setContentDescription("片库筛选：" + label + "，按确认键切换（片源与站点在 dock「源」里）");
+        source.setContentDescription(
+                "片库来源："
+                        + label
+                        + "，按确认键切换；同一行右侧的「筛选」展开过滤与分类");
     }
 
     String librarySiteName(String key) {
@@ -961,20 +992,21 @@ final class HomeScreen {
                     target.name == null || target.name.trim().isEmpty() ? target.key : target.name;
             if (target.key.equals(librarySiteFilter)) checked = i + 1;
         }
+        names[0] = "合并墙（全部站点）";
         new AppDialog.Builder(a)
-                .setTitle("片库筛选")
+                .setTitle("片库来源")
                 .wrapChoices()
                 .setSingleChoiceItems(
                         names,
                         checked,
                         (dialog, which) -> {
                             String next = which == 0 ? "" : targets.get(which - 1).key;
-                            if (next.equals(librarySiteFilter)) return;
+                            boolean perSite = which != 0;
+                            if (next.equals(librarySiteFilter) && perSite == libraryPerSite) return;
                             librarySiteFilter = next;
+                            libraryPerSite = perSite;
                             updateLibraryFilterPill();
-                            LibraryAggregator.Result cached = freshLibraryWall();
-                            if (cached != null) applyLibraryWall(cached);
-                            else ensureLibraryWall();
+                            a.refresh();
                         })
                 .setNegativeButton("关闭", null)
                 .show();
@@ -3083,11 +3115,11 @@ final class HomeScreen {
     void rebuildWallFilters() {
         if (wallFilterRow == null) return;
         wallFilterRow.removeAllViews();
-        if (!usesLibraryWall()) {
-            wallFilterRow.setVisibility(View.GONE);
-            return;
-        }
-        wallFilterRow.setVisibility(View.VISIBLE);
+        // The chips live in a dialog now: the inline row scrolled away with the grid and the remote
+        // could not reach it once the wall was longer than one screen.
+        wallFilterRow.setVisibility(View.GONE);
+        if (!usesLibraryWall()) return;
+        if (true) return;
         addWallChip("全部", "wall-all", !wallNetdiskOnly && !wallMultiOnly && !wallSortByName, () -> {
             wallNetdiskOnly = false;
             wallMultiOnly = false;
@@ -3129,6 +3161,29 @@ final class HomeScreen {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(Math.round(32 * navScale)));
         lp.rightMargin = a.dp(8);
         wallFilterRow.addView(chip, lp);
+    }
+
+    /** Wall filters as a dialog behind the heading's 筛选 button. */
+    void showWallFilterDialog() {
+        final String[] names = {"全部", "只看网盘", "多源合并（≥2 源）", "按名称排序"};
+        int checked = 0;
+        if (wallSortByName) checked = 3;
+        else if (wallMultiOnly) checked = 2;
+        else if (wallNetdiskOnly) checked = 1;
+        new AppDialog.Builder(a)
+                .setTitle("片库筛选")
+                .wrapChoices()
+                .setSingleChoiceItems(
+                        names,
+                        checked,
+                        (d, which) -> {
+                            wallNetdiskOnly = which == 1;
+                            wallMultiOnly = which == 2;
+                            wallSortByName = which == 3;
+                            applyWallFilterChange();
+                        })
+                .setNegativeButton("关闭", null)
+                .show();
     }
 
     void applyWallFilterChange() {
