@@ -1390,6 +1390,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                 * 1000L,
                         90000L,
                         a.isTvDevice() ? TvSearchPages.MAX_RESULTS : 24);
+coordinator.setWarmer(site -> SourceController.engine(a, site, context));
         coordinator.start(sources, query);
     }
 
@@ -1537,6 +1538,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                 * 1000L,
                         40000L,
                         TvSearchPages.MAX_RESULTS);
+owner[0].setWarmer(site -> SourceController.engine(a, site, context));
         pageRequests.bind(owner[0]);
         owner[0].start(Collections.singletonList(source.site), submitted);
         renderResults();
@@ -1611,6 +1613,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                 * 1000L,
                         40000L,
                         a.isTvDevice() ? TvSearchPages.MAX_RESULTS : 24);
+retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
         retryCoordinator.start(Collections.singletonList(selected.site), submitted);
     }
 

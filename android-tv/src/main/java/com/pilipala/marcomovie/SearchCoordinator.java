@@ -25,6 +25,18 @@ public final class SearchCoordinator implements AutoCloseable {
         List<Cms.Video> search(Cms.Site site, String query) throws Exception;
     }
 
+    /**
+     * Optional pre-warm. Engine construction is a one-off cost cached per site key — measured 8.2 s
+     * on the netdisk spider plugins (SiteCheck, 2026-11-25) — and charging it to the query budget
+     * made every cold source report a timeout.
+     */
+    public interface EngineWarmer {
+        SourceEngine warm(Cms.Site site) throws Exception;
+    }
+
+    /** Budget for the pre-warm phase; the query phase keeps its own {@code requestMs}. */
+    static final long ENGINE_WARM_MS = 12000L;
+
     public interface Listener {
         void source(Cms.Site site, List<Cms.Video> videos, Outcome outcome);
     }
@@ -70,6 +82,12 @@ public final class SearchCoordinator implements AutoCloseable {
                     });
     private final List<Job> jobs = new ArrayList<>();
     private final long requestMs, sessionMs;
+
+    private volatile EngineWarmer warmer;
+
+    void setWarmer(EngineWarmer warmer) {
+        this.warmer = warmer;
+    }
     private final Runner runner;
     private final Listener listener;
     private final int resultLimit;
@@ -249,6 +267,26 @@ public final class SearchCoordinator implements AutoCloseable {
             }
             runningThread = Thread.currentThread();
             started = true;
+            EngineWarmer warm = SearchCoordinator.this.warmer;
+            if (warm != null) {
+                // Warm the engine first, on its own budget, so a cold plugin init is not mistaken
+                // for a slow site. The engine lands in the cache the query phase then reuses.
+                timeout =
+                        TIMER.schedule(
+                                () -> finish(Collections.emptyList(), Outcome.TIMEOUT),
+                                ENGINE_WARM_MS,
+                                TimeUnit.MILLISECONDS);
+                try {
+                    warm.warm(site);
+                } catch (Throwable ignored) {
+                    // The query phase reports the engine failure with the site's own outcome.
+                }
+                if (timeout != null) {
+                    timeout.cancel(false);
+                    timeout = null;
+                }
+                if (done.get()) return;
+            }
             timeout =
                     TIMER.schedule(
                             () -> finish(Collections.emptyList(), Outcome.TIMEOUT),

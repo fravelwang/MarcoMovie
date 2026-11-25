@@ -575,6 +575,7 @@ final class CatalogScreen {
                         15000,
                         8,
                         maxConc);
+        coordinator.setWarmer(site -> SourceController.engine(a, site, ctx));
         coordRef[0] = coordinator;
         coordinator.start(candidates, title);
     }
