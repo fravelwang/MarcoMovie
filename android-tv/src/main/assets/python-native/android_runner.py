@@ -119,6 +119,47 @@ def _install_crypto_shim():
     md5_mod = _make_hash_mod("MD5", hashlib.md5)
     sha256_mod = _make_hash_mod("SHA256", hashlib.sha256)
 
+    class _Arc4Cipher:
+        """RC4, byte-compatible with pycryptodome's Crypto.Cipher.ARC4.new(key)."""
+
+        def __init__(self, key: bytes):
+            key = bytes(key)
+            if not key:
+                raise ValueError("ARC4 key must not be empty")
+            box = list(range(256))
+            j = 0
+            for i in range(256):
+                j = (j + box[i] + key[i % len(key)]) & 0xFF
+                box[i], box[j] = box[j], box[i]
+            self._box = box
+            self._i = 0
+            self._j = 0
+
+        def _keystream(self, size: int) -> bytes:
+            box = self._box
+            i, j = self._i, self._j
+            out = bytearray(size)
+            for k in range(size):
+                i = (i + 1) & 0xFF
+                j = (j + box[i]) & 0xFF
+                box[i], box[j] = box[j], box[i]
+                out[k] = box[(box[i] + box[j]) & 0xFF]
+            self._i, self._j = i, j
+            return bytes(out)
+
+        def encrypt(self, plaintext: bytes) -> bytes:
+            data = bytes(plaintext)
+            stream = self._keystream(len(data))
+            return bytes(a ^ b for a, b in zip(data, stream))
+
+        def decrypt(self, ciphertext: bytes) -> bytes:
+            return self.encrypt(ciphertext)
+
+    arc4_mod = types.ModuleType("Crypto.Cipher.ARC4")
+    arc4_mod.new = lambda key, *args, **kwargs: _Arc4Cipher(key)
+    arc4_mod.ARC4Cipher = _Arc4Cipher
+
+    cipher_pkg.ARC4 = arc4_mod
     cipher_pkg.AES = aes_mod
     util_pkg.Padding = padding_mod
     hash_pkg.MD5 = md5_mod
@@ -130,6 +171,7 @@ def _install_crypto_shim():
     sys.modules["Crypto"] = crypto_pkg
     sys.modules["Crypto.Cipher"] = cipher_pkg
     sys.modules["Crypto.Cipher.AES"] = aes_mod
+    sys.modules["Crypto.Cipher.ARC4"] = arc4_mod
     sys.modules["Crypto.Util"] = util_pkg
     sys.modules["Crypto.Util.Padding"] = padding_mod
     sys.modules["Crypto.Hash"] = hash_pkg
