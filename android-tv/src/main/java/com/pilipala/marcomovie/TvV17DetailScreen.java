@@ -494,7 +494,9 @@ final class TvV17DetailScreen {
         if (a == null || video == null) return Collections.emptyList();
         LibraryAggregator.Result wall = a.libraryWall;
         if (wall == null || a.libraryWallEpoch != a.engineEpoch) return Collections.emptyList();
-        return wall.sourcesOf(video);
+        // Same order the wall uses to pick a default source: cloud drive first, then pinned
+        // preferences, so the row and the picker never disagree about which site is "first".
+        return HomeScreen.netdiskFirst(a, wall.sourcesOf(video));
     }
 
     /** Shows "来自 N 个站点：…" only when switching would actually do something. */
@@ -528,7 +530,7 @@ final class TvV17DetailScreen {
         final List<Cms.Site> sources =
                 wall == null || a.libraryWallEpoch != a.engineEpoch
                         ? Collections.emptyList()
-                        : wall.sourcesOf(video);
+                        : HomeScreen.netdiskFirst(a, wall.sourcesOf(video));
         if (sources.size() < 2) {
             // The wall may have been rebuilt since this row was drawn; say so instead of opening an
             // empty picker.
