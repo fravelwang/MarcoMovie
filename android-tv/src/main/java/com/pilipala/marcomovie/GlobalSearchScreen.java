@@ -2074,6 +2074,7 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
         LinearLayout.LayoutParams posterSize =
                 new LinearLayout.LayoutParams(a.dp(posterWidth), a.dp(posterWidth * 3 / 2));
         posterSize.gravity = Gravity.CENTER_HORIZONTAL;
+        SourceController.prefetchVisible(a, site, video);
         boolean showDoubanBadge = !SourceController.isConfigOrNetdiskActionCard(site, video);
         FrameLayout posterWrap =
                 TvV17PosterCard.wrapArtworkWithDoubanBadge(a, poster, video, showDoubanBadge);

@@ -283,6 +283,10 @@ final class SourceController {
             old = new ArrayList<>(a.engines.values());
             a.engines.clear();
             a.engineWarmAttempts.clear();
+            PREFETCH_SEEN.clear();
+            synchronized (PREFETCH_PENDING) {
+                PREFETCH_PENDING.clear();
+            }
         }
         if (!old.isEmpty())
             new Thread(
@@ -477,6 +481,92 @@ final class SourceController {
                         // Speculative: a failure here is reported by the real open, not by warming.
                     }
                 });
+    }
+
+    // ---------------------------------------------------------------- viewport prefetch
+    // Two workers drain a bounded queue of "warm this card's detail". Cards enter the queue as the
+    // wall/search grid renders them, so browsing pays the cost instead of the tap. Bounded on
+    // purpose: a screenful of cold netdisk plugins would otherwise start a dozen 8-second inits at
+    // once and compete with whatever the user actually opened.
+    private static final java.util.ArrayDeque<Runnable> PREFETCH_PENDING =
+            new java.util.ArrayDeque<>();
+    private static final java.util.Set<String> PREFETCH_SEEN =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final int PREFETCH_MAX_PENDING = 24;
+    private static final int PREFETCH_WORKERS = 2;
+    private static int prefetchRunning;
+
+    /**
+     * Queue a viewport card for detail pre-warming. Cheap to call for every rendered card: cached
+     * details, config entries and duplicates return immediately, and the work itself runs on at
+     * most {@link #PREFETCH_WORKERS} background threads.
+     */
+    static void prefetchVisible(MainActivity a, Cms.Site site, Cms.Video video) {
+        if (a == null || a.reduced || site == null || video == null) return;
+        if (video.id == null || video.id.isEmpty()) return;
+        if (isConfigOrNetdiskSite(site) || isConfigOrNetdiskActionCard(site, video)) return;
+        if (ListingRoute.isRedirect(video.tag, video.action, video.id)) return;
+        final int epoch = a.engineEpoch;
+        final String key = epoch + ":" + site.key.length() + ":" + site.key + video.id;
+        if (a.detailCache.get(key) != null) return;
+        if (!PREFETCH_SEEN.add(key)) return;
+        final String id = video.id;
+        synchronized (PREFETCH_PENDING) {
+            if (PREFETCH_PENDING.size() >= PREFETCH_MAX_PENDING) {
+                PREFETCH_SEEN.remove(key);
+                return;
+            }
+            PREFETCH_PENDING.add(
+                    () -> {
+                        try {
+                            if (epoch != a.engineEpoch) return;
+                            SourceEngine engine = engine(a, site);
+                            if (engine == null || epoch != a.engineEpoch) return;
+                            if (a.detailCache.get(key) != null) return;
+                            a.detailFlights.get(
+                                    key,
+                                    () -> {
+                                        String again = a.detailCache.get(key);
+                                        if (again != null) return again;
+                                        String fetched = engine.detail(id);
+                                        if (fetched != null
+                                                && epoch == a.engineEpoch
+                                                && !Cms.listing(fetched).videos.isEmpty()) {
+                                            a.detailCache.put(key, fetched);
+                                        }
+                                        return fetched;
+                                    });
+                        } catch (Throwable ignored) {
+                            // Speculative work: the real open reports any failure.
+                        }
+                    });
+        }
+        drainPrefetch(a);
+    }
+
+    private static void drainPrefetch(MainActivity a) {
+        synchronized (PREFETCH_PENDING) {
+            while (prefetchRunning < PREFETCH_WORKERS && !PREFETCH_PENDING.isEmpty()) {
+                final Runnable job = PREFETCH_PENDING.poll();
+                prefetchRunning++;
+                try {
+                    RequestScope.submit(
+                            a.details,
+                            () -> {
+                                try {
+                                    job.run();
+                                } finally {
+                                    synchronized (PREFETCH_PENDING) {
+                                        prefetchRunning--;
+                                    }
+                                    drainPrefetch(a);
+                                }
+                            });
+                } catch (Throwable rejected) {
+                    prefetchRunning--;
+                }
+            }
+        }
     }
 
     static void prefetchDetail(MainActivity a, Cms.Site site, Cms.Video video) {

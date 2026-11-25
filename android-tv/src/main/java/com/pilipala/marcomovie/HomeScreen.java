@@ -2848,6 +2848,8 @@ final class HomeScreen {
         // The wall appends rows lazily, so the art view has no size yet when this runs. Loading at
         // w=0 means the decode target collapses and nothing is ever drawn; defer until laid out.
         final java.util.Map<String, String> deferredHeaders = posterHeaders;
+        // Warm this card's detail while the user is still browsing, so pressing OK is instant.
+        SourceController.prefetchVisible(a, cardSite, video);
         final String deferredPoster = bestWallPoster(a, video);
         loadCardPoster(a, art, deferredPoster, deferredHeaders, 0);
         TextView title = a.text(video.title, 13, 0xffc8c8d0);
