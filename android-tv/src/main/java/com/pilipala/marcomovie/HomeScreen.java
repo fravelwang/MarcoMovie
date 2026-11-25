@@ -3214,16 +3214,21 @@ final class HomeScreen {
 
     /** One classification row: label + 不限 + the values actually present in the wall, by count. */
     void addTaxonomyRow(String label, List<String> values, String active, java.util.function.Consumer<String> pick) {
-        if (values.isEmpty()) return;
+        // Always rendered: "全部" is the default and the row must be in a stable place even before
+        // any detail has backfilled this dimension.
         LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setClipChildren(false);
         TextView head = a.text(label, 12f * navScale, MainActivity.MUTED);
         head.setPadding(0, 0, a.dp(8), 0);
         row.addView(head);
-        addWallChip(row, "不限", "wall-" + label + "-all", active.isEmpty(), () -> {
+        addWallChip(row, "全部", "wall-" + label + "-all", active.isEmpty(), () -> {
             if (!active.isEmpty()) pick.accept(active);
         });
+        if (values.isEmpty()) {
+            wallFilterRow.addView(row, new LinearLayout.LayoutParams(-1, -2));
+            return;
+        }
         int shown = 0;
         for (String value : values) {
             if (shown++ >= 10) break;
