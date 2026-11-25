@@ -590,6 +590,15 @@ public final class MainActivity extends Activity {
     LibraryAggregator.Result libraryWall;
     int libraryWallEpoch = -1;
     boolean libraryWallLoading;
+    /**
+     * Library source selection, kept on the activity because every home rebuild constructs a new
+     * {@link HomeScreen}: a field there would be dropped the moment 片库来源 re-renders the page.
+     * Empty {@code librarySite} means the merged wall; otherwise the page browses that site.
+     */
+    String librarySite = "";
+    boolean libraryPerSite;
+    /** Package site the wall page belongs to, so picking 合并墙 can navigate back to it. */
+    String libraryFromSite = "";
     final List<Runnable> libraryWallWaiters = new ArrayList<>();
     AppDialog appDialog;
     FrameLayout playbackLayer;

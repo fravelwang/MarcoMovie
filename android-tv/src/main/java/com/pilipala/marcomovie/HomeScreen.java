@@ -147,6 +147,11 @@ final class HomeScreen {
             state.engineEpoch = a.engineEpoch;
             if (a.current != null) a.current.homeState = state;
         }
+        // The library source lives on the activity: every rebuild constructs a new HomeScreen, so
+        // a site picked in 片库来源 would otherwise be forgotten by the refresh that applies it.
+        librarySiteFilter = a.librarySite == null ? "" : a.librarySite;
+        libraryPerSite = a.libraryPerSite;
+        if (!libraryPerSite && a.libraryFromSite.isEmpty()) a.libraryFromSite = site.key;
         boolean tvLeftDock = a.homeDock != null && a.homeDock.tvLeft;
         boolean tvTopBar = a.homeDock != null && a.homeDock.tvTopLabeled;
         boolean bottomDock = !tvLeftDock && a.useBottomDock();
@@ -1026,8 +1031,18 @@ final class HomeScreen {
                             if (next.equals(librarySiteFilter) && perSite == libraryPerSite) return;
                             librarySiteFilter = next;
                             libraryPerSite = perSite;
+                            // Remembered on the activity: the navigation below builds a new
+                            // HomeScreen, and a field here would not survive it.
+                            a.librarySite = next;
+                            a.libraryPerSite = perSite;
+                            if (perSite) {
+                                a.contentHome(targets.get(which - 1));
+                                return;
+                            }
                             updateLibraryFilterPill();
-                            a.refresh();
+                            Cms.Site back = siteForLibraryFilter(a.libraryFromSite);
+                            if (back != null) a.contentHome(back);
+                            else a.home();
                         })
                 .setNegativeButton("关闭", null)
                 .show();
