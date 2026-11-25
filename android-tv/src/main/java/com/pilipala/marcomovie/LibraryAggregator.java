@@ -38,7 +38,12 @@ import java.util.concurrent.TimeUnit;
  */
 final class LibraryAggregator {
     static final String TAG = "LibraryAgg";
-    static final int PER_SITE_LIMIT = 12;
+    /**
+     * Titles taken from one site's listing. Twelve only ever saw the first page of a netdisk site
+     * that lists 200+ entries, so a title carried by five sites merged from two of them. Forty is
+     * enough to cover a full recent page on every source while the wall's own item cap still holds.
+     */
+    static final int PER_SITE_LIMIT = 40;
 
     /** Channels tried when a site's home page carries no videos (see fetch). */
     static final int MAX_CATEGORY_PROBES = 3;
@@ -149,6 +154,15 @@ final class LibraryAggregator {
             Item item = itemsByVideo.get(video);
             if (item != null) return item;
             return itemsByTitle.get(normalizeTitle(video.title));
+        }
+
+        /** Absorbs a source found later (on-demand per-title search from the detail page). */
+        synchronized void addSource(Item item, Cms.Site site, Cms.Video video) {
+            if (item == null || site == null || video == null) return;
+            if (site.key == null || item.videosBySite.containsKey(site.key)) return;
+            item.sites.add(site);
+            item.videosBySite.put(site.key, video);
+            itemsByVideo.put(video, item);
         }
 
         /** Every site carrying this title, in config order; empty when the wall never saw it. */

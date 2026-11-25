@@ -654,6 +654,82 @@ final class SourceController {
     }
 
     /** Probe the first two lines of a freshly fetched detail, off the UI path. */
+    /**
+     * A wall card only knows the sites whose home page happened to list the title; the wall itself
+     * cannot search every site for every card. When the user actually opens one, search a few
+     * remaining sources for that exact title and fold them into the merged item, so "来自 K 个站点"
+     * grows from two to what the config can really offer.
+     */
+    static void expandSourcesAsync(MainActivity a, Cms.Site site, Cms.Video video) {
+        if (a == null || video == null || a.config == null) return;
+        final LibraryAggregator.Result wall =
+                a.searchWall != null && a.searchWallEpoch == a.engineEpoch
+                        ? a.searchWall
+                        : (a.libraryWall != null && a.libraryWallEpoch == a.engineEpoch
+                                ? a.libraryWall
+                                : null);
+        if (wall == null) {
+            AppLog.w("SourceExpand", "skip: no merged wall");
+            return;
+        }
+        final LibraryAggregator.Item item = wall.itemFor(video);
+        if (item == null) {
+            AppLog.w("SourceExpand", "skip: title not in merged wall: " + video.title);
+            return;
+        }
+        if (item.sites.size() >= 6) return;
+        final String title = video.title;
+        final String key = LibraryAggregator.normalizeTitle(title);
+        if (key == null || key.isEmpty()) return;
+        final int epoch = a.engineEpoch;
+        java.util.List<Cms.Site> candidates = new java.util.ArrayList<>();
+        for (Cms.Site candidate : a.config.sites) {
+            if (candidate == null || !candidate.searchable) continue;
+            if (item.hasSite(candidate.key)) continue;
+            if (!available(a, candidate)) continue;
+            if (site != null && candidate.key.equals(site.key)) continue;
+            candidates.add(candidate);
+        }
+        candidates.sort((l, r) -> Integer.compare(HomeScreen.siteRank(l), HomeScreen.siteRank(r)));
+        final int budget = Math.min(10, candidates.size());
+        AppLog.w(
+                "SourceExpand",
+                "title=" + title + " had=" + item.sites.size() + " candidates=" + budget);
+        if (budget <= 0) return;
+        final java.util.concurrent.atomic.AtomicInteger pending =
+                new java.util.concurrent.atomic.AtomicInteger(budget);
+        for (int i = 0; i < budget; i++) {
+            final Cms.Site candidate = candidates.get(i);
+            RequestScope.submit(
+                    a.details,
+                    () -> {
+                        try {
+                            if (epoch != a.engineEpoch) return;
+                            Cms.Listing listing =
+                                    Cms.listing(engine(a, candidate).search(title, 1));
+                            for (Cms.Video hit : listing.videos) {
+                                if (hit == null) continue;
+                                if (!key.equals(LibraryAggregator.normalizeTitle(hit.title))) continue;
+                                wall.addSource(item, candidate, hit);
+                                AppLog.w("SourceExpand", "source added: " + candidate.key);
+                                break;
+                            }
+                        } catch (Throwable ignored) {
+                            // A site that cannot answer is simply not a source for this title.
+                        } finally {
+                            if (pending.decrementAndGet() == 0) {
+                                a.ui.post(
+                                        () -> {
+                                            if (epoch == a.engineEpoch && a.current != null) {
+                                                a.refresh();
+                                            }
+                                        });
+                            }
+                        }
+                    });
+        }
+    }
+
     static void probeDetailLines(MainActivity a, Cms.Site site, String detailJson) {
         try {
             Cms.Listing listing = Cms.listing(detailJson);
@@ -755,6 +831,7 @@ final class SourceController {
                                 // The user is actually opening this title: only now is a liveness
                                 // probe cheap enough to be worth it (two small Range requests).
                                 LineProbe.probeLines(a, site, video, 2);
+                                expandSourcesAsync(a, site, video);
                                 if (!timing.cached
                                         && hasPlayableDetailLines(video)
                                         && detailContext.matches(
