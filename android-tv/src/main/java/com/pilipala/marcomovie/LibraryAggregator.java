@@ -44,6 +44,14 @@ final class LibraryAggregator {
     // need longer than this are usually dead or engine-backed anyway.
     static final long SITE_TIMEOUT_MS = 5000L;
 
+    /**
+     * Budget for building the engine once. Measured on the box (SiteCheck, 2026-11-25): the netdisk
+     * spider plugins spend ~8.2 s in {@code init} before {@code home()} answers in 0.3-0.9 s. A single
+     * 5 s watchdog killed every cold engine, so the wall never saw those sites at all. Engine
+     * instances are cached per site key, so this cost is paid once per config epoch.
+     */
+    static final long ENGINE_TIMEOUT_MS = 12000L;
+
     /** Wave 1 only looks at this many sites per round; a cursor rotates through the rest. */
     static final int MAX_WAVE1_SITES = 36;
 
@@ -52,7 +60,7 @@ final class LibraryAggregator {
 
     /** Prefs key holding the rotation cursor over previously failing sites (wave 2). */
     static final String RETRY_CURSOR_KEY = "library_agg_retry_cursor";
-    static final long TOTAL_TIMEOUT_MS = 15000L;
+    static final long TOTAL_TIMEOUT_MS = 18000L;
     static final int MAX_ITEMS = 200;
 
     /** Wave 2 only starts when wave 1 produced fewer usable sites than this. */
@@ -219,6 +227,28 @@ final class LibraryAggregator {
                 a.prefs.edit().putInt(CURSOR_KEY, (start + room) % Math.max(1, untried.size())).apply();
             }
         }
+        // Failed sites keep getting sampled inside wave 1. Health memory is a hint, not a sentence:
+        // without this, once every site has been tried the wall only retries when the known-good set
+        // drops below MIN_OK_SITES, so a site repaired by an app change could never come back.
+        room = MAX_WAVE1_SITES - healthy.size();
+        if (room > 0 && !retry.isEmpty()) {
+            Collections.sort(
+                    retry,
+                    (left, right) ->
+                            Long.compare(
+                                    SiteHealth.failedAt(a, result.targets.get(left).key),
+                                    SiteHealth.failedAt(a, result.targets.get(right).key)));
+            int start = Math.max(0, a.prefs == null ? 0 : a.prefs.getInt(RETRY_CURSOR_KEY, 0))
+                    % retry.size();
+            for (int taken = 0; taken < room && taken < retry.size(); taken++) {
+                healthy.add(retry.get((start + taken) % retry.size()));
+            }
+            if (a.prefs != null) {
+                a.prefs.edit()
+                        .putInt(RETRY_CURSOR_KEY, (start + room) % retry.size())
+                        .apply();
+            }
+        }
 
         int wave1Ok = 0;
         int retried = 0;
@@ -290,13 +320,22 @@ final class LibraryAggregator {
             if (!outcome.usable()) {
                 result.failedSites++;
                 SiteHealth.markFailed(a, site);
-                AppLog.w(TAG, site.key + " -> fail");
+                AppLog.w(
+                        TAG,
+                        site.key
+                                + " -> fail (init="
+                                + outcome.initMs
+                                + "ms fetch="
+                                + outcome.fetchMs
+                                + "ms)");
                 continue;
             }
             result.okSites++;
             SiteHealth.markOk(a, site);
             if (outcome.videos.isEmpty()) result.emptySites++;
-            AppLog.w(TAG, site.key + " -> ok");
+            AppLog.w(
+                    TAG,
+                    site.key + " -> ok (init=" + outcome.initMs + "ms fetch=" + outcome.fetchMs + "ms)");
             for (Cms.Video video : outcome.videos) {
                 String key = normalizeTitle(video.title);
                 if (key.isEmpty()) continue;
@@ -396,8 +435,8 @@ final class LibraryAggregator {
     }
 
     /** First home page, then the home video feed, then the first category, mirroring HomeScreen. */
-    private static List<Cms.Video> fetch(MainActivity a, Cms.Site site) throws Exception {
-        SourceEngine engine = a.engine(site);
+    private static List<Cms.Video> fetch(MainActivity a, Cms.Site site, SourceEngine engine)
+            throws Exception {
         String raw = engine.home();
         List<Cms.Category> categories = Cms.categories(raw);
         Cms.Listing listing = HomeScreen.parseHomeListing(raw);
@@ -427,17 +466,23 @@ final class LibraryAggregator {
     private static final class SiteOutcome {
         final int index;
         final List<Cms.Video> videos;
-        final long elapsedMs;
+        final long initMs;
+        final long fetchMs;
 
-        SiteOutcome(int index, List<Cms.Video> videos, long elapsedMs) {
+        SiteOutcome(int index, List<Cms.Video> videos, long initMs, long fetchMs) {
             this.index = index;
             this.videos = videos;
-            this.elapsedMs = elapsedMs;
+            this.initMs = initMs;
+            this.fetchMs = fetchMs;
         }
 
-        /** A listing that arrived inside the per-site budget counts as healthy, empty or not. */
+        /**
+         * A listing that arrived inside the fetch budget counts as healthy, empty or not. Engine
+         * construction is not charged here: it is a one-off, cached cost, and charging it made every
+         * cold netdisk plugin look dead.
+         */
         boolean usable() {
-            return videos != null && elapsedMs <= SITE_TIMEOUT_MS;
+            return videos != null && fetchMs <= SITE_TIMEOUT_MS;
         }
     }
 
@@ -465,40 +510,58 @@ final class LibraryAggregator {
 
         public SiteOutcome call() {
             long started = android.os.SystemClock.elapsedRealtime();
-            FutureTask<SiteOutcome> self = task;
-            ScheduledFuture<?> watchdog = null;
-            if (self != null) {
-                try {
-                    watchdog =
-                            timer.schedule(
-                                    new Runnable() {
-                                        public void run() {
-                                            FutureTask<SiteOutcome> running = task;
-                                            if (running != null) running.cancel(true);
-                                        }
-                                    },
-                                    SITE_TIMEOUT_MS,
-                                    TimeUnit.MILLISECONDS);
-                } catch (Throwable ignored) {
-                    // The round already ended; the fetch is discarded with the pool.
-                }
-            }
-            SiteOutcome outcome;
+            ScheduledFuture<?> watchdog = arm(ENGINE_TIMEOUT_MS);
+            SourceEngine engine;
             try {
-                outcome =
+                engine = activity.engine(site);
+            } catch (Throwable failure) {
+                if (watchdog != null) watchdog.cancel(false);
+                SiteOutcome outcome =
                         new SiteOutcome(
                                 index,
-                                fetch(activity, site),
-                                android.os.SystemClock.elapsedRealtime() - started);
-            } catch (Throwable failure) {
-                outcome =
-                        new SiteOutcome(
-                                index, null, android.os.SystemClock.elapsedRealtime() - started);
+                                null,
+                                android.os.SystemClock.elapsedRealtime() - started,
+                                0L);
+                sink.offer(outcome);
+                return outcome;
+            }
+            if (watchdog != null) watchdog.cancel(false);
+            long initMs = android.os.SystemClock.elapsedRealtime() - started;
+            long fetchStarted = android.os.SystemClock.elapsedRealtime();
+            watchdog = arm(SITE_TIMEOUT_MS);
+            List<Cms.Video> videos = null;
+            try {
+                videos = fetch(activity, site, engine);
+            } catch (Throwable ignored) {
+                // A site that throws is bounded by the watchdog and reported as not usable.
             } finally {
                 if (watchdog != null) watchdog.cancel(false);
             }
+            SiteOutcome outcome =
+                    new SiteOutcome(
+                            index,
+                            videos,
+                            initMs,
+                            android.os.SystemClock.elapsedRealtime() - fetchStarted);
             sink.offer(outcome);
             return outcome;
+        }
+
+        /** Cancel this task's own future when the current phase outlives its budget. */
+        private ScheduledFuture<?> arm(long budgetMs) {
+            if (task == null) return null;
+            try {
+                return timer.schedule(
+                        () -> {
+                            FutureTask<SiteOutcome> running = task;
+                            if (running != null) running.cancel(true);
+                        },
+                        budgetMs,
+                        TimeUnit.MILLISECONDS);
+            } catch (Throwable ignored) {
+                // The round already ended; the fetch is discarded with the pool.
+                return null;
+            }
         }
     }
 
