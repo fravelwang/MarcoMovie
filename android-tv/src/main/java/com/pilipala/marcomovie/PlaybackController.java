@@ -299,6 +299,26 @@ final class PlaybackController {
      * True when the failure came from a signed netdisk address that a fresh resolve can replace:
      * the CDN expires these URLs and answers 403/404/412 for the stale ticket.
      */
+    /** Host only: a signed URL's query is a credential, not diagnostic material. */
+    private static String hostOf(String url) {
+        if (url == null) return "-";
+        try {
+            java.net.URI uri = new java.net.URI(url.trim());
+            String host = uri.getHost();
+            return host == null ? "-" : host;
+        } catch (Throwable ignored) {
+            return "-";
+        }
+    }
+
+    private static boolean hasHeaderName(Cms.Episode ep, String name) {
+        if (ep == null || ep.headers == null || name == null) return false;
+        for (String key : ep.headers.keySet()) {
+            if (key != null && key.equalsIgnoreCase(name)) return true;
+        }
+        return false;
+    }
+
     private static boolean isExpiredDirectUrl(Cms.Episode ep, int httpStatus) {
         if (ep == null) return false;
         if (httpStatus != 403 && httpStatus != 404 && httpStatus != 412) return false;
@@ -2551,6 +2571,36 @@ final class PlaybackController {
                                                             int httpStatus = mp.getLastHttpStatus();
                                                             logAttribution(
                                                                     a, s, kind, what, httpStatus);
+                                                            if (kind
+                                                                    == PlaybackFailure.Attribution
+                                                                            .SOURCE) {
+                                                                // Which host refused, and did we
+                                                                // even send the headers such a host
+                                                                // usually wants? Without this, a 400
+                                                                // from a CDN says nothing actionable.
+                                                                AppLog.w(
+                                                                        "PlaybackController",
+                                                                        "source refused host="
+                                                                                + hostOf(ep == null ? null : ep.url)
+                                                                                + " http="
+                                                                                + httpStatus
+                                                                                + " referer="
+                                                                                + (hasHeaderName(ep, "Referer")
+                                                                                        ? "yes"
+                                                                                        : "no")
+                                                                                + " cookie="
+                                                                                + (hasHeaderName(ep, "Cookie")
+                                                                                        ? "yes"
+                                                                                        : "no")
+                                                                                + " ua="
+                                                                                + (hasHeaderName(ep, "User-Agent")
+                                                                                        ? "yes"
+                                                                                        : "no")
+                                                                                + " media="
+                                                                                + (ep == null
+                                                                                        ? "-"
+                                                                                        : ep.media.length()));
+                                                            }
                                                             // A netdisk direct URL is signed and short
                                                             // lived: quark answers 412 (and 403/404)
                                                             // once the token went stale between the
