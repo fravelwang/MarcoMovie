@@ -3052,33 +3052,8 @@ final class HomeScreen {
         android.view.ViewGroup group = (android.view.ViewGroup) card;
         if (group.getChildCount() == 0) return;
         View artwork = group.getChildAt(0);
-        if (!(artwork instanceof android.view.ViewGroup)) return;
-        View badge = ((android.view.ViewGroup) artwork).findViewWithTag("card-source-count");
-        if (badge instanceof TextView) {
-            ((TextView) badge).setText(count + " 源");
-        } else if (artwork instanceof FrameLayout) {
-            attachSourceBadge((FrameLayout) artwork, count);
-        }
-    }
-
-    /** Small "N 源" corner pill, styled like the existing Douban badge. */
-    void attachSourceBadge(FrameLayout wrap, int count) {
-        if (wrap == null || count <= 0) return;
-        TextView badge = a.text(count + " 源", 10.5f, 0xffe8eef6);
-        badge.setTag("card-source-count");
-        badge.setSingleLine(true);
-        badge.setIncludeFontPadding(false);
-        badge.setPadding(a.dp(6), a.dp(2.5f), a.dp(6), a.dp(2.5f));
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(0xd010141c);
-        background.setCornerRadius(a.dp(6));
-        background.setStroke(Math.max(1, a.dp(0.8f)), 0x443b82f6);
-        badge.setBackground(background);
-        FrameLayout.LayoutParams params =
-                new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
-        params.leftMargin = a.dp(6);
-        params.bottomMargin = a.dp(6);
-        wrap.addView(badge, params);
+        if (!(artwork instanceof FrameLayout)) return;
+        PosterCard.attachCount(a, (FrameLayout) artwork, count);
     }
 
     void outline(View view, boolean focused, int radius, int color) {

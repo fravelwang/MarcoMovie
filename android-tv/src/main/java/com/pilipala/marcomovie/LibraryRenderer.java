@@ -45,9 +45,10 @@ import java.util.Map;
  *       scroll window belong to the screen's navigation state, and both wall and single-site modes
  *       share them.
  *   <li>{@code card}'s helper surface ({@code siteFor}, {@code bestWallPoster},
- *       {@code loadCardPoster}, {@code posterPlaceholder}, {@code attachSourceBadge},
- *       {@code focusable}, {@code outline}) — these are shared with the rest of the screen; only
- *       their caller moved.
+ *       {@code loadCardPoster}, {@code posterPlaceholder}, {@code focusable}, {@code outline}) —
+ *       these are shared with the rest of the screen; only their caller moved, and the pieces that
+ *       were verbatim in every grid (artwork/Douban badge/prefetch, 「N 源」 badge, title line, TV
+ *       focus styling) now live in {@link PosterCard}.
  *   <li>{@code HomeScreen.rows} / {@code content} — the renderer mutates the screen's own list and
  *       host rather than owning a parallel tree, so every existing reader (empty-state checks,
  *       {@code refreshWallLayout}, dock edges) keeps seeing the same objects.
@@ -689,12 +690,6 @@ final class LibraryRenderer {
         card.setGravity(Gravity.CENTER_HORIZONTAL);
         card.setClipChildren(false);
         ImageView art = host.newAmbientPoster();
-        if (host.a.isTvDevice()) TvV17PosterCard.artwork(host.a, art);
-        else {
-            art.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            art.setBackground(host.a.bg(0xff25252d, 10));
-            art.setClipToOutline(true);
-        }
         // One ledger read: which site this card opens on, and that site's own listing. The card's
         // video object belongs to whichever site the wall sampled first, so opening its id against
         // another site would fail — the default site must be opened with its own listing.
@@ -706,16 +701,17 @@ final class LibraryRenderer {
         Cms.Site ledgerSite = resolved.defaultSite;
         final Cms.Site cardSite = ledgerSite != null ? ledgerSite : (curatedCard ? null : host.site);
         Cms.Video cardVideo = resolved.defaultListing != null ? resolved.defaultListing : video;
-        boolean showDoubanBadge =
-                !SourceController.isConfigOrNetdiskActionCard(cardSite, cardVideo);
+        // Shared poster frame: TV/phone artwork styling, Douban badge, detail prefetch. The wall
+        // passes its own size/phone colours; the badge binds the card's metadata object and the
+        // prefetch uses the ledger's listing, exactly as before.
         FrameLayout artWrap =
-                TvV17PosterCard.wrapArtworkWithDoubanBadge(host.a, art, video, showDoubanBadge);
+                PosterCard.artwork(host.a, art, video, cardSite, cardVideo, 0xff25252d, 10);
         card.addView(
                 artWrap,
                 new LinearLayout.LayoutParams(
                         host.a.dp(host.posterWidth), host.a.dp(host.posterWidth * 1.5f)));
         int sourceCount = host.usesLibraryWall() ? host.librarySourceCount(video) : 0;
-        if (sourceCount > 0) host.attachSourceBadge(artWrap, sourceCount);
+        if (sourceCount > 0) PosterCard.attachCount(host.a, artWrap, sourceCount);
         // Pass the source's headers so poster hosts that require a referer still render, and fall
         // back to a site-derived referer when the spider provides none.
         java.util.Map<String, String> posterHeaders =
@@ -736,14 +732,10 @@ final class LibraryRenderer {
         // The wall appends rows lazily, so the art view has no size yet when this runs. Loading at
         // w=0 means the decode target collapses and nothing is ever drawn; defer until laid out.
         final java.util.Map<String, String> deferredHeaders = posterHeaders;
-        // Warm this card's detail while the user is still browsing, so pressing OK is instant.
-        SourceController.prefetchVisible(host.a, cardSite, cardVideo);
         final String deferredPoster = host.bestWallPoster(host.a, video);
         host.loadCardPoster(host.a, art, deferredPoster, deferredHeaders, 0);
-        TextView title = host.a.text(video.title, 13, 0xffc8c8d0);
-        host.single(title);
-        title.setPadding(host.a.dp(2), host.a.dp(7), host.a.dp(2), 0);
-        card.addView(title, new LinearLayout.LayoutParams(-1, host.a.dp(27)));
+        TextView title =
+                PosterCard.title(host.a, card, video.title, 13, 0xffc8c8d0, 2, 7, 2, 27);
         host.focusable(card, "home-video:" + index);
         if (host.a.isTvDevice()) TvFocusFrame.attachCard(card, "home-library-grid");
         host.outline(card, false, 13, Color.TRANSPARENT);
@@ -754,8 +746,9 @@ final class LibraryRenderer {
         card.setOnClickListener(v -> host.a.openTitle(video));
         card.setOnFocusChangeListener(
                 (v, f) -> {
-                    if (host.a.isTvDevice()) TvV17PosterCard.focus(host.a, card, title, f);
-                    else {
+                    if (host.a.isTvDevice()) {
+                        PosterCard.focus(host.a, card, title, f, "home-library-grid");
+                    } else {
                         host.outline(card, f, 13, Color.TRANSPARENT);
                         title.setTextColor(f ? Color.WHITE : 0xffc8c8d0);
                     }

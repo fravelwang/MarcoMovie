@@ -2054,12 +2054,6 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
         LinearLayout card = a.vertical();
         card.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(8));
         ImageView poster = new ImageView(a);
-        if (a.isTvDevice()) TvV17PosterCard.artwork(a, poster);
-        else {
-            poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            poster.setBackground(a.bg(0xff25252a, 9));
-            poster.setClipToOutline(true);
-        }
         int posterWidth =
                 a.isTvDevice()
                         ? Math.max(
@@ -2078,17 +2072,14 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
         LinearLayout.LayoutParams posterSize =
                 new LinearLayout.LayoutParams(a.dp(posterWidth), a.dp(posterWidth * 3 / 2));
         posterSize.gravity = Gravity.CENTER_HORIZONTAL;
-        SourceController.prefetchVisible(a, site, video);
-        boolean showDoubanBadge = !SourceController.isConfigOrNetdiskActionCard(site, video);
+        // Shared poster frame (artwork styling, Douban badge, prefetch); the search grid keeps its
+        // own size, phone colours and origin line.
         FrameLayout posterWrap =
-                TvV17PosterCard.wrapArtworkWithDoubanBadge(a, poster, video, showDoubanBadge);
+                PosterCard.artwork(a, poster, video, site, video, 0xff25252a, 9);
         card.addView(posterWrap, posterSize);
         a.poster(video.poster, poster);
-        TextView title = a.text(video.title, 14, MainActivity.WHITE);
-        title.setSingleLine(true);
-        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        title.setPadding(a.dp(2), a.dp(6), 0, 0);
-        card.addView(title);
+        TextView title =
+                PosterCard.title(a, card, video.title, 14, MainActivity.WHITE, 2, 6, 0, 0);
         TextView origin = a.text(clean(site.name) + (sourceCount > 1 ? " · " + sourceCount + " 源" : ""), 11, MainActivity.MUTED);
         origin.setSingleLine(true);
         origin.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -2116,8 +2107,9 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
         card.setOnFocusChangeListener(
                 (view, selected) -> {
                     if (selected) sourceFocus.put(activeFilter, String.valueOf(card.getTag()));
-                    if (a.isTvDevice()) TvV17PosterCard.focus(a, card, title, selected);
-                    else
+                    if (a.isTvDevice()) {
+                        PosterCard.focus(a, card, title, selected, "search-results-grid");
+                    } else
                         FocusMotion.style(
                                 a,
                                 card,
