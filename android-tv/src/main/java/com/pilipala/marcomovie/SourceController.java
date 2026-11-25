@@ -547,6 +547,12 @@ final class SourceController {
                                                 && epoch == a.engineEpoch
                                                 && !Cms.listing(fetched).videos.isEmpty()) {
                                             a.detailCache.put(key, fetched);
+                                            try {
+                                                LibraryAggregator.enrichMetadata(
+                                                        a, Cms.listing(fetched).videos.get(0));
+                                            } catch (Throwable ignored) {
+                                                // Metadata is a bonus, never a precondition.
+                                            }
                                         }
                                         return fetched;
                                     });
@@ -845,6 +851,7 @@ final class SourceController {
                                 // probe cheap enough to be worth it (two small Range requests).
                                 LineProbe.probeLines(a, site, video, 2);
                                 expandSourcesAsync(a, site, video);
+                                LibraryAggregator.enrichMetadata(a, video);
                                 if (!timing.cached
                                         && hasPlayableDetailLines(video)
                                         && detailContext.matches(

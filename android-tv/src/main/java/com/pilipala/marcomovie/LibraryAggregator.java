@@ -531,6 +531,34 @@ final class LibraryAggregator {
      * (cloud drive first). The detail page's switch-source action lists these directly instead of
      * sending the user into the search screen.
      */
+    /**
+     * Copies year/area/genre from a fetched detail onto the merged item's card video.
+     *
+     * <p>Home listings rarely carry these fields, but the detail does. Details are prefetched for
+     * visible cards and fetched on open, so the merged wall's classification filters fill in while
+     * the user browses instead of asking every site for a taxonomy it does not share.
+     */
+    static void enrichMetadata(MainActivity a, Cms.Video detail) {
+        if (a == null || detail == null) return;
+        Result merged =
+                a.searchWall != null && a.searchWallEpoch == a.engineEpoch
+                        ? a.searchWall
+                        : (a.libraryWall != null && a.libraryWallEpoch == a.engineEpoch
+                                ? a.libraryWall
+                                : null);
+        if (merged == null) return;
+        Item item = merged.itemFor(detail);
+        if (item == null || item.video == null) return;
+        Cms.Video card = item.video;
+        if (isEmpty(card.year) && !isEmpty(detail.year)) card.year = detail.year;
+        if (isEmpty(card.area) && !isEmpty(detail.area)) card.area = detail.area;
+        if (isEmpty(card.genre) && !isEmpty(detail.genre)) card.genre = detail.genre;
+    }
+
+    private static boolean isEmpty(String value) {
+        return value == null || value.trim().isEmpty();
+    }
+
     static List<Object[]> sourcesWithListings(MainActivity a, Cms.Video video) {
         List<Object[]> out = new ArrayList<>();
         if (a == null || video == null) return out;
