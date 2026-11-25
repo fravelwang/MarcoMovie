@@ -113,6 +113,7 @@ public final class LocalProxy implements Closeable {
         server = bind();
         ProxyAddress.port = server.getLocalPort();
         ProxyAddress.token = token;
+        CatvodHost.syncProxyPort(ProxyAddress.port);
         Thread accept =
                 new Thread(
                         () -> {

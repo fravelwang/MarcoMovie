@@ -274,10 +274,10 @@
   {
     "name": "kotlin-stdlib",
     "group": "org.jetbrains.kotlin",
-    "version": "1.8.0",
+    "version": "2.2.0",
     "license": "The Apache License, Version 2.0",
-    "url": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/1.8.0/kotlin-stdlib-1.8.0.jar",
-    "sha256": "c77bef8774640b9fb9d6e217459ff220dae59878beb7d2e4b430506feffc654e"
+    "url": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.2.0/kotlin-stdlib-2.2.0.jar",
+    "sha256": "65d12d85a3b865c160db9147851712a64b10dadd68b22eea22a95bf8a8670dca"
   },
   {
     "name": "kotlin-stdlib-common",

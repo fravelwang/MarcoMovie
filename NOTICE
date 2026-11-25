@@ -23,3 +23,10 @@ to H.264 for TV compatibility. It is a project brand asset, not media content.
 Since 0.4.7, launch motion is composed by StartupIntro using the owner-provided
 high-resolution logo and native text. The earlier startup.mp4 brand asset
 is retained for provenance and is not used by the launch overlay.
+
+android-tv/src/main/java/com/github/catvod/** and
+android-tv/src/main/java/com/fongmi/quickjs/host/** are vendored from the
+FongMi/TV project (https://github.com/FongMi/TV), upstream commit
+e7e7dd06250ca53da3c594ca4f6befc02e56b1d1, licensed under GPL-3.0. Local
+changes and the host-side adapter classes are listed in docs/CATVOD-VENDOR.md.
+Those files belong to their upstream authors, not to Marco Movie.

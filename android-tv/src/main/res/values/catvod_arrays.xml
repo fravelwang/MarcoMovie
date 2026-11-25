@@ -1,0 +1,15 @@
+<resources>
+    <!-- catvod 基座读取的 DoH 列表；名字与顺序必须和上游 tv/catvod/src/main/res/values/strings.xml 一致。 -->
+    <string-array name="doh_name">
+        <item>System</item>
+        <item>Tencent</item>
+        <item>Alibaba</item>
+        <item>360</item>
+    </string-array>
+    <string-array name="doh_url">
+        <item />
+        <item>https://doh.pub/dns-query</item>
+        <item>https://dns.alidns.com/dns-query</item>
+        <item>https://doh.360.cn/dns-query</item>
+    </string-array>
+</resources>

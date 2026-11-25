@@ -1020,6 +1020,8 @@ public final class MainActivity extends Activity {
         privateMode = PrivacySpace.active;
         if (privateMode) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
         activeActivity = this;
+        CatvodHost.ensure(this);
+        CatvodHost.bindActivity();
         installPluginCrashGuard();
         android.util.DisplayMetrics rawScreen = new android.util.DisplayMetrics();
         getWindowManager().getDefaultDisplay().getMetrics(rawScreen);

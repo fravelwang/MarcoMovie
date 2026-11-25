@@ -214,16 +214,13 @@ public final class CspEngine implements SourceEngine {
             pluginSha256 = resolvedSha;
             activeProxyLoader = loader;
             pluginLock = new Object();
+            CatvodHost.ensure(app);
             String className = "com.github.catvod.spider." + site.api.substring(4);
             Object candidate = loader.loadClass(className).getDeclaredConstructor().newInstance();
             if (!(candidate instanceof Spider)) throw new IOException("插件父接口与当前宿主不兼容");
             spider = (Spider) candidate;
             spider.siteKey = site.key == null ? "" : site.key;
             synchronized (pluginLock) {
-                try {
-                    spider.initApi(new com.github.catvod.crawler.SpiderApi());
-                } catch (Throwable ignored) {
-                }
                 spider.init(app, site.ext == null ? "" : site.ext.toString());
             }
             collectPluginLoaders(loader, spider);

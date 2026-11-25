@@ -11,6 +11,7 @@ Marco Movie 的作者为 Pilipala。以下第三方组件保留其自身版权�
 | jsoup、CryptoJS、JSONPath | `android/src/main/assets/js-host/` 中相应 LICENSE 文件；宿主适配层与第三方库分别保留 |
 | libtorrent / FrostWire jlibtorrent | `android/torrent-dependencies.json` 与 `android/src/main/assets/torrent-third-party-notices.txt` |
 | Rime 简体拼音词典、Unicode Unihan 数据 | `android/src/main/assets/search/` 中许可及 provenance 清单 |
+| catvod 基座（vendor 自 FongMi/TV） | `android-tv/src/main/java/com/github/catvod/**`、`android-tv/src/main/java/com/fongmi/quickjs/host/**`；来源 [FongMi/TV](https://github.com/FongMi/TV) 提交 `e7e7dd0`，GPL-3.0；本地改动与宿主适配类登记在 `docs/CATVOD-VENDOR.md`，署名见 `NOTICE` |
 | Glasswork | [kubai087/glasswork](https://github.com/kubai087/glasswork)，参考提交 `4f0b674`；MIT，许可副本见 `flutter/shaders/GLASSWORK-LICENSE.txt`。Flutter shader 和原生材质为平台适配，不是浏览器实现的直接嵌入。 |
 | Anime4K | [bloc97/Anime4K](https://github.com/bloc97/Anime4K)，上游发布版本 `v4.0.1`（`Anime4K_v4.0.zip`）；MIT，仅用于 Windows/macOS 桌面端可选画质增强，着色器清单与 SHA-256 校验记录见 `flutter/assets/shaders/anime4k/manifest.json`，完整许可副本见 `flutter/assets/shaders/anime4k/ANIME4K-LICENSE.txt` 及下文声明。 |
 | share_plus | [Flutter Community share_plus 10.1.4](https://pub.dev/packages/share_plus/versions/10.1.4)，BSD-3-Clause；用于系统文件分享。依赖版本及摘要固定于 `flutter/pubspec.lock`，上游许可由 Flutter 的依赖许可清单收录。 |
