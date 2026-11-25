@@ -2834,12 +2834,15 @@ final class SettingsScreen {
         new AppDialog.Builder(a)
                 .setTitle("运行日志")
                 .setMessage(text.isEmpty() ? "当前运行正常，暂无异常或告警记录。" : text)
-                .setNeutralButton(
+                .setNegativeButton(
                         "清空记录",
                         (d, i) -> {
                             AppLog.clear();
                             a.toast("已清空运行日志");
                         })
+                .setNeutralButton(
+                        "站点体检",
+                        (d, i) -> SiteCheck.run(a))
                 .setPositiveButton("关闭", null)
                 .show();
     }
