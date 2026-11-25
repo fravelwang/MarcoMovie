@@ -2875,6 +2875,11 @@ final class HomeScreen {
     /** The sites that carried this card, straight from the aggregation result. */
     List<Cms.Site> wallSources(Cms.Video video) {
         if (video == null) return Collections.emptyList();
+        LibraryAggregator.Result searched = a.searchWall;
+        if (searched != null && a.searchWallEpoch == a.engineEpoch) {
+            List<Cms.Site> fromSearch = searched.sourcesOf(video);
+            if (!fromSearch.isEmpty()) return fromSearch;
+        }
         LibraryAggregator.Result wall = a.libraryWall;
         if (wall == null || a.libraryWallEpoch != a.engineEpoch) return Collections.emptyList();
         return wall.sourcesOf(video);

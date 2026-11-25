@@ -339,20 +339,7 @@ final class LibraryAggregator {
             AppLog.w(
                     TAG,
                     site.key + " -> ok (init=" + outcome.initMs + "ms fetch=" + outcome.fetchMs + "ms)");
-            for (Cms.Video video : outcome.videos) {
-                String key = normalizeTitle(video.title);
-                if (key.isEmpty()) continue;
-                Item item = result.itemsByTitle.get(key);
-                if (item == null) {
-                    item = new Item(video);
-                    result.itemsByTitle.put(key, item);
-                }
-                result.itemsByVideo.put(video, item);
-                if (!item.videosBySite.containsKey(site.key)) {
-                    item.sites.add(site);
-                    item.videosBySite.put(site.key, video);
-                }
-            }
+            mergeSite(result, site, outcome.videos);
         }
 
         result.items.addAll(result.itemsByTitle.values());
@@ -440,6 +427,81 @@ final class LibraryAggregator {
      * the same show a dozen times. Strip the decorations, keep season markers (第一季 and 第二季 are
      * different shows) and keep the result only when enough of the title survives.
      */
+    /** Merge one site's listings into {@code result}; shared by the wall and the search page. */
+    static void mergeSite(Result result, Cms.Site site, List<Cms.Video> videos) {
+        if (result == null || site == null || videos == null) return;
+        for (Cms.Video video : videos) {
+            if (video == null) continue;
+            String key = normalizeTitle(video.title);
+            if (key.isEmpty()) continue;
+            Item item = result.itemsByTitle.get(key);
+            if (item == null) {
+                item = new Item(video);
+                result.itemsByTitle.put(key, item);
+            }
+            result.itemsByVideo.put(video, item);
+            if (!item.videosBySite.containsKey(site.key)) {
+                item.sites.add(site);
+                item.videosBySite.put(site.key, video);
+            }
+        }
+    }
+
+    /**
+     * Fold already-fetched search pages into one merged result, without any network call. The
+     * search page renders this instead of one card per source, so "两京十五日" shows up once with an
+     * "N 源" badge and the detail page behind it can offer every source.
+     */
+    static Result mergeSearch(List<Cms.Site> sites, Map<String, List<Cms.Video>> bySite) {
+        Result result = new Result();
+        if (sites != null)
+            for (Cms.Site site : sites) {
+                if (site == null) continue;
+                result.targets.add(site);
+                List<Cms.Video> videos = bySite == null ? null : bySite.get(site.key);
+                if (videos == null || videos.isEmpty()) continue;
+                result.okSites++;
+                mergeSite(result, site, videos);
+            }
+        result.items.addAll(result.itemsByTitle.values());
+        Collections.sort(result.items, NETDISK_FIRST);
+        result.loadedAt = System.currentTimeMillis();
+        return result;
+    }
+
+    /** Titles carried by a cloud-drive source first: that source hands the player the original file. */
+    static final Comparator<Item> NETDISK_FIRST =
+            (left, right) -> {
+                boolean l = hasShareSource(left);
+                boolean r = hasShareSource(right);
+                if (l != r) return l ? -1 : 1;
+                return Integer.compare(
+                        right == null ? 0 : right.sites.size(),
+                        left == null ? 0 : left.sites.size());
+            };
+
+    static boolean hasShareSource(Item item) {
+        if (item == null) return false;
+        for (Cms.Site site : item.sites) {
+            if (site == null) continue;
+            String name = site.name == null ? "" : site.name;
+            String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
+            if (name.contains("网盘") || name.contains("盘搜") || api.contains("maccms")) return true;
+        }
+        return false;
+    }
+
+    /** The site a merged card should open with: the share source when there is one. */
+    static Cms.Site preferredSite(Item item) {
+        if (item == null) return null;
+        for (Cms.Site site : item.sites) {
+            if (site == null) continue;
+            String name = site.name == null ? "" : site.name;
+            if (name.contains("网盘") || name.contains("盘搜")) return site;
+        }
+        return item.sites.isEmpty() ? null : item.sites.get(0);
+    }
+
     static String normalizeTitle(String raw) {
         if (raw == null) return "";
         String bare = raw.replaceAll("[\\s\\u00a0\\u3000]+", "");

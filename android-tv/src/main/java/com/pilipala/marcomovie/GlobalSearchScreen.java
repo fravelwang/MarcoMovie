@@ -1883,13 +1883,42 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
         renderPasses++;
         int available = 0, added = 0;
         boolean remaining = false;
-        for (SourceResult source : results.values())
-            if (activeFilter.isEmpty() || source.site.key.equals(activeFilter))
-                for (int i = 0; i < source.videos.size(); i++) {
+        // Unfiltered: one card per merged title (netdisk sources first). Filtered: that source's
+        // own list, because the user explicitly asked for one site's results.
+        final java.util.List<Object[]> work = new java.util.ArrayList<>();
+        if (activeFilter.isEmpty()) {
+            LibraryAggregator.Result mergedNow = mergeResults();
+            a.searchWall = mergedNow;
+            a.searchWallEpoch = a.engineEpoch;
+            for (LibraryAggregator.Item item : mergedNow.items) {
+                Cms.Site preferred = LibraryAggregator.preferredSite(item);
+                if (preferred == null) continue;
+                Cms.Video video = item.videosBySite.get(preferred.key);
+                if (video == null) continue;
+                work.add(
+                        new Object[] {
+                            preferred,
+                            video,
+                            item.sites.size(),
+                            "m:" + LibraryAggregator.normalizeTitle(video.title)
+                        });
+            }
+        } else {
+            for (SourceResult source : results.values()) {
+                if (!source.site.key.equals(activeFilter)) continue;
+                for (Cms.Video video : source.videos) {
+                    work.add(new Object[] {source.site, video, 0, source.site.key + ":" + video.id});
+                }
+            }
+        }
+        for (Object[] row : work) {
+            {
                     available++;
                     if (available > shownLimit) continue;
-                    Cms.Video video = source.videos.get(i);
-                    String key = source.site.key + ":" + video.id;
+                    Cms.Site site = (Cms.Site) row[0];
+                    Cms.Video video = (Cms.Video) row[1];
+                    int sourceCount = (Integer) row[2];
+                    String key = (String) row[3];
                     if (displayed.contains(key)) continue;
                     if (added >= 4) {
                         remaining = true;
@@ -1909,7 +1938,7 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
                     }
                     LinearLayout card = posterCards.get(key);
                     if (card == null) {
-                        card = makeCard(source, video);
+                        card = makeCard(site, video, sourceCount);
                         posterCards.put(key, card);
                     }
                     if (card.getParent() instanceof ViewGroup)
@@ -1930,6 +1959,7 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
                         focusNewResults = false;
                     }
                 }
+            }
         emptyResult.setVisibility(displayed.isEmpty() ? View.VISIBLE : View.GONE);
         if (displayed.isEmpty()) {
             SourceResult selected = results.get(activeFilter);
@@ -2003,7 +2033,20 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
         }
     }
 
-    LinearLayout makeCard(SourceResult source, Cms.Video video) {
+    /** Merge the per-source results into one title-keyed table; no network, cheap to recompute. */
+    private LibraryAggregator.Result mergeResults() {
+        java.util.List<Cms.Site> sites = new java.util.ArrayList<>();
+        java.util.Map<String, java.util.List<Cms.Video>> bySite = new java.util.HashMap<>();
+        for (SourceResult result : results.values()) {
+            if (result == null || result.site == null) continue;
+            sites.add(result.site);
+            if (result.videos != null && !result.videos.isEmpty())
+                bySite.put(result.site.key, result.videos);
+        }
+        return LibraryAggregator.mergeSearch(sites, bySite);
+    }
+
+    LinearLayout makeCard(Cms.Site site, Cms.Video video, int sourceCount) {
         LinearLayout card = a.vertical();
         card.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(8));
         ImageView poster = new ImageView(a);
@@ -2031,7 +2074,7 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
         LinearLayout.LayoutParams posterSize =
                 new LinearLayout.LayoutParams(a.dp(posterWidth), a.dp(posterWidth * 3 / 2));
         posterSize.gravity = Gravity.CENTER_HORIZONTAL;
-        boolean showDoubanBadge = !SourceController.isConfigOrNetdiskActionCard(source.site, video);
+        boolean showDoubanBadge = !SourceController.isConfigOrNetdiskActionCard(site, video);
         FrameLayout posterWrap =
                 TvV17PosterCard.wrapArtworkWithDoubanBadge(a, poster, video, showDoubanBadge);
         card.addView(posterWrap, posterSize);
@@ -2041,11 +2084,11 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
         title.setEllipsize(android.text.TextUtils.TruncateAt.END);
         title.setPadding(a.dp(2), a.dp(6), 0, 0);
         card.addView(title);
-        TextView origin = a.text(clean(source.site.name), 11, MainActivity.MUTED);
+        TextView origin = a.text(clean(site.name) + (sourceCount > 1 ? " · " + sourceCount + " 源" : ""), 11, MainActivity.MUTED);
         origin.setSingleLine(true);
         origin.setEllipsize(android.text.TextUtils.TruncateAt.END);
         card.addView(origin);
-        card.setTag("global-result:" + source.site.key + ":" + video.id);
+        card.setTag("global-result:" + site.key + ":" + video.id);
         card.setFocusable(a.isTvDevice());
         card.setFocusableInTouchMode(a.isTvDevice());
         card.setClickable(true);
@@ -2056,7 +2099,7 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
                 view -> {
                     if (!current()) return;
                     saveHistory(query);
-                    a.openListing(source.site, video);
+                    a.openListing(site, video);
                 });
         card.setOnFocusChangeListener(
                 (view, selected) -> {
@@ -2082,7 +2125,7 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
                                 && event.getAction() == KeyEvent.ACTION_DOWN) {
                             int index =
                                     new ArrayList<>(displayed)
-                                            .indexOf(source.site.key + ":" + video.id);
+                                            .indexOf(card.getTag().toString());
                             if (index >= 0 && index < columns) {
                                 Button tab = filterButtons.get(activeFilter);
                                 if (tab != null) {

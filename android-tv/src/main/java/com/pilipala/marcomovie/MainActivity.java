@@ -26,6 +26,13 @@ public final class MainActivity extends Activity {
     final SingleFlight<String> detailFlights = new SingleFlight<>();
     Future<?> detailPrefetch;
     /**
+     * Latest search-page merge (one entry per title, netdisk sources first). The detail page asks
+     * {@code wallSources} for the sources of whatever it opens, so feeding it here is what lets a
+     * search result offer every site instead of only the one it was found on.
+     */
+    LibraryAggregator.Result searchWall;
+    int searchWallEpoch = -1;
+    /**
      * Sites whose engine this session already tried to warm on focus. The engine itself lands in
      * {@code engines}; this set only stops a focused card from re-submitting the same 8-second
      * init while it is still running. Cleared whenever the config epoch changes.
