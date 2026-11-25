@@ -533,6 +533,7 @@ final class SourceController {
                                                 && epoch == a.engineEpoch
                                                 && !Cms.listing(fetched).videos.isEmpty()) {
                                             a.detailCache.put(key, fetched);
+                                            probeDetailLines(a, site, fetched);
                                         }
                                         return fetched;
                                     });
@@ -637,6 +638,17 @@ final class SourceController {
                             } catch (Throwable ignored) {
                             }
                         });
+    }
+
+    /** Probe the first two lines of a freshly fetched detail, off the UI path. */
+    static void probeDetailLines(MainActivity a, Cms.Site site, String detailJson) {
+        try {
+            Cms.Listing listing = Cms.listing(detailJson);
+            if (listing == null || listing.videos.isEmpty()) return;
+            LineProbe.probeLines(a, site, listing.videos.get(0), 2);
+        } catch (Throwable ignored) {
+            // Liveness probing is best effort; parsing issues belong to the real open.
+        }
     }
 
     private static boolean hasPlayableDetailLines(Cms.Video video) {
