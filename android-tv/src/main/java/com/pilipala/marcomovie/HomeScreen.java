@@ -892,10 +892,27 @@ final class HomeScreen {
     void applyLibraryWall(LibraryAggregator.Result result) {
         if (result == null || state == null || content == null) return;
         List<Cms.Video> videos = new ArrayList<>();
-        List<LibraryAggregator.Item> shown = new ArrayList<>();
+        boolean wall = usesLibraryWall();
+        LibraryQuery.Filter filter = new LibraryQuery.Filter();
+        filter.mode = wall ? LibraryModel.Mode.WALL : LibraryModel.Mode.SINGLE_SITE;
+        filter.sourceKey = wall ? wallSourceFilter : librarySiteFilter;
+        filter.netdiskOnly = wallNetdiskOnly;
+        filter.multiOnly = wallMultiOnly;
+        filter.sortByName = wallSortByName;
+        filter.year = wallYear;
+        filter.area = wallArea;
+        filter.genre = wallGenre;
+        LibraryModel model = LibraryModel.from(result, filter.mode);
+        List<LibraryModel.MergedItem> visible = LibraryQuery.visible(model, filter);
+        for (LibraryModel.MergedItem item : visible) videos.add(item.video);
+
+        // TEMP equivalence check (step 1 only; step 4 deletes it): run the old inline loop once
+        // more and compare the video reference sequences. A mismatch only logs; the model result
+        // above is what the wall renders, so behavior stays identical either way.
+        List<LibraryAggregator.Item> legacyShown = new ArrayList<>();
         for (LibraryAggregator.Item item : result.items) {
             if (item == null || item.video == null) continue;
-            if (usesLibraryWall()) {
+            if (wall) {
                 if (!wallSourceFilter.isEmpty() && !item.hasSite(wallSourceFilter)) continue;
             } else if (!librarySiteFilter.isEmpty() && !item.hasSite(librarySiteFilter)) continue;
             if (wallNetdiskOnly && !LibraryAggregator.hasShareSource(item)) continue;
@@ -903,18 +920,50 @@ final class HomeScreen {
             if (!wallYear.isEmpty() && !wallYear.equals(valueOf(item.video.year))) continue;
             if (!wallArea.isEmpty() && !wallArea.equals(valueOf(item.video.area))) continue;
             if (!wallGenre.isEmpty() && !genreContains(item.video.genre, wallGenre)) continue;
-            shown.add(item);
+            legacyShown.add(item);
         }
         if (wallSortByName) {
             Collections.sort(
-                    shown,
+                    legacyShown,
                     (left, right) -> {
                         String l = left.video.title == null ? "" : left.video.title;
                         String r = right.video.title == null ? "" : right.video.title;
                         return l.compareTo(r);
                     });
         }
-        for (LibraryAggregator.Item item : shown) videos.add(item.video);
+        List<Cms.Video> legacy = new ArrayList<>();
+        for (LibraryAggregator.Item item : legacyShown) legacy.add(item.video);
+        int firstDiff = -1;
+        if (legacy.size() == visible.size()) {
+            for (int i = 0; i < legacy.size(); i++) {
+                if (legacy.get(i) != visible.get(i).video) {
+                    firstDiff = i;
+                    break;
+                }
+            }
+        }
+        if (legacy.size() != visible.size() || firstDiff >= 0) {
+            String oldTitle = "";
+            String newTitle = "";
+            if (firstDiff >= 0) {
+                Cms.Video oldVideo = legacy.get(firstDiff);
+                Cms.Video newVideo = visible.get(firstDiff).video;
+                oldTitle = oldVideo == null || oldVideo.title == null ? "" : oldVideo.title;
+                newTitle = newVideo == null || newVideo.title == null ? "" : newVideo.title;
+            }
+            android.util.Log.w(
+                    "LibraryModel",
+                    "mismatch old="
+                            + legacy.size()
+                            + " new="
+                            + visible.size()
+                            + " first="
+                            + firstDiff
+                            + " oldTitle="
+                            + oldTitle
+                            + " newTitle="
+                            + newTitle);
+        }
         // The wall owns the flat list; category paging is bypassed while the filter is active.
         state.category = "";
         state.page = 1;
