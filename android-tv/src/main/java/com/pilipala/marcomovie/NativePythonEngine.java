@@ -79,6 +79,9 @@ public final class NativePythonEngine implements SourceEngine {
                     System.loadLibrary("marco_python");
                     nativeAvailable = Boolean.TRUE;
                 } catch (Throwable error) {
+                    // Silent fallback made the missing runtime invisible in logs for weeks worth of
+                    // diagnostics; a py site then just reported Skulpt errors far downstream.
+                    AppLog.w("NativePython", "CPython 运行时加载失败，py 站点将回落到 JS 运行时", error);
                     nativeAvailable = Boolean.FALSE;
                 }
             }

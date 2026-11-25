@@ -170,7 +170,12 @@ def build_for_module(module_dir: Path, abis=('armeabi-v7a',)):
                         '-Wl,-z,max-page-size=16384',
                         '-Wl,-soname,libmarco_python.so',
                         bridge_src,
-                        libpython,
+                        # Link by name, not by absolute path: passing the file path made the
+                        # linker record the build-host path as DT_NEEDED, so on device
+                        # dlopen failed with "…/build/python/unpack/…/libpython3.11.so not found"
+                        # and every py spider silently fell back to the Skulpt runtime.
+                        '-L' + str(lib_dir),
+                        '-l:libpython3.11.so',
                         '-llog',
                         '-o',
                         out_so,

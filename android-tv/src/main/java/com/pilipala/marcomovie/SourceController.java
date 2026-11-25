@@ -158,8 +158,8 @@ final class SourceController {
                     } else if (a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true)
                             && NativePythonEngine.eligible(s)
                             && a.prefs.getBoolean(Prefs.NATIVE_PYTHON_ENABLED, true)
-                            && NativePythonEngine.isAvailable()
-                            && snapshot != null) {
+                            && snapshot != null
+                            && NativePythonEngine.isAvailable()) {
                         ensureProxy(a, snapshot);
                         try {
                             raw = new NativePythonEngine(a.getApplication(), snapshot, s);
@@ -176,6 +176,12 @@ final class SourceController {
                             && JsEngine.eligible(s)
                             && snapshot != null) {
                         ensureProxy(a, snapshot);
+                        if (NativePythonEngine.eligible(s)) {
+                            // A py source reaching this branch means the native runtime said no.
+                            AppLog.w(
+                                    "SourceController",
+                                    "py 来源没有原生 CPython 可用，回落到 JS 运行时: " + s.key);
+                        }
                         try {
                             raw = new JsEngine(a.getApplication(), snapshot, s);
                         } catch (JsEngine.DrpyRuleDetected rule) {
