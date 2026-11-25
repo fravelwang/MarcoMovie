@@ -51,7 +51,11 @@ final class LibraryAggregator {
      */
     static final int PER_SITE_LIMIT = 40;
 
-    /** Channels tried when a site's home page carries no videos (see fetch). */
+    /**
+     * Channels tried when a site's home page carries no videos. The probing itself moved to
+     * {@link FongMiGateway#home}; the number stays here as the wall's single definition and is
+     * referenced from there (compile-time constant, no second copy).
+     */
     static final int MAX_CATEGORY_PROBES = 3;
     // Four workers leave headroom for the UI thread while the first wall is being laid out on a
     // four-core box (measured: load average 2.6-3.4 with six).
@@ -669,41 +673,22 @@ final class LibraryAggregator {
         return key.length() >= 2 ? key : bare;
     }
 
-    /** First home page, then the home video feed, then the first few categories, like HomeScreen. */
+    /**
+     * One site's first page, fetched through the anti-corruption gateway (home page → video feed →
+     * a few category probes, then filtering). This method only converts the gateway's refs back to
+     * the base listing type; the fetch policy lives in {@link FongMiGateway#home}.
+     *
+     * <p>{@code engine} is the instance {@link SiteTask} already constructed for its init timing;
+     * the gateway re-resolves it from the engine cache, so no second init and no extra request.
+     */
     private static List<Cms.Video> fetch(MainActivity a, Cms.Site site, SourceEngine engine)
             throws Exception {
-        String raw = engine.home();
-        List<Cms.Category> categories = Cms.categories(raw);
-        Cms.Listing listing = HomeScreen.parseHomeListing(raw);
-        HomeScreen.clean(listing.videos);
-        if (listing.videos.isEmpty()) {
-            try {
-                listing = Cms.listing(engine.homeVideos());
-                HomeScreen.clean(listing.videos);
-            } catch (Throwable ignored) {
-            }
-        }
-        // Sites whose home page only carries channel buttons (measured in the 2026-11-25 site check:
-        // CNTV 69 categories, opera 68, Bilibili collection 42) have no home videos at all. Their
-        // first channel is often empty too, so try a few in order and take the first that lists
-        // something; one empty channel is not evidence that the site is dead.
-        for (int index = 0;
-                listing.videos.isEmpty() && index < Math.min(MAX_CATEGORY_PROBES, categories.size());
-                index++) {
-            try {
-                listing = Cms.listing(engine.category(categories.get(index).id, 1));
-                HomeScreen.clean(listing.videos);
-            } catch (Throwable ignored) {
-                // Keep probing: one bad channel should not end the fallback.
-            }
-        }
-        List<Cms.Video> picked = new ArrayList<>(PER_SITE_LIMIT);
-        for (Cms.Video video : listing.videos) {
-            if (picked.size() >= PER_SITE_LIMIT) break;
-            if (video == null || normalizeTitle(video.title).isEmpty()) continue;
-            if (video.action != null && !video.action.trim().isEmpty()) continue;
-            if (SourceController.isInternalActionCode(video.id, video.action)) continue;
-            picked.add(video);
+        FongMiGateway gateway = new FongMiGateway(a);
+        List<MediaRef> refs = gateway.home(new SiteRef(site.key, site.name), PER_SITE_LIMIT);
+        List<Cms.Video> picked = new ArrayList<>(refs.size());
+        for (MediaRef ref : refs) {
+            Cms.Video video = gateway.toListing(ref);
+            if (video != null) picked.add(video);
         }
         return picked;
     }

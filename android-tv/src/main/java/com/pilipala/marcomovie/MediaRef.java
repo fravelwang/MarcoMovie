@@ -14,6 +14,9 @@ final class MediaRef {
     final String genre;
     final String remarks;
     final String doubanScore;
+    /** Folder/action cards keep their route: without them a hit became a plain detail card. */
+    final String action;
+    final String tag;
 
     MediaRef(
             String siteKey,
@@ -24,7 +27,9 @@ final class MediaRef {
             String area,
             String genre,
             String remarks,
-            String doubanScore) {
+            String doubanScore,
+            String action,
+            String tag) {
         this.siteKey = siteKey == null ? "" : siteKey;
         this.id = id == null ? "" : id;
         this.title = title == null ? "" : title;
@@ -34,5 +39,7 @@ final class MediaRef {
         this.genre = genre == null ? "" : genre;
         this.remarks = remarks == null ? "" : remarks;
         this.doubanScore = doubanScore == null ? "" : doubanScore;
+        this.action = action == null ? "" : action;
+        this.tag = tag == null ? "" : tag;
     }
 }

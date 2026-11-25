@@ -11,8 +11,9 @@ import java.util.List;
  * and maps the payload. Business decisions (which site is preferred, whether to search at all) stay
  * in the callers; this layer only answers "what does this site say".
  *
- * <p>This slice wires only {@link #search}; {@link #home} is implemented for the interface and will
- * be connected (and its first-page parser unified with the wall) in the next slice.
+ * <p>{@link #search} backs the focused-card source expansion; {@link #home} backs the wall round.
+ * The wall's first-page parser/cleaner still live in {@code HomeScreen} and are called from here
+ * (moving them is a later slice).
  */
 final class FongMiGateway implements SourceGateway {
 
@@ -34,16 +35,77 @@ final class FongMiGateway implements SourceGateway {
         return parse("search", site, raw);
     }
 
+    /**
+     * The wall's per-site fetch, moved here verbatim: home page → home video feed → up to three
+     * category probes, then the same filtering and the same {@code limit}.
+     *
+     * <p>The engine was already created by the wall round for its init timing, so resolving it
+     * again is a cache hit — no extra init and no extra request. An empty home page is a valid
+     * answer (the wall counts it as an "empty site"), not a failure, so this returns an empty list
+     * instead of throwing {@code EMPTY}.
+     */
     @Override
-    public List<MediaRef> home(SiteRef site) throws GatewayException {
+    public List<MediaRef> home(SiteRef site, int limit) throws GatewayException {
         Cms.Site target = resolve(site);
+        SourceEngine engine;
         String raw;
         try {
-            raw = SourceController.engine(activity, target).home();
+            engine = SourceController.engine(activity, target);
+            raw = engine.home();
         } catch (Throwable failure) {
             throw normalize("home", site, failure);
         }
-        return parse("home", site, raw);
+        // The wall's first-page parser and cleaner stay in HomeScreen for this slice.
+        List<Cms.Category> categories;
+        List<Cms.Video> listing;
+        try {
+            categories = Cms.categories(raw);
+            listing = HomeScreen.parseHomeListing(raw).videos;
+            HomeScreen.clean(listing);
+        } catch (Throwable failure) {
+            throw new GatewayException(
+                    GatewayException.Kind.PARSE,
+                    "home " + site.key + " returned an unparsable payload",
+                    failure);
+        }
+        if (listing.isEmpty()) {
+            try {
+                List<Cms.Video> feed = Cms.listing(engine.homeVideos()).videos;
+                HomeScreen.clean(feed);
+                listing = feed;
+            } catch (Throwable ignored) {
+                // No video feed is normal; the category probes below are the fallback.
+            }
+        }
+        // Sites whose home page only carries channel buttons (measured in the 2026-11-25 site
+        // check: CNTV 69 categories, opera 68, Bilibili collection 42) have no home videos at all.
+        // Their first channel is often empty too, so try a few in order and take the first that
+        // lists something; one empty channel is not evidence that the site is dead.
+        for (int index = 0;
+                listing.isEmpty()
+                        && index < Math.min(LibraryAggregator.MAX_CATEGORY_PROBES, categories.size());
+                index++) {
+            String categoryId = categories.get(index).id;
+            try {
+                List<Cms.Video> probe = Cms.listing(engine.category(categoryId, 1)).videos;
+                HomeScreen.clean(probe);
+                listing = probe;
+            } catch (Throwable failure) {
+                // Keep probing: one bad channel should not end the fallback, but it is logged.
+                AppLog.w(
+                        "SourceGateway",
+                        "home " + site.key + " probe " + categoryId + ": " + describe(failure));
+            }
+        }
+        List<MediaRef> picked = new ArrayList<>(Math.max(1, limit));
+        for (Cms.Video video : listing) {
+            if (picked.size() >= limit) break;
+            if (video == null || LibraryAggregator.normalizeTitle(video.title).isEmpty()) continue;
+            if (video.action != null && !video.action.trim().isEmpty()) continue;
+            if (SourceController.isInternalActionCode(video.id, video.action)) continue;
+            picked.add(toMedia(site.key, video));
+        }
+        return picked;
     }
 
     /**
@@ -62,6 +124,8 @@ final class FongMiGateway implements SourceGateway {
         video.genre = emptyToNull(ref.genre);
         video.remarks = emptyToNull(ref.remarks);
         video.doubanScore = emptyToNull(ref.doubanScore);
+        video.action = emptyToNull(ref.action);
+        video.tag = emptyToNull(ref.tag);
         return video;
     }
 
@@ -121,7 +185,9 @@ final class FongMiGateway implements SourceGateway {
                 video.area,
                 video.genre,
                 video.remarks,
-                video.doubanScore);
+                video.doubanScore,
+                video.action,
+                video.tag);
     }
 
     /** Folds a vendor failure into one kind; the caller logs the kind, never the raw stack. */

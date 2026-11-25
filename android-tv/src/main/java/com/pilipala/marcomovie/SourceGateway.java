@@ -14,6 +14,9 @@ interface SourceGateway {
     /** Search one page of a site by keyword; failures are thrown as {@link GatewayException}. */
     List<MediaRef> search(SiteRef site, String keyword, int page) throws GatewayException;
 
-    /** The site's first home page listing (wired to callers in the next slice). */
-    List<MediaRef> home(SiteRef site) throws GatewayException;
+    /**
+     * The site's first home page listing, up to {@code limit} playable entries, using the same
+     * fallback order the wall always used (home → video feed → a few category probes).
+     */
+    List<MediaRef> home(SiteRef site, int limit) throws GatewayException;
 }
