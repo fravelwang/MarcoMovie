@@ -25,6 +25,8 @@ final class HomeScreen {
     final Map<View, String> tabIds = new HashMap<>();
     final List<View> historyCards = new ArrayList<>(), tabs = new ArrayList<>();
     final List<List<View>> rows = new ArrayList<>();
+    /** Grid owner (step 2 of the library refactor): builds and appends cards, wires in-grid focus. */
+    final LibraryRenderer renderer = new LibraryRenderer(this);
     LinearLayout historyHost, content;
     LinearLayout curatedHost;
     View curatedHeroBtn;
@@ -627,7 +629,7 @@ final class HomeScreen {
         historySection();
         int drawn = state.windowStart;
         for (List<View> row : rows) drawn += row.size();
-        if (drawn < windowEnd()) appendCards(drawn, gridEpoch, true);
+        if (drawn < windowEnd()) renderer.appendCards(drawn, gridEpoch, true);
         resumeMissingPosters(retainedRoot);
         updateMore();
         updateFilterContinueButton();
@@ -976,7 +978,7 @@ final class HomeScreen {
         state.selectedFilters.clear();
         state.videos = videos;
         updateLibraryFilterPill();
-        drawGrid(false);
+        renderer.renderWall(model, visible);
         updateMore();
         wireNavigation();
         refreshWallLayout();
@@ -2416,7 +2418,7 @@ final class HomeScreen {
                 content.setMinimumHeight(minNeeded);
             }
         }
-        clearGrid();
+        renderer.clear();
         more.setVisibility(View.GONE);
         updateTabs();
         wireNavigation();
@@ -2687,19 +2689,6 @@ final class HomeScreen {
         pendingGrid = null;
     }
 
-    void clearGrid() {
-        for (int i = 0; i < content.getChildCount(); i++) {
-            android.view.ViewGroup row = (android.view.ViewGroup) content.getChildAt(i);
-            for (int j = 0; j < row.getChildCount(); j++)
-                if (row.getChildAt(j) instanceof android.view.ViewGroup) {
-                    android.view.ViewGroup card = (android.view.ViewGroup) row.getChildAt(j);
-                    if (card.getChildCount() > 0) card.getChildAt(0).setTag(null);
-                }
-        }
-        content.removeAllViews();
-        rows.clear();
-    }
-
     int windowSize() {
         return Math.max(COLUMNS, (MAX_RETAINED_CARDS / COLUMNS) * COLUMNS);
     }
@@ -2722,7 +2711,7 @@ final class HomeScreen {
         int existing = state.windowStart;
         for (List<View> row : rows) existing += row.size();
         if (!append) {
-            clearGrid();
+            renderer.clear();
             existing = state.windowStart;
         }
         updateEarlier();
@@ -2751,7 +2740,7 @@ final class HomeScreen {
         }
         // Hiding the focused button would hand focus to the first tab and jump to the top.
         if (pendingFocus == null || !more.hasFocus()) more.setVisibility(View.GONE);
-        appendCards(existing, gridEpoch, !append);
+        renderer.appendCards(existing, gridEpoch, !append);
     }
 
     /** Moves focus to the card awaited after "加载更多", once it is laid out. */
@@ -2841,160 +2830,6 @@ final class HomeScreen {
         if (state.page < state.pages) {
             loadCategory(false);
         }
-    }
-
-    void appendCards(int start, int epoch, boolean restore) {
-        pendingGrid = null;
-        if (!active() || epoch != gridEpoch) return;
-        int end = start;
-        int batchCount = start == 0 ? Math.max(COLUMNS * 2, 10) : Math.max(COLUMNS, 5);
-        long budgetNs = start == 0 ? 12000000L : 5000000L;
-        long batchStarted = System.nanoTime();
-        for (int index = start; index < windowEnd() && index < start + batchCount; index++) {
-            int column = index % COLUMNS;
-            LinearLayout row;
-            List<View> focusRow;
-            if (column == 0) {
-                row = a.row();
-                row.setGravity(Gravity.TOP);
-                row.setClipChildren(false);
-                row.setClipToPadding(false);
-                row.setPadding(0, a.dp(5), 0, a.dp(18));
-                content.addView(row);
-                focusRow = new ArrayList<>();
-                rows.add(focusRow);
-                for (int c = 0; c < COLUMNS; c++) {
-                    LinearLayout.LayoutParams cell = new LinearLayout.LayoutParams(0, -2, 1);
-                    cell.rightMargin = a.dp(c == COLUMNS - 1 ? 0 : 14);
-                    row.addView(new View(a), cell);
-                }
-            } else {
-                row = (LinearLayout) content.getChildAt(content.getChildCount() - 1);
-                focusRow = rows.get(rows.size() - 1);
-            }
-            android.view.ViewGroup.LayoutParams size = row.getChildAt(column).getLayoutParams();
-            row.removeViewAt(column);
-            View card = card(state.videos.get(index), index);
-            row.addView(card, column, size);
-            focusRow.add(card);
-            end = index + 1;
-            if (System.nanoTime() - batchStarted >= budgetNs) break;
-        }
-        wireNavigation(Math.max(0, (start - state.windowStart) / COLUMNS - 1));
-        resolvePendingFocus(false);
-        if (end < windowEnd()) {
-            final int next = end;
-            pendingGrid = () -> appendCards(next, epoch, restore);
-            Runnable nextBatch = pendingGrid;
-            content.postOnAnimation(
-                    () -> {
-                        if (active() && epoch == gridEpoch) a.ui.post(nextBatch);
-                    });
-        } else {
-            resolvePendingFocus(true);
-            updateMore();
-            updateFilterContinueButton();
-            wireNavigation(Math.max(0, rows.size() - 1));
-            if (restore
-                    && a.current != null
-                    && a.current.focus != null
-                    && a.current.focus.startsWith("home-video:")) restoreFocus();
-        }
-    }
-
-    View card(Cms.Video video, int index) {
-        LinearLayout card = a.vertical();
-        card.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
-        card.setGravity(Gravity.CENTER_HORIZONTAL);
-        card.setClipChildren(false);
-        ImageView art = new AmbientPoster();
-        if (a.isTvDevice()) TvV17PosterCard.artwork(a, art);
-        else {
-            art.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            art.setBackground(a.bg(0xff25252d, 10));
-            art.setClipToOutline(true);
-        }
-        Cms.Site cardSite = siteFor(video);
-        boolean showDoubanBadge = !SourceController.isConfigOrNetdiskActionCard(cardSite, video);
-        FrameLayout artWrap =
-                TvV17PosterCard.wrapArtworkWithDoubanBadge(a, art, video, showDoubanBadge);
-        card.addView(
-                artWrap,
-                new LinearLayout.LayoutParams(a.dp(posterWidth), a.dp(posterWidth * 1.5f)));
-        int sourceCount = usesLibraryWall() ? librarySourceCount(video) : 0;
-        if (sourceCount > 0) attachSourceBadge(artWrap, sourceCount);
-        // Pass the source's headers so poster hosts that require a referer still render, and fall
-        // back to a site-derived referer when the spider provides none.
-        java.util.Map<String, String> posterHeaders =
-                cardSite == null ? null : new java.util.LinkedHashMap<>(cardSite.headers);
-        if (cardSite != null && posterHeaders != null && !posterHeaders.containsKey("Referer")) {
-            String referer = cardSite.api == null ? "" : cardSite.api.trim();
-            if (referer.startsWith("http")) posterHeaders.put("Referer", referer);
-        }
-        // Draw a readable placeholder immediately: many poster hosts are unreachable from this box
-        // (socket timeouts), and an empty dark rectangle reads as "broken". The real artwork
-        // replaces it as soon as it loads.
-        art.setImageBitmap(
-                posterPlaceholder(
-                        a,
-                        Math.max(1, a.dp(posterWidth)),
-                        Math.max(1, Math.round(a.dp(posterWidth) * 1.5f)),
-                        video.title));
-        // The wall appends rows lazily, so the art view has no size yet when this runs. Loading at
-        // w=0 means the decode target collapses and nothing is ever drawn; defer until laid out.
-        final java.util.Map<String, String> deferredHeaders = posterHeaders;
-        // Warm this card's detail while the user is still browsing, so pressing OK is instant.
-        SourceController.prefetchVisible(a, cardSite, video);
-        final String deferredPoster = bestWallPoster(a, video);
-        loadCardPoster(a, art, deferredPoster, deferredHeaders, 0);
-        TextView title = a.text(video.title, 13, 0xffc8c8d0);
-        single(title);
-        title.setPadding(a.dp(2), a.dp(7), a.dp(2), 0);
-        card.addView(title, new LinearLayout.LayoutParams(-1, a.dp(27)));
-        focusable(card, "home-video:" + index);
-        if (a.isTvDevice()) TvFocusFrame.attachCard(card, "home-library-grid");
-        outline(card, false, 13, Color.TRANSPARENT);
-        card.setContentDescription(
-                sourceCount > 0 ? video.title + "，" + sourceCount + " 个来源" : video.title);
-        card.setOnClickListener(v -> a.openListing(cardSite, video));
-        card.setOnFocusChangeListener(
-                (v, f) -> {
-                    if (a.isTvDevice()) TvV17PosterCard.focus(a, card, title, f);
-                    else {
-                        outline(card, f, 13, Color.TRANSPARENT);
-                        title.setTextColor(f ? Color.WHITE : 0xffc8c8d0);
-                    }
-                    if (f && ambient != null) ambient.follow(art);
-                    if (f) {
-                        collapseFiltersForBrowsing();
-                        int localRow = (index - state.windowStart) / Math.max(1, COLUMNS);
-                        if (localRow >= Math.max(1, rows.size() - 2)) {
-                            maybeAutoLoadMore();
-                        }
-                        if (!(a.scroll instanceof TvScrollView)) {
-                            v.requestRectangleOnScreen(
-                                    new Rect(0, -a.dp(8), v.getWidth(), v.getHeight() + a.dp(10)),
-                                    false);
-                        }
-                        if (!a.reduced) {
-                            v.postDelayed(
-                                    () -> {
-                                        if (v.hasFocus() && active()) {
-                                            SourceController.warmEngineOnFocus(a, cardSite);
-                                            SourceController.prefetchDetail(a, cardSite, video);
-                                            SourceController.expandFocusedSources(
-                                                    a, cardSite, video);
-                                        }
-                                    },
-                                    360);
-                        }
-                    }
-                });
-        if (index == 0
-                && ambient != null
-                && (ambient.wanted == null || !ambient.wanted.isAttachedToWindow()))
-            ambient.follow(art);
-        return card;
     }
 
     /** The sites that carried this card, straight from the aggregation result. */
@@ -3188,6 +3023,14 @@ final class HomeScreen {
         view.setFocusableInTouchMode(true);
         view.setClickable(true);
         a.pressFeedback(view);
+    }
+
+    /**
+     * Grid-card artwork view. {@link AmbientPoster} is an inner class (it reads {@code ambient} and
+     * {@code a} off the screen), so {@link LibraryRenderer} asks for one instead of constructing it.
+     */
+    ImageView newAmbientPoster() {
+        return new AmbientPoster();
     }
 
     /**
@@ -3732,9 +3575,11 @@ final class HomeScreen {
                         : historyCards.get(stackedHistory ? historyCards.size() - 1 : 0).getId();
         source.setNextFocusUpId(sourceUpId);
         View sourceDown = selectedTab();
-        // With no category tabs the wall itself sits directly below the filter pill.
-        if (usesLibraryWall() && tabs.isEmpty() && !rows.isEmpty() && !rows.get(0).isEmpty()) {
-            sourceDown = rows.get(0).get(0);
+        // With no category tabs the wall itself sits directly below the filter pill. The first card
+        // now comes from the renderer, which owns the rows.
+        View wallFirstCard = renderer.firstCard();
+        if (usesLibraryWall() && tabs.isEmpty() && wallFirstCard != null) {
+            sourceDown = wallFirstCard;
         }
         source.setNextFocusDownId(sourceDown.getId());
         boolean filterToggleShown = filterToggle != null && filterToggle.isShown();
@@ -3746,12 +3591,13 @@ final class HomeScreen {
         } else {
             source.setNextFocusRightId(source.getId());
         }
+        int gridFirstId = renderer.firstCardId();
         int contentDownId =
                 earlier.isShown()
                         ? earlier.getId()
-                        : rows.isEmpty()
-                                ? (more.isShown() ? more.getId() : -1)
-                                : rows.get(0).get(0).getId();
+                        : gridFirstId != View.NO_ID
+                                ? gridFirstId
+                                : (more.isShown() ? more.getId() : -1);
         boolean inlineExpanded = inlineFilters != null && inlineFilters.expanded();
         boolean inlineSummary = inlineFilters != null && inlineFilters.summaryShown();
         View firstFilterChip = inlineExpanded ? inlineFilters.entryChip(0) : null;
@@ -3833,36 +3679,10 @@ final class HomeScreen {
                     contentDownId != -1 ? contentDownId : inlineFilters.resetButton.getId());
         }
         int lastInlineRow = inlineExpanded ? inlineFilters.rows.size() - 1 : -1;
-        for (int r = Math.max(0, firstRow); r < rows.size(); r++) {
-            List<View> row = rows.get(r);
-            horizontal(row);
-            for (int c = 0; c < row.size(); c++) {
-                View card = row.get(c);
-                card.setNextFocusUpId(
-                        r == 0
-                                ? (earlier.isShown()
-                                        ? earlier.getId()
-                                        : inlineExpanded
-                                                ? inlineFilters
-                                                        .nearest(
-                                                                inlineFilters.rows.get(
-                                                                        lastInlineRow),
-                                                                card)
-                                                        .getId()
-                                                : inlineSummary
-                                                        ? inlineFilters.expandButton.getId()
-                                                        : selectedTab().getId())
-                                : rows.get(r - 1)
-                                        .get(Math.min(c, rows.get(r - 1).size() - 1))
-                                        .getId());
-                card.setNextFocusDownId(
-                        r + 1 < rows.size()
-                                ? rows.get(r + 1)
-                                        .get(Math.min(c, rows.get(r + 1).size() - 1))
-                                        .getId()
-                                : more.isShown() ? more.getId() : card.getId());
-            }
-        }
+        // Grid focus order lives in the renderer now; the "what sits above the grid" flags are
+        // passed in so the renderer cannot disagree with the panel links wired above.
+        renderer.wireGridFocus(
+                firstRow, earlier.isShown(), inlineExpanded, lastInlineRow, inlineSummary);
         if (tvLeftDock) {
             a.homeDock.leftEdge(source, false);
             if (!historyCards.isEmpty()) a.homeDock.leftEdge(historyCards.get(0), false);
@@ -3883,9 +3703,9 @@ final class HomeScreen {
                                 ? inlineFilters.expandButton.getId()
                                 : selectedTab().getId();
         earlier.setNextFocusUpId(aboveGridId);
-        earlier.setNextFocusDownId(rows.isEmpty() ? more.getId() : rows.get(0).get(0).getId());
-        more.setNextFocusUpId(
-                rows.isEmpty() ? aboveGridId : rows.get(rows.size() - 1).get(0).getId());
+        earlier.setNextFocusDownId(gridFirstId != View.NO_ID ? gridFirstId : more.getId());
+        int lastRowFirstId = renderer.lastRowFirstCardId();
+        more.setNextFocusUpId(lastRowFirstId != View.NO_ID ? lastRowFirstId : aboveGridId);
     }
 
     static boolean navigationKey(MainActivity a, android.view.KeyEvent event) {
