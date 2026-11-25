@@ -2878,11 +2878,37 @@ final class HomeScreen {
         LibraryAggregator.Result searched = a.searchWall;
         if (searched != null && a.searchWallEpoch == a.engineEpoch) {
             List<Cms.Site> fromSearch = searched.sourcesOf(video);
-            if (!fromSearch.isEmpty()) return fromSearch;
+            if (!fromSearch.isEmpty()) return netdiskFirst(fromSearch);
         }
         LibraryAggregator.Result wall = a.libraryWall;
         if (wall == null || a.libraryWallEpoch != a.engineEpoch) return Collections.emptyList();
-        return wall.sourcesOf(video);
+        return netdiskFirst(wall.sourcesOf(video));
+    }
+
+    /**
+     * Cloud-drive sources first (Boss 2026-11-25: 网盘优先，站点补充). The first entry is what the
+     * card opens by default and what the "来自 K 个站点" row lists first, so ordering here decides
+     * both the default source and the switch order.
+     */
+    static List<Cms.Site> netdiskFirst(List<Cms.Site> sources) {
+        if (sources == null || sources.size() < 2) return sources;
+        List<Cms.Site> ordered = new ArrayList<>(sources);
+        Collections.sort(
+                ordered,
+                (left, right) -> {
+                    boolean l = isNetdiskSite(left);
+                    boolean r = isNetdiskSite(right);
+                    if (l != r) return l ? -1 : 1;
+                    return 0;
+                });
+        return ordered;
+    }
+
+    static boolean isNetdiskSite(Cms.Site site) {
+        if (site == null) return false;
+        String name = site.name == null ? "" : site.name;
+        String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
+        return name.contains("网盘") || name.contains("盘搜") || api.contains("maccms");
     }
 
     /** The site a wall card opens with: its first aggregated source, or the screen site. */
