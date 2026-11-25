@@ -664,6 +664,160 @@ _SHIMS_READY = False
 _SHIM_LOCK = threading.Lock()
 
 
+# ---------------------------------------------------------------------------
+# Pure-Python Crypto.PublicKey.RSA + PKCS1_v1_5 (only when pycryptodome absent)
+# ---------------------------------------------------------------------------
+def _der_read(buffer: bytes, pos: int):
+    tag = buffer[pos]
+    pos += 1
+    length = buffer[pos]
+    pos += 1
+    if length & 0x80:
+        count = length & 0x7F
+        length = int.from_bytes(buffer[pos:pos + count], "big")
+        pos += count
+    return tag, buffer[pos:pos + length], pos + length
+
+
+def _der_ints(buffer: bytes):
+    """All INTEGER values of a DER SEQUENCE, in order."""
+    values = []
+    tag, body, _ = _der_read(buffer, 0)
+    pos = 0
+    while pos < len(body):
+        tag, value, pos = _der_read(body, pos)
+        if tag == 0x02:
+            values.append(int.from_bytes(value, "big"))
+        elif tag == 0x30 and not values:
+            values.extend(_der_ints(value))
+    return values
+
+
+def _install_rsa_shim():
+    if "Crypto.PublicKey.RSA" in sys.modules:
+        return
+    try:
+        import Crypto.PublicKey.RSA  # noqa: F401
+        return
+    except Exception:
+        pass
+
+    import base64
+    import os
+
+    rsa_public_mod = types.ModuleType("Crypto.PublicKey.RSA")
+    pkcs1_mod = types.ModuleType("Crypto.Cipher.PKCS1_v1_5")
+
+    class RsaKey:
+        def __init__(self, n: int, e: int, d: int | None = None):
+            self.n = n
+            self.e = e
+            self.d = d
+            self.size_in_bits = n.bit_length()
+            self.size_in_bytes = (self.size_in_bits + 7) // 8
+
+        def public_key(self):
+            return RsaKey(self.n, self.e)
+
+        def has_private(self) -> bool:
+            return self.d is not None
+
+        def _raw_encrypt(self, message_int: int) -> bytes:
+            return pow(message_int, self.e, self.n).to_bytes(self.size_in_bytes, "big")
+
+        def _raw_decrypt(self, block: bytes) -> int:
+            if self.d is None:
+                raise ValueError("This key has no private half")
+            return pow(int.from_bytes(block, "big"), self.d, self.n)
+
+    def _parse_key(text):
+        if isinstance(text, (bytes, bytearray)):
+            text = text.decode("utf-8", "ignore")
+        body = "".join(
+            line for line in text.splitlines() if not line.startswith("-----")
+        )
+        der = base64.b64decode("".join(body.split()))
+        # PKCS#1 RSAPrivateKey starts with SEQUENCE > INTEGER 0
+        try:
+            values = _der_ints(der)
+        except Exception:
+            values = []
+        if len(values) >= 9:
+            return RsaKey(values[1], values[2], values[3])
+        # PKCS#8 PrivateKeyInfo / SubjectPublicKeyInfo: unwrap the inner BIT/OCTET STRING.
+        tag, body_bytes, _ = _der_read(der, 0)
+        pos = 0
+        while pos < len(body_bytes):
+            tag, value, pos = _der_read(body_bytes, pos)
+            if tag in (0x04, 0x03):
+                if value[:1] == b"\x00":
+                    value = value[1:]
+                try:
+                    inner = _der_ints(value)
+                except Exception:
+                    continue
+                if len(inner) >= 9:
+                    return RsaKey(inner[1], inner[2], inner[3])
+                if len(inner) == 2:
+                    return RsaKey(inner[0], inner[1])
+        raise ValueError("Unsupported RSA key encoding")
+
+    rsa_public_mod.import_key = lambda extern_key, passphrase=None: _parse_key(extern_key)
+    rsa_public_mod.RsaKey = RsaKey
+
+    class Pkcs1V15:
+        block_type = 2
+
+        def __init__(self, key):
+            self._key = key
+
+        def encrypt(self, message: bytes) -> bytes:
+            message = bytes(message)
+            size = self._key.size_in_bytes
+            if len(message) > size - 11:
+                raise ValueError("Plaintext is too long for this key")
+            padding = bytearray()
+            while len(padding) < size - 3 - len(message):
+                byte = os.urandom(1)[0]
+                if byte:
+                    padding.append(byte)
+            block = b"\x00\x02" + bytes(padding) + b"\x00" + message
+            return self._key._raw_encrypt(int.from_bytes(block, "big"))
+
+        def decrypt(self, ciphertext: bytes, sentinel=None) -> bytes:
+            size = self._key.size_in_bytes
+            if len(ciphertext) != size:
+                return sentinel
+            value = self._key._raw_decrypt(bytes(ciphertext)).to_bytes(size, "big")
+            if value[:2] != b"\x00\x02":
+                return sentinel
+            separator = value.find(b"\x00", 2)
+            if separator < 0:
+                return sentinel
+            return value[separator + 1:]
+
+    pkcs1_mod.new = lambda key, randfunc=None: Pkcs1V15(key)
+    pkcs1_mod.PKCS115_Cipher = Pkcs1V15
+
+    public_pkg = types.ModuleType("Crypto.PublicKey")
+    public_pkg.RSA = rsa_public_mod
+
+    crypto = sys.modules.get("Crypto")
+    if crypto is None:
+        crypto = types.ModuleType("Crypto")
+        sys.modules["Crypto"] = crypto
+    cipher = sys.modules.get("Crypto.Cipher")
+    if cipher is None:
+        cipher = types.ModuleType("Crypto.Cipher")
+        sys.modules["Crypto.Cipher"] = cipher
+    crypto.PublicKey = public_pkg
+    crypto.Cipher = cipher
+    cipher.PKCS1_v1_5 = pkcs1_mod
+    sys.modules["Crypto.PublicKey"] = public_pkg
+    sys.modules["Crypto.PublicKey.RSA"] = rsa_public_mod
+    sys.modules["Crypto.Cipher.PKCS1_v1_5"] = pkcs1_mod
+
+
 def _ensure_shims():
     global _SHIMS_READY
     if _SHIMS_READY:
@@ -672,6 +826,7 @@ def _ensure_shims():
         if _SHIMS_READY:
             return
         _install_crypto_shim()
+        _install_rsa_shim()
         _install_lxml_and_bs4_shims()
         _install_spider_base_shims()
         _SHIMS_READY = True
