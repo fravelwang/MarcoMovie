@@ -82,9 +82,11 @@ final class HomeScreen {
     String wallSourceFilter = "";
     boolean wallMultiOnly;
     boolean wallSortByName;
+    /**
+     * Host of the inline facet panel. The screen only creates and places the container; {@link
+     * LibraryRenderer#attachPanel} owns every child inside it (built once per wall result).
+     */
     LinearLayout wallFilterRow;
-    /** Chips of the expanded filter panel, with the predicate that decides their selected look. */
-    final List<TextView> wallChipViews = new ArrayList<>();
 
     static final class Snapshot {
         long time = System.currentTimeMillis();
@@ -267,6 +269,13 @@ final class HomeScreen {
                 new LinearLayout.LayoutParams(-2, a.dp(Math.round(34 * navScale)));
         sourceSize.leftMargin = a.dp(14);
         heading.addView(source, sourceSize);
+        // A wire that ran before the heading was laid out can leave the header links on stale
+        // defaults; re-run once the pill's own bounds settle (first layout, label change).
+        source.addOnLayoutChangeListener(
+                (v, l, t, r, b, ol, ot, or, ob) -> {
+                    if (r - l == or - ol && b - t == ob - ot) return;
+                    if (usesLibraryWall() && active()) wireNavigation();
+                });
         if (a.isTvDevice() && !usesLibraryWall()) {
             filterToggle = pill("筛选  ⌄", "home-filters", this::showFilters);
             filterToggle.setPadding(
@@ -284,6 +293,7 @@ final class HomeScreen {
                             ? pill("筛选  ⌄", "home-wall-filters", this::toggleWallFilters)
                             : null;
             if (filterToggle != null) {
+                filterToggle.setContentDescription("展开年份、地区、类别筛选");
                 filterToggle.setPadding(
                         a.dp(Math.round(14 * navScale)), 0, a.dp(Math.round(14 * navScale)), 0);
                 UiCompat.setDefaultFocusHighlightEnabled(filterToggle, false);
@@ -319,7 +329,7 @@ final class HomeScreen {
         wallFilterRow.setPadding(0, 0, 0, a.dp(8));
         wallFilterRow.setVisibility(View.GONE);
         libraryParent.addView(wallFilterRow, new LinearLayout.LayoutParams(-1, -2));
-        rebuildWallFilters();
+        renderer.attachPanel(wallFilterRow);
         status = a.text("正在整理片单…", 13, MainActivity.MUTED);
         status.setPadding(a.dp(4), a.dp(12), 0, a.dp(12));
         libraryParent.addView(status);
@@ -978,7 +988,9 @@ final class HomeScreen {
         state.selectedFilters.clear();
         state.videos = videos;
         updateLibraryFilterPill();
-        renderer.renderWall(model, visible);
+        // The aggregation result — not the facet fingerprint — is what "the wall changed" means, so
+        // the renderer rebuilds the facet panel only when a different round arrives.
+        renderer.renderWall(model, visible, result);
         updateMore();
         wireNavigation();
         refreshWallLayout();
@@ -1009,7 +1021,12 @@ final class HomeScreen {
                     content.requestLayout();
                     if (a.body != null) a.body.requestLayout();
                     wireNavigation();
-                    if (source != null && !rows.isEmpty() && !rows.get(0).isEmpty()) {
+                    // An expanded facet panel sits between the pills and the grid, so the header's
+                    // DOWN link belongs to the renderer in that state.
+                    if (!renderer.panelExpanded()
+                            && source != null
+                            && !rows.isEmpty()
+                            && !rows.get(0).isEmpty()) {
                         source.setNextFocusDownId(rows.get(0).get(0).getId());
                     }
                 });
@@ -2007,7 +2024,11 @@ final class HomeScreen {
 
     void updateFilterToggle() {
         if (filterToggle == null || state == null) return;
-        boolean show = !usesLibraryWall() && !SourceController.isConfigOrNetdiskSite(site);
+        // In wall mode the same slot holds the wall 筛选 pill: its visibility, label and links are
+        // owned by LibraryRenderer (expand/collapse). Touching it here used to hide the only way
+        // into the facet panel whenever a single-site filter had left state.filtersExpanded set.
+        if (usesLibraryWall()) return;
+        boolean show = !SourceController.isConfigOrNetdiskSite(site);
         filterToggle.setVisibility(show ? View.VISIBLE : View.GONE);
         if (!show) return;
         String base =
@@ -2293,6 +2314,10 @@ final class HomeScreen {
                 || applyingFilters
                 || state == null
                 || !state.filtersExpanded) return;
+        // The wall facet panel has its own expand state in the renderer; state.filtersExpanded can
+        // be a leftover from per-site browsing and must not be allowed to run the single-site
+        // collapse here (it used to relabel/hide the wall 筛选 pill through updateTabs()).
+        if (usesLibraryWall()) return;
         state.filtersExpanded = false;
         if (inlineFilters != null) inlineFilters.render();
         updateTabs();
@@ -3033,112 +3058,14 @@ final class HomeScreen {
         return new AmbientPoster();
     }
 
-    /**
-     * Wall filters. The merged wall lost the per-site category chrome when it became cross-site, so
-     * these chips give it back as local narrowing: netdisk-only, multi-source, and a name sort.
-     * They never trigger a fetch.
+    /*
+     * The wall's facet panel lives in {@link LibraryRenderer} (built once per wall result from
+     * {@code LibraryModel.facets}, restyled in place on every press). What stays here is the filter
+     * state itself ({@link #wallSourceFilter}, {@link #wallNetdiskOnly}, {@link #wallMultiOnly},
+     * {@link #wallSortByName}, {@link #wallYear}, {@link #wallArea}, {@link #wallGenre}) and
+     * {@link #applyWallFilterChange()}, the single entry point that re-queries the cached wall and
+     * rebuilds the grid.
      */
-    /**
-     * Inline multi-level filter panel under the 筛选 button: first level picks the source (the merged
-     * wall or one site), second level narrows/sorts the merged result. Everything is local: the
-     * panel only re-filters what the wall already fetched.
-     */
-    void rebuildWallFilters() {
-        if (wallFilterRow == null) return;
-        wallFilterRow.removeAllViews();
-        wallChipViews.clear();
-        if (!usesLibraryWall()) {
-            wallFilterRow.setVisibility(View.GONE);
-            return;
-        }
-        wallFilterRow.setVisibility(View.GONE);
-        if (!state.filtersExpanded) return;
-
-        LinearLayout sourceRow = a.row();
-        sourceRow.setGravity(Gravity.CENTER_VERTICAL);
-        sourceRow.setClipChildren(false);
-        addWallChip(sourceRow, "合并墙", "wall-site-all", wallSourceFilter.isEmpty(), () -> {
-            wallSourceFilter = "";
-            restyleWallChips();
-            applyWallFilterChange();
-        });
-        for (Cms.Site target : wallChipSites()) {
-            String label = target.name == null ? target.key : target.name;
-            addWallChip(
-                    sourceRow,
-                    label,
-                    "wall-site:" + target.key,
-                    target.key.equals(wallSourceFilter),
-                    () -> {
-                        wallSourceFilter = target.key;
-                        restyleWallChips();
-                        applyWallFilterChange();
-                    });
-        }
-        wallFilterRow.addView(sourceRow, new LinearLayout.LayoutParams(-1, -2));
-
-        LinearLayout optionRow = a.row();
-        optionRow.setGravity(Gravity.CENTER_VERTICAL);
-        optionRow.setClipChildren(false);
-        addWallChip(optionRow, "只看网盘", "wall-netdisk", wallNetdiskOnly, () -> {
-            wallNetdiskOnly = !wallNetdiskOnly;
-            restyleWallChips();
-            applyWallFilterChange();
-        });
-        addWallChip(optionRow, "多源合并", "wall-multi", wallMultiOnly, () -> {
-            wallMultiOnly = !wallMultiOnly;
-            restyleWallChips();
-            applyWallFilterChange();
-        });
-        addWallChip(optionRow, "按名称", "wall-sort", wallSortByName, () -> {
-            wallSortByName = !wallSortByName;
-            restyleWallChips();
-            applyWallFilterChange();
-        });
-        wallFilterRow.addView(optionRow, new LinearLayout.LayoutParams(-1, -2));
-
-        addTaxonomyRow("年份", wallTaxonomy(true), wallYear, value -> {
-            wallYear = wallYear.equals(value) ? "" : value;
-            restyleWallChips();
-            applyWallFilterChange();
-        });
-        addTaxonomyRow("地区", wallTaxonomy(false), wallArea, value -> {
-            wallArea = wallArea.equals(value) ? "" : value;
-            restyleWallChips();
-            applyWallFilterChange();
-        });
-        addTaxonomyRow("类别", wallGenres(), wallGenre, value -> {
-            wallGenre = wallGenre.equals(value) ? "" : value;
-            restyleWallChips();
-            applyWallFilterChange();
-        });
-    }
-
-    /** One classification row: label + 不限 + the values actually present in the wall, by count. */
-    void addTaxonomyRow(String label, List<String> values, String active, java.util.function.Consumer<String> pick) {
-        // Always rendered: "全部" is the default and the row must be in a stable place even before
-        // any detail has backfilled this dimension.
-        LinearLayout row = a.row();
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setClipChildren(false);
-        TextView head = a.text(label, 12f * navScale, MainActivity.MUTED);
-        head.setPadding(0, 0, a.dp(8), 0);
-        row.addView(head);
-        addWallChip(row, "全部", "wall-" + label + "-all", active.isEmpty(), () -> {
-            if (!active.isEmpty()) pick.accept(active);
-        });
-        if (values.isEmpty()) {
-            wallFilterRow.addView(row, new LinearLayout.LayoutParams(-1, -2));
-            return;
-        }
-        int shown = 0;
-        for (String value : values) {
-            if (shown++ >= 10) break;
-            addWallChip(row, value, "wall-" + label + ":" + value, value.equals(active), () -> pick.accept(value));
-        }
-        wallFilterRow.addView(row, new LinearLayout.LayoutParams(-1, -2));
-    }
-
     static String valueOf(String raw) {
         return raw == null ? "" : raw.trim();
     }
@@ -3151,7 +3078,10 @@ final class HomeScreen {
         return false;
     }
 
-    /** Distinct years present in the wall, newest first. */
+    /**
+     * Years/areas present in the cached wall. Only the step-4 dialog still calls this; the inline
+     * panel reads {@code LibraryModel.facets} instead.
+     */
     List<String> wallTaxonomy(boolean years) {
         java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
         LibraryAggregator.Result wall = a.libraryWall;
@@ -3167,7 +3097,10 @@ final class HomeScreen {
         return out;
     }
 
-    /** Distinct genres present in the wall, most common first. */
+    /**
+     * Genres present in the cached wall, most common first. Same note as {@link
+     * #wallTaxonomy(boolean)}: step-4 dialog only, the inline panel uses the model facets.
+     */
     List<String> wallGenres() {
         java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
         LibraryAggregator.Result wall = a.libraryWall;
@@ -3212,10 +3145,27 @@ final class HomeScreen {
     }
 
     /**
-     * 筛选：对话框形态（临时形态，等片库重构换成内联面板）。
-     * 只改状态 + 重渲染网格，不动标题行和任何已存在的控件，焦点不会跳。
+     * 筛选：内联面板的展开 / 收起（步骤 3）。面板内容归 {@link LibraryRenderer}，只在墙结果变化
+     * 时构建一次；这里只改可见性，展开后焦点落面板第一项，收起后回到「筛选」pill。
      */
     void toggleWallFilters() {
+        renderer.setExpanded(!renderer.panelExpanded());
+    }
+
+    /**
+     * Wall header hard fallback for {@code navigationKey}: 合并墙 →(right) 筛选 pill and 筛选
+     * →(down) 面板第一项 are resolved by the renderer instead of a wire that may be stale. See
+     * {@link LibraryRenderer#headerKey(int)}.
+     */
+    boolean headerKey(int key) {
+        return usesLibraryWall() && renderer.headerKey(key);
+    }
+
+    /**
+     * 旧的「筛选」对话框。墙模式已经不再走这里（步骤 3 换回内联面板），保留到步骤 4 统一删除。
+     * 下面的 pickWallSource / pickWallFacet / pickWallGenre 只被它调用。
+     */
+    void showWallFilterDialogLegacy() {
         final String[] names = {
             "全部（清除过滤）",
             "只看网盘" + (wallNetdiskOnly ? "（已开）" : ""),
@@ -3345,63 +3295,14 @@ final class HomeScreen {
                 .show();
     }
 
-    void toggleWallFiltersUnused() {
-        state.filtersExpanded = !state.filtersExpanded;
-        rebuildWallFilters();
-        if (state.filtersExpanded && wallFilterRow != null && wallFilterRow.getChildCount() > 0) {
-            android.view.ViewGroup first =
-                    (android.view.ViewGroup) wallFilterRow.getChildAt(0);
-            if (first.getChildCount() > 0) first.getChildAt(0).requestFocus();
-        }
-    }
-
-    void addWallChip(LinearLayout row, String label, String tag, boolean active, Runnable action) {
-        TextView chip = pill(label, tag, action);
-        chip.setPadding(a.dp(13), 0, a.dp(13), 0);
-        chip.setTextColor(active ? MainActivity.WHITE : 0xffc8c8d0);
-        chip.setBackground(a.bg(active ? 0xff2f6bd8 : 0xff24242b, Math.round(18 * navScale)));
-        chip.setOnFocusChangeListener(
-                (v, f) -> outline(chip, f, Math.round(18 * navScale), 0xff24242b));
-        LinearLayout.LayoutParams lp =
-                new LinearLayout.LayoutParams(-2, a.dp(Math.round(32 * navScale)));
-        lp.rightMargin = a.dp(8);
-        row.addView(chip, lp);
-        wallChipViews.add(chip);
-    }
-
     /**
-     * Restyles the live chips from the current filter state. Used after a chip press instead of
-     * rebuilding the panel: rebuilding detached every chip (and the one being focused), which is
-     * what made focus jump into the grid and the panel disappear.
+     * One wall filter press. Restyles the live panel chips in place (never rebuilds them: the chip
+     * tree belongs to {@link LibraryRenderer} and is rebuilt only when the wall result changes),
+     * then re-queries the cached wall and rebuilds the grid. The focused chip stays attached, so
+     * focus does not move.
      */
-    void restyleWallChips() {
-        for (TextView chip : wallChipViews) {
-            if (chip == null) continue;
-            boolean active = wallChipSelected(String.valueOf(chip.getTag()));
-            chip.setTextColor(active ? MainActivity.WHITE : 0xffc8c8d0);
-            chip.setBackground(a.bg(active ? 0xff2f6bd8 : 0xff24242b, Math.round(18 * navScale)));
-        }
-    }
-
-    /** Selected look for a chip, derived from the live filter state and the chip's tag. */
-    boolean wallChipSelected(String tag) {
-        if (tag == null) return false;
-        if (tag.equals("wall-site-all")) return wallSourceFilter.isEmpty();
-        if (tag.startsWith("wall-site:")) return tag.substring(10).equals(wallSourceFilter);
-        if (tag.equals("wall-netdisk")) return wallNetdiskOnly;
-        if (tag.equals("wall-multi")) return wallMultiOnly;
-        if (tag.equals("wall-sort")) return wallSortByName;
-        if (tag.startsWith("wall-年份:")) return tag.substring(8).equals(wallYear);
-        if (tag.startsWith("wall-地区:")) return tag.substring(8).equals(wallArea);
-        if (tag.startsWith("wall-类别:")) return tag.substring(8).equals(wallGenre);
-        if (tag.equals("wall-年份-all")) return wallYear.isEmpty();
-        if (tag.equals("wall-地区-all")) return wallArea.isEmpty();
-        if (tag.equals("wall-类别-all")) return wallGenre.isEmpty();
-        return false;
-    }
-
     void applyWallFilterChange() {
-        rebuildWallFilters();
+        renderer.restyleChips();
         LibraryAggregator.Result cached = a.libraryWall;
         if (cached == null || a.libraryWallEpoch != a.engineEpoch) return;
         applyLibraryWall(cached);
@@ -3573,24 +3474,6 @@ final class HomeScreen {
                                 ? aboveHistoryId
                                 : (topDockActive ? a.homeDock.items[0].getId() : source.getId()))
                         : historyCards.get(stackedHistory ? historyCards.size() - 1 : 0).getId();
-        source.setNextFocusUpId(sourceUpId);
-        View sourceDown = selectedTab();
-        // With no category tabs the wall itself sits directly below the filter pill. The first card
-        // now comes from the renderer, which owns the rows.
-        View wallFirstCard = renderer.firstCard();
-        if (usesLibraryWall() && tabs.isEmpty() && wallFirstCard != null) {
-            sourceDown = wallFirstCard;
-        }
-        source.setNextFocusDownId(sourceDown.getId());
-        boolean filterToggleShown = filterToggle != null && filterToggle.isShown();
-        if (filterToggleShown) {
-            source.setNextFocusRightId(filterToggle.getId());
-            filterToggle.setNextFocusLeftId(source.getId());
-            filterToggle.setNextFocusRightId(filterToggle.getId());
-            filterToggle.setNextFocusUpId(sourceUpId);
-        } else {
-            source.setNextFocusRightId(source.getId());
-        }
         int gridFirstId = renderer.firstCardId();
         int contentDownId =
                 earlier.isShown()
@@ -3601,9 +3484,25 @@ final class HomeScreen {
         boolean inlineExpanded = inlineFilters != null && inlineFilters.expanded();
         boolean inlineSummary = inlineFilters != null && inlineFilters.summaryShown();
         View firstFilterChip = inlineExpanded ? inlineFilters.entryChip(0) : null;
-        if (filterToggleShown) {
-            filterToggle.setNextFocusDownId(
-                    firstFilterChip != null ? firstFilterChip.getId() : selectedTab().getId());
+        boolean filterToggleShown = filterToggle != null && filterToggle.isShown();
+        if (usesLibraryWall()) {
+            // HeaderBar (合并墙 pill → 筛选 pill) + facet panel + grid: one order, generated by the
+            // renderer (step 3). The pills' views are still built in show(); only their links move.
+            renderer.wireWallHeader(sourceUpId, contentDownId);
+            renderer.wirePanelFocus(contentDownId);
+        } else {
+            source.setNextFocusUpId(sourceUpId);
+            source.setNextFocusDownId(selectedTab().getId());
+            if (filterToggleShown) {
+                source.setNextFocusRightId(filterToggle.getId());
+                filterToggle.setNextFocusLeftId(source.getId());
+                filterToggle.setNextFocusRightId(filterToggle.getId());
+                filterToggle.setNextFocusUpId(sourceUpId);
+                filterToggle.setNextFocusDownId(
+                        firstFilterChip != null ? firstFilterChip.getId() : selectedTab().getId());
+            } else {
+                source.setNextFocusRightId(source.getId());
+            }
         }
         for (int r = 0; r < filters.lines.size(); r++) {
             List<View> line = filters.lines.get(r);
@@ -3692,16 +3591,21 @@ final class HomeScreen {
                 for (List<View> line : inlineFilters.rows)
                     if (!line.isEmpty()) a.homeDock.leftEdge(line.get(0), false);
             } else if (inlineSummary) a.homeDock.leftEdge(inlineFilters.expandButton, false);
+            for (List<View> line : renderer.panelLines())
+                if (!line.isEmpty()) a.homeDock.leftEdge(line.get(0), false);
             for (List<View> row : rows) if (!row.isEmpty()) a.homeDock.leftEdge(row.get(0), false);
             a.homeDock.leftEdge(earlier, false);
             a.homeDock.leftEdge(more, false);
         }
+        int wallPanelAboveId = renderer.lastPanelRowNearestId(earlier);
         int aboveGridId =
-                inlineExpanded
-                        ? inlineFilters.rows.get(lastInlineRow).get(0).getId()
-                        : inlineSummary
-                                ? inlineFilters.expandButton.getId()
-                                : selectedTab().getId();
+                wallPanelAboveId != View.NO_ID
+                        ? wallPanelAboveId
+                        : inlineExpanded
+                                ? inlineFilters.rows.get(lastInlineRow).get(0).getId()
+                                : inlineSummary
+                                        ? inlineFilters.expandButton.getId()
+                                        : selectedTab().getId();
         earlier.setNextFocusUpId(aboveGridId);
         earlier.setNextFocusDownId(gridFirstId != View.NO_ID ? gridFirstId : more.getId());
         int lastRowFirstId = renderer.lastRowFirstCardId();
@@ -3727,9 +3631,35 @@ final class HomeScreen {
                                 : key == android.view.KeyEvent.KEYCODE_DPAD_LEFT
                                         ? focus.getNextFocusLeftId()
                                         : focus.getNextFocusRightId();
+        // The two wall header pills move focus through their owner (LibraryRenderer.headerKey)
+        // before the generic lookup, so 合并墙 →(right) 筛选 and 筛选 →(down) 面板第一项 work even
+        // if the last wire ran before the heading was laid out.
+        HomeScreen wallHome = a.current == null ? null : a.current.retainedHome;
+        if (event.getAction() == android.view.KeyEvent.ACTION_DOWN
+                && wallHome != null
+                && wallHome.active()
+                && wallHome.headerKey(key)) return true;
         if (id == View.NO_ID) return false;
         if (event.getAction() != android.view.KeyEvent.ACTION_DOWN) return true;
         View target = a.root.findViewById(id);
+        if (wallHome != null && (focus == wallHome.source || focus == wallHome.filterToggle)) {
+            // One line per D-pad press on the two header pills: enough to tell a stale wire (id
+            // missing / target invalid) from a focus that is stolen right after the move.
+            android.util.Log.i(
+                    "LibraryFocus",
+                    "key="
+                            + key
+                            + " tag="
+                            + focus.getTag()
+                            + " next="
+                            + id
+                            + " target="
+                            + (target == null ? "null" : target.getTag())
+                            + " shown="
+                            + (target != null && target.isShown())
+                            + " focusable="
+                            + (target != null && target.isFocusable()));
+        }
         if (target == null || !target.isShown() || !target.isFocusable()) return false;
         if (key == android.view.KeyEvent.KEYCODE_DPAD_DOWN
                 && target == focus
