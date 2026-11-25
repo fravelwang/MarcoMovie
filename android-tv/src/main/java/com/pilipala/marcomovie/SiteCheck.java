@@ -30,8 +30,14 @@ final class SiteCheck {
 
     static final String TAG = "SiteCheck";
 
-    /** One site gets this long in total (engine construction included) before it is cancelled. */
-    static final long BUDGET_MS = 10000L;
+    /**
+     * Engine construction and page fetching are budgeted separately, matching the wall: the netdisk
+     * spider plugins spend ~8.2 s in init (measured), so a single 10 s budget covering both phases
+     * made healthy sites look like timeouts.
+     */
+    static final long ENGINE_BUDGET_MS = 12000L;
+
+    static final long PAGE_BUDGET_MS = 10000L;
 
     static final int CONCURRENCY = 4;
 
@@ -165,77 +171,96 @@ final class SiteCheck {
     private static Outcome probe(
             MainActivity a, Cms.Site site, ExecutorService pool, ScheduledExecutorService timer) {
         final Outcome outcome = new Outcome();
-        final FutureTask<Void> task =
+        final SourceEngine[] engine = new SourceEngine[1];
+
+        final FutureTask<Void> initTask =
                 new FutureTask<>(
                         () -> {
                             long started = SystemClock.elapsedRealtime();
-                            try {
-                                SourceEngine engine = a.engine(site);
-                                outcome.engineMs = SystemClock.elapsedRealtime() - started;
-                                long homeStarted = SystemClock.elapsedRealtime();
-                                String raw = engine.home();
-                                outcome.homeMs = SystemClock.elapsedRealtime() - homeStarted;
-                                Cms.Listing listing = HomeScreen.parseHomeListing(raw);
-                                int videos = listing == null ? 0 : listing.videos.size();
-                                int categories = 0;
-                                try {
-                                    categories = Cms.categories(raw).size();
-                                } catch (Throwable ignored) {
-                                }
-                                final int categoryCount = categories;
-                                // Mirror the wall: a site whose home page only lists channels is not
-                                // empty until a few channels have been tried.
-                                for (int probe = 0;
-                                        videos == 0
-                                                && probe < Math.min(3, categoryCount);
-                                        probe++) {
-                                    long probeStarted = SystemClock.elapsedRealtime();
-                                    try {
-                                        String channel =
-                                                engine.category(
-                                                        Cms.categories(raw).get(probe).id, 1);
-                                        Cms.Listing listing2 = Cms.listing(channel);
-                                        videos = listing2 == null ? 0 : listing2.videos.size();
-                                        outcome.homeMs +=
-                                                SystemClock.elapsedRealtime() - probeStarted;
-                                    } catch (Throwable ignored) {
-                                        // One dead channel does not end the probe loop.
-                                    }
-                                }
-                                outcome.items = videos;
-                                if (videos > 0) {
-                                    outcome.verdict = "EMIT";
-                                } else if (categories > 0) {
-                                    outcome.verdict = "EMPTY";
-                                    outcome.detail = "cats=" + categories;
-                                } else {
-                                    outcome.verdict = "EMPTY";
-                                    outcome.detail = "no categories";
-                                }
-                            } catch (InterruptedException cancelled) {
-                                outcome.verdict = "TIMEOUT";
-                            } catch (Throwable failure) {
-                                Throwable cause = unwrap(failure);
-                                outcome.verdict = "ERROR:" + cause.getClass().getSimpleName();
-                                outcome.detail = shortMessage(cause);
-                            }
+                            engine[0] = a.engine(site);
+                            outcome.engineMs = SystemClock.elapsedRealtime() - started;
                             return null;
                         });
-        ScheduledFuture<?> watchdog = null;
+        ScheduledFuture<?> watchdog =
+                timer.schedule(() -> initTask.cancel(true), ENGINE_BUDGET_MS, TimeUnit.MILLISECONDS);
+        pool.execute(initTask);
         try {
-            watchdog = timer.schedule(() -> task.cancel(true), BUDGET_MS, TimeUnit.MILLISECONDS);
+            initTask.get(ENGINE_BUDGET_MS + 2000L, TimeUnit.MILLISECONDS);
         } catch (Throwable ignored) {
-        }
-        pool.execute(task);
-        try {
-            task.get(BUDGET_MS + 2000L, TimeUnit.MILLISECONDS);
-        } catch (Throwable ignored) {
+            initTask.cancel(true);
             outcome.verdict = "TIMEOUT";
-            task.cancel(true);
+            return outcome;
+        } finally {
+            if (watchdog != null) watchdog.cancel(false);
+        }
+        if (engine[0] == null) {
+            outcome.verdict = "TIMEOUT";
+            return outcome;
+        }
+
+        final FutureTask<Void> pageTask =
+                new FutureTask<>(
+                        () -> {
+                            measure(a, site, engine[0], outcome);
+                            return null;
+                        });
+        watchdog = timer.schedule(() -> pageTask.cancel(true), PAGE_BUDGET_MS, TimeUnit.MILLISECONDS);
+        pool.execute(pageTask);
+        try {
+            pageTask.get(PAGE_BUDGET_MS + 2000L, TimeUnit.MILLISECONDS);
+        } catch (Throwable ignored) {
+            pageTask.cancel(true);
+            if ("ERROR".equals(outcome.verdict)) outcome.verdict = "TIMEOUT";
         } finally {
             if (watchdog != null) watchdog.cancel(false);
         }
         return outcome;
+    }
+
+    /** Fetch the home page (then a few channels) for one site and fill in the verdict. */
+    private static void measure(MainActivity a, Cms.Site site, SourceEngine engine, Outcome outcome) {
+        try {
+            long homeStarted = SystemClock.elapsedRealtime();
+            String raw = engine.home();
+            outcome.homeMs = SystemClock.elapsedRealtime() - homeStarted;
+            Cms.Listing listing = HomeScreen.parseHomeListing(raw);
+            int videos = listing == null ? 0 : listing.videos.size();
+            int categories = 0;
+            try {
+                categories = Cms.categories(raw).size();
+            } catch (Throwable ignored) {
+            }
+            final int categoryCount = categories;
+            // Mirror the wall: a site whose home page only lists channels is not empty until a few
+            // channels have been tried.
+            for (int probe = 0; videos == 0 && probe < Math.min(3, categoryCount); probe++) {
+                long probeStarted = SystemClock.elapsedRealtime();
+                try {
+                    String channel = engine.category(Cms.categories(raw).get(probe).id, 1);
+                    Cms.Listing channelListing = Cms.listing(channel);
+                    videos = channelListing == null ? 0 : channelListing.videos.size();
+                    outcome.homeMs += SystemClock.elapsedRealtime() - probeStarted;
+                } catch (Throwable ignored) {
+                    // One dead channel does not end the probe loop.
+                }
+            }
+            outcome.items = videos;
+            if (videos > 0) {
+                outcome.verdict = "EMIT";
+            } else if (categories > 0) {
+                outcome.verdict = "EMPTY";
+                outcome.detail = "cats=" + categories;
+            } else {
+                outcome.verdict = "EMPTY";
+                outcome.detail = "no categories";
+            }
+        } catch (InterruptedException cancelled) {
+            outcome.verdict = "TIMEOUT";
+        } catch (Throwable failure) {
+            Throwable cause = unwrap(failure);
+            outcome.verdict = "ERROR:" + cause.getClass().getSimpleName();
+            outcome.detail = shortMessage(cause);
+        }
     }
 
     private static Throwable unwrap(Throwable error) {
