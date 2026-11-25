@@ -29,6 +29,20 @@ final class CatalogScreen {
         a.gap(a.body, 8);
     }
 
+    /**
+     * Folder / action / cross-search / config-action entries are not titles: their id only means
+     * something on the site that listed them, so they keep the old site-scoped open. Everything
+     * else is a title and goes through {@link MainActivity#openTitle}.
+     */
+    private static boolean opensOnOwnSite(Cms.Site site, Cms.Video video) {
+        if (video == null) return false;
+        if (video.action != null && !video.action.trim().isEmpty()) return true;
+        if ("action".equalsIgnoreCase(video.tag)) return true;
+        if ("folder".equalsIgnoreCase(video.tag)) return true;
+        if (video.id != null && video.id.startsWith("msearch:")) return true;
+        return SourceController.isConfigOrNetdiskActionCard(site, video);
+    }
+
     static void categories(MainActivity a, Cms.Site s) {
         a.prefs.edit().putString(Prefs.SELECTED_SITE, s.key).apply();
         a.renderPage(s.name, "CHOOSE A CATEGORY");
@@ -134,7 +148,12 @@ final class CatalogScreen {
                         card.setFocusableInTouchMode(a.isTvDevice());
                         card.setClickable(true);
                         card.setTag(i == 0 ? "primary" : "video:" + v.id);
-                        card.setOnClickListener(view -> a.openListing(s, v));
+                        // 影片卡走唯一入口；文件夹/action 不是某部片，仍在该站自己的列表里下钻。
+                        card.setOnClickListener(
+                                view -> {
+                                    if (opensOnOwnSite(s, v)) a.openListing(s, v);
+                                    else a.openTitle(v);
+                                });
                         card.setOnFocusChangeListener(
                                 (view, focus) ->
                                         FocusMotion.style(

@@ -594,6 +594,7 @@ final class TvV17DetailScreen {
                                 a.toast("「" + siteDisplayName(target) + "」里没有找到这部剧");
                                 return;
                             }
+                            // 显式换站：用户在这里点名了站点，所以不经过 openTitle 的账本默认源。
                             a.openListing(target, listing);
                         })
                 .setNegativeButton("取消", null)

@@ -879,6 +879,9 @@ final class SourceController {
                                                     || !detailContext.matches(
                                                             a.config, a.privateMode, a.engineEpoch))
                                                 return;
+                                            // The catalog title behind this open, if any, does not
+                                            // need its matching-page fallback any more.
+                                            a.clearCuratedFallback(site, id);
                                             try {
                                                 done.accept(video);
                                                 a.root.postOnAnimation(timing::ready);
@@ -901,6 +904,10 @@ final class SourceController {
                                                     || !detailContext.matches(
                                                             a.config, a.privateMode, a.engineEpoch))
                                                 return;
+                                            // A catalog title opened on the ledger's default site
+                                            // falls back to the recommendation matching page instead
+                                            // of a dead end.
+                                            if (a.openCuratedFallback(site, id)) return;
                                             if (onError != null) {
                                                 try {
                                                     onError.accept(error);

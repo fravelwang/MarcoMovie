@@ -1510,7 +1510,7 @@ final class HomeScreen {
                 v -> {
                     if (heroList.isEmpty()) return;
                     int idx = Math.max(0, Math.min(heroList.size() - 1, curatedHeroIndex));
-                    TvDetailHost.openCurated(a, heroList.get(idx));
+                    a.openTitle(heroList.get(idx));
                 });
         playBtn.setOnKeyListener(
                 (v, keyCode, ev) -> {
@@ -1692,7 +1692,7 @@ final class HomeScreen {
             TvFocusFrame.attachCard(card, tagPrefix);
             outline(card, false, 13, Color.TRANSPARENT);
             card.setContentDescription(item.title);
-            card.setOnClickListener(v -> TvDetailHost.openCurated(a, item));
+            card.setOnClickListener(v -> a.openTitle(item));
             card.setOnFocusChangeListener(
                     (v, f) -> {
                         TvV17PosterCard.focus(a, card, name, f);

@@ -878,23 +878,9 @@ final class LibraryRenderer {
         host.outline(card, false, 13, Color.TRANSPARENT);
         card.setContentDescription(
                 sourceCount > 0 ? video.title + "，" + sourceCount + " 个来源" : video.title);
-        // Resolve again on the press: the ledger grows while the card sits there (focus expansion,
-        // search, detail matching), and the default source must be the one the ledger holds now —
-        // not the one captured when this view was built. Otherwise the list says 虎斑｜网盘 first
-        // and the page still opens 王子｜APP.
-        card.setOnClickListener(
-                v -> {
-                    if (TvCuratedHome.isCuratedVideo(video)) {
-                        // Metadata-only card: the recommendation page is the open path. It reads
-                        // the ledger first, so once a real source is known this opens that source.
-                        TvDetailHost.openCurated(host.a, video);
-                        return;
-                    }
-                    SourceLedger.Sources now = SourceLedger.resolve(host.a, video);
-                    Cms.Site target = now.defaultSite != null ? now.defaultSite : cardSite;
-                    Cms.Video listing = now.defaultListing != null ? now.defaultListing : cardVideo;
-                    host.a.openListing(target, listing);
-                });
+        // 打开某部片只有一个入口：openTitle 在按下这一下时重新查账本（账本会在聚焦补搜/搜索/
+        // 详情匹配期间增长），所以点位与"谁排第一"永远一致；没有来源的目录卡由它转推荐匹配页。
+        card.setOnClickListener(v -> host.a.openTitle(video));
         card.setOnFocusChangeListener(
                 (v, f) -> {
                     if (host.a.isTvDevice()) TvV17PosterCard.focus(host.a, card, title, f);

@@ -85,6 +85,18 @@ public final class MainActivity extends Activity {
     /** Last series opened in detail or playback; feeds the dock source control panel. */
     Cms.Site recentSeriesSite;
 
+    /**
+     * The catalog title behind a ledger open: set by {@link #openTitle} when a recommendation
+     * entry is opened on the ledger's default site, so a failed detail load can fall back to the
+     * catalog matching page instead of reporting "没有找到". One slot, short-lived (see
+     * {@link #openCuratedFallback}).
+     */
+    private Cms.Video curatedFallbackVideo;
+    private String curatedFallbackKey;
+    private long curatedFallbackAt;
+    /** How long a failed ledger open may still fall back to the catalog matching page. */
+    private static final long CURATED_FALLBACK_TTL_MS = 120000L;
+
     Cms.Video recentSeriesVideo;
     Cms.Config recentSeriesConfig;
     int resumeAt;
@@ -792,7 +804,84 @@ public final class MainActivity extends Activity {
         return false;
     }
 
-    /** Opens a list card without leaving an invisible redirect page in the back stack. */
+    /**
+     * The one way to open a title from a poster/card: the source ledger decides which site, and
+     * that site's own listing is what gets opened. Every "点海报看片" entry (片库墙卡、搜索结果卡、
+     * 首页海报、分类浏览卡、收藏) routes through here; pages must not pick a site themselves.
+     *
+     * <p>When the ledger knows no site for the title, this is the recommendation catalog's path:
+     * {@link TvDetailHost#openCurated} shows the metadata page and searches the user's own sources,
+     * writing every hit back into the ledger. A metadata-only card therefore never reports
+     * "没有片源" just because nothing sampled it yet.
+     *
+     * <p>Explicit site choice is a different action and stays on {@link #openListing}: the detail
+     * page's 换站观看, folder/action cards from a site's own list, and settings previews.
+     */
+    void openTitle(Cms.Video video) {
+        if (video == null) return;
+        clearCuratedFallback();
+        SourceLedger.Sources resolved = SourceLedger.resolve(this, video);
+        if (resolved.defaultSite != null && resolved.defaultListing != null) {
+            if (TvCuratedHome.isCuratedVideo(video)) {
+                // A catalog title opened through a site: if that site cannot produce the detail,
+                // fall back to the matching page rather than a dead end.
+                rememberCuratedFallback(video, resolved.defaultSite, resolved.defaultListing);
+            }
+            openListing(resolved.defaultSite, resolved.defaultListing);
+            return;
+        }
+        TvDetailHost.openCurated(this, video);
+    }
+
+    private void rememberCuratedFallback(Cms.Video origin, Cms.Site site, Cms.Video listing) {
+        if (origin == null || site == null || listing == null) return;
+        curatedFallbackVideo = origin;
+        curatedFallbackKey = site.key + ":" + listing.id;
+        curatedFallbackAt = SystemClock.elapsedRealtime();
+    }
+
+    private void clearCuratedFallback() {
+        curatedFallbackVideo = null;
+        curatedFallbackKey = null;
+    }
+
+    /** Clears the pending fallback once the same (site, listing) opened successfully. */
+    void clearCuratedFallback(Cms.Site site, String listingId) {
+        if (site == null || listingId == null || curatedFallbackKey == null) return;
+        if (curatedFallbackKey.equals(site.key + ":" + listingId)) clearCuratedFallback();
+    }
+
+    /**
+     * Called from the detail-load failure path: when the failed (site, listing) is a catalog title
+     * opened from the ledger, open the catalog matching page instead of the error panel. Returns
+     * true when it took over the page.
+     */
+    boolean openCuratedFallback(Cms.Site site, String listingId) {
+        Cms.Video origin = curatedFallbackVideo;
+        String key = curatedFallbackKey;
+        if (origin == null || key == null) return false;
+        if (SystemClock.elapsedRealtime() - curatedFallbackAt > CURATED_FALLBACK_TTL_MS) {
+            clearCuratedFallback();
+            return false;
+        }
+        if (site == null || listingId == null || !key.equals(site.key + ":" + listingId)) {
+            return false;
+        }
+        clearCuratedFallback();
+        AppLog.w("MainActivity", "curated fallback after failed open: " + origin.title);
+        TvDetailHost.openCurated(this, origin);
+        return true;
+    }
+
+    /**
+     * Opens one site's listing directly. This is <em>not</em> the card entry point: posters must
+     * call {@link #openTitle} so the ledger decides the site. Kept for explicit site choices —
+     * the detail page's 换站观看, folder/action drill-down from a site's own list, settings
+     * previews, the phone shell, and {@link #openTitle}'s own call.
+     *
+     * <p>Also used by redirect handling so a folder/action card does not leave an invisible
+     * redirect page in the back stack.
+     */
     void openListing(Cms.Site s, Cms.Video v) {
         if (v == null) return;
         if (v.action != null && !v.action.isEmpty()) {

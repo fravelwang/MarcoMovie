@@ -1941,7 +1941,7 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
                     }
                     LinearLayout card = posterCards.get(key);
                     if (card == null) {
-                        card = makeCard(site, video, sourceCount);
+                        card = makeCard(site, video, sourceCount, !activeFilter.isEmpty());
                         posterCards.put(key, card);
                     }
                     if (card.getParent() instanceof ViewGroup)
@@ -2049,7 +2049,8 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
         return LibraryAggregator.mergeSearch(sites, bySite);
     }
 
-    LinearLayout makeCard(Cms.Site site, Cms.Video video, int sourceCount) {
+    LinearLayout makeCard(
+            Cms.Site site, Cms.Video video, int sourceCount, boolean explicitSite) {
         LinearLayout card = a.vertical();
         card.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(8));
         ImageView poster = new ImageView(a);
@@ -2103,7 +2104,14 @@ retryCoordinator.setWarmer(site -> SourceController.engine(a, site, context));
                 view -> {
                     if (!current()) return;
                     saveHistory(query);
-                    a.openListing(site, video);
+                    if (explicitSite) {
+                        // The user filtered the results to one source: opening that source is an
+                        // explicit choice, so it keeps the site from the card.
+                        a.openListing(site, video);
+                        return;
+                    }
+                    // Merged results are posters for a title: the ledger decides the site.
+                    a.openTitle(video);
                 });
         card.setOnFocusChangeListener(
                 (view, selected) -> {

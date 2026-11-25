@@ -148,8 +148,8 @@ final class FavoritesScreen {
             a.notice("这个收藏的来源暂不可用，收藏仍保留。请检查配置。");
             return;
         }
-        Cms.Site selected = found;
-        a.openListing(selected, e.video());
+        // 收藏条目也是"点一下看这部片"：账本决定站点，没有来源时走推荐匹配。
+        a.openTitle(e.video());
     }
 
     void manage(Favorites.Entry e) {
