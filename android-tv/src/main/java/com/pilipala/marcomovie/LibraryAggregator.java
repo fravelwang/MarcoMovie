@@ -431,10 +431,29 @@ final class LibraryAggregator {
         return ok;
     }
 
-    /** Whitespace-insensitive title key; Chinese titles often differ only by spaces. */
+    /**
+     * Merge key for "the same show from different sites".
+     *
+     * <p>Every site decorates its titles: a bracketed tag, a resolution or language token, a
+     * trailing year, a "全26集/更新至12集" suffix, or just stray spaces and punctuation. Comparing
+     * the raw strings kept every copy apart, so the wall showed one card per site and search listed
+     * the same show a dozen times. Strip the decorations, keep season markers (第一季 and 第二季 are
+     * different shows) and keep the result only when enough of the title survives.
+     */
     static String normalizeTitle(String raw) {
         if (raw == null) return "";
-        return raw.replaceAll("[\\s\\u00a0\\u3000]+", "");
+        String bare = raw.replaceAll("[\\s\\u00a0\\u3000]+", "");
+        String key =
+                bare.replaceAll("[\\[【(（〔<《].*?[\\]】)）〕>》]", "")
+                        .replaceAll(
+                                "(?i)(4K|8K|2160P|1080P|720P|HDR|WEB-?DL|BluRay|HDTV|HD|"
+                                        + "国语|粤语|英语|日语|中字|双语|中文字幕|完结|已完结|"
+                                        + "全集|全\\d+集|共\\d+集|更新至\\d+集?|\\d+集全)", "")
+                        .replaceAll("[（(]?(19|20)\\d{2}[）)]?$", "")
+                        .replaceAll("[\\p{Punct}，。、·—－_:：!！?？\"'“”‘’~～]+", "")
+                        .trim();
+        // "1921" or a title made only of decorations: never merge on a degenerate key.
+        return key.length() >= 2 ? key : bare;
     }
 
     /** First home page, then the home video feed, then the first few categories, like HomeScreen. */
