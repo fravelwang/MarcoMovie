@@ -17,6 +17,11 @@ final class MediaRef {
     /** Folder/action cards keep their route: without them a hit became a plain detail card. */
     final String action;
     final String tag;
+    /** Detail-page metadata: synopsis, cast and the Douban subject id for the rating badge. */
+    final String description;
+    final String actor;
+    final String director;
+    final String doubanId;
 
     MediaRef(
             String siteKey,
@@ -29,7 +34,11 @@ final class MediaRef {
             String remarks,
             String doubanScore,
             String action,
-            String tag) {
+            String tag,
+            String description,
+            String actor,
+            String director,
+            String doubanId) {
         this.siteKey = siteKey == null ? "" : siteKey;
         this.id = id == null ? "" : id;
         this.title = title == null ? "" : title;
@@ -41,5 +50,9 @@ final class MediaRef {
         this.doubanScore = doubanScore == null ? "" : doubanScore;
         this.action = action == null ? "" : action;
         this.tag = tag == null ? "" : tag;
+        this.description = description == null ? "" : description;
+        this.actor = actor == null ? "" : actor;
+        this.director = director == null ? "" : director;
+        this.doubanId = doubanId == null ? "" : doubanId;
     }
 }

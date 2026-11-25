@@ -109,6 +109,95 @@ final class FongMiGateway implements SourceGateway {
     }
 
     /**
+     * The detail fetch: resolve the engine, note when it became ready, then take the same
+     * {@link SourceGate#measured} path (the per-engine gate and its two phases are unchanged).
+     *
+     * <p>No caching and no single-flight here: the caller owns both. The engine is the one the
+     * caller's detail flight is about; resolving it again is an engine-cache hit.
+     */
+    @Override
+    public String detailRaw(SiteRef site, String id, long[] timings) throws GatewayException {
+        Cms.Site target = resolve(site);
+        SourceEngine engine;
+        try {
+            engine = SourceController.engine(activity, target);
+        } catch (Throwable failure) {
+            throw normalize("detail", site, failure);
+        }
+        if (timings != null && timings.length >= 3) {
+            timings[0] = android.os.SystemClock.elapsedRealtime();
+        }
+        long[] phases = new long[2];
+        String raw;
+        try {
+            raw = SourceGate.measured(phases, () -> engine.detail(id));
+        } catch (Throwable failure) {
+            throw normalize("detail", site, failure);
+        }
+        if (timings != null && timings.length >= 3) {
+            timings[1] = phases[0];
+            timings[2] = phases[1];
+        }
+        return raw;
+    }
+
+    /**
+     * Parses a raw detail payload. Returns null when the payload cannot be parsed or carries no
+     * title at all — the cache may legitimately hold bad data, and the caller then refetches.
+     */
+    @Override
+    public MediaDetail parseDetail(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return null;
+        Cms.Listing listing;
+        try {
+            listing = Cms.listing(raw);
+        } catch (Throwable failure) {
+            return null;
+        }
+        if (listing == null || listing.videos == null || listing.videos.isEmpty()) return null;
+        Cms.Video video = listing.videos.get(0);
+        if (video == null) return null;
+        List<LineRef> lines = new ArrayList<>();
+        if (video.lines != null) {
+            for (Cms.Line line : video.lines) {
+                if (line == null) continue;
+                List<EpisodeRef> episodes = new ArrayList<>();
+                if (line.episodes != null) {
+                    for (Cms.Episode episode : line.episodes) {
+                        if (episode == null) continue;
+                        episodes.add(new EpisodeRef(episode.name, episode.url));
+                    }
+                }
+                lines.add(new LineRef(line.name, episodes));
+            }
+        }
+        // A detail parsed outside a site context does not need siteKey; toVideo ignores it.
+        return new MediaDetail(toMedia("", video), lines);
+    }
+
+    /** MediaDetail → the base listing object the detail UI and the cache validation consume. */
+    Cms.Video toVideo(MediaDetail detail) {
+        if (detail == null || detail.meta == null) return null;
+        Cms.Video video = toListing(detail.meta);
+        if (video == null) return null;
+        for (LineRef line : detail.lines) {
+            if (line == null) continue;
+            Cms.Line target = new Cms.Line();
+            target.name = line.name;
+            for (EpisodeRef episode : line.episodes) {
+                if (episode == null) continue;
+                Cms.Episode item = new Cms.Episode();
+                item.name = episode.name;
+                item.url = episode.url;
+                target.episodes.add(item);
+            }
+            // Parsers never kept an episode-less line; keep it out of the UI too.
+            if (!target.episodes.isEmpty()) video.lines.add(target);
+        }
+        return video;
+    }
+
+    /**
      * Turns a gateway hit back into the base's listing object, which is what the source ledger
      * stores. This conversion lives here and nowhere else: the rest of the app never builds a
      * {@code Cms.Video} from a gateway result.
@@ -126,6 +215,10 @@ final class FongMiGateway implements SourceGateway {
         video.doubanScore = emptyToNull(ref.doubanScore);
         video.action = emptyToNull(ref.action);
         video.tag = emptyToNull(ref.tag);
+        video.description = emptyToNull(ref.description);
+        video.actor = emptyToNull(ref.actor);
+        video.director = emptyToNull(ref.director);
+        video.doubanId = emptyToNull(ref.doubanId);
         return video;
     }
 
@@ -187,7 +280,11 @@ final class FongMiGateway implements SourceGateway {
                 video.remarks,
                 video.doubanScore,
                 video.action,
-                video.tag);
+                video.tag,
+                video.description,
+                video.actor,
+                video.director,
+                video.doubanId);
     }
 
     /** Folds a vendor failure into one kind; the caller logs the kind, never the raw stack. */

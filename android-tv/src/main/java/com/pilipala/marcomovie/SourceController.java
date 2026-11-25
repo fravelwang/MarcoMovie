@@ -790,14 +790,6 @@ final class SourceController {
         }
     }
 
-    private static boolean hasPlayableDetailLines(Cms.Video video) {
-        if (video == null || video.lines == null) return false;
-        for (Cms.Line line : video.lines) {
-            if (line != null && line.episodes != null && !line.episodes.isEmpty()) return true;
-        }
-        return false;
-    }
-
     static void loadDetail(
             MainActivity a, Cms.Site site, String id, MainActivity.Done<Cms.Video> done) {
         loadDetail(a, site, id, done, null);
@@ -820,21 +812,21 @@ final class SourceController {
                         () -> {
                             try {
                                 timing.dispatched = SystemClock.elapsedRealtime();
+                                final FongMiGateway gateway = new FongMiGateway(a);
+                                final SiteRef siteRef = new SiteRef(site.key, site.name);
                                 String raw = a.detailCache.get(key);
                                 if (raw != null) {
-                                    Cms.Listing memListing = Cms.listing(raw);
-                                    if (memListing.videos.isEmpty()
-                                            || !hasPlayableDetailLines(memListing.videos.get(0))) {
-                                        raw = null;
-                                    }
+                                    // Same "parseable and playable" gate as before, now on the
+                                    // gateway's domain type; a corrupt entry falls through to a
+                                    // refetch instead of failing the open.
+                                    MediaDetail cachedDetail = gateway.parseDetail(raw);
+                                    if (cachedDetail == null || !cachedDetail.playable()) raw = null;
                                 }
                                 if (raw == null) {
                                     String disk = readDetailDiskCache(a, site, id);
                                     if (disk != null) {
-                                        Cms.Listing diskListing = Cms.listing(disk);
-                                        if (!diskListing.videos.isEmpty()
-                                                && hasPlayableDetailLines(
-                                                        diskListing.videos.get(0))) {
+                                        MediaDetail diskDetail = gateway.parseDetail(disk);
+                                        if (diskDetail != null && diskDetail.playable()) {
                                             raw = disk;
                                             if (detailContext.matches(
                                                     a.config, a.privateMode, a.engineEpoch)) {
@@ -845,36 +837,45 @@ final class SourceController {
                                 }
                                 timing.cached = raw != null;
                                 if (raw == null) {
-                                    final long[] phases = new long[2];
+                                    // Gateway fills [0]=engine-ready clock, [1]=gate wait ns,
+                                    // [2]=inside-call ns; the three values the log has always
+                                    // reported, now measured on the gateway's path.
+                                    final long[] gatewayTiming = new long[3];
                                     raw =
                                             a.detailFlights.get(
                                                     key,
                                                     () -> {
                                                         String cached = a.detailCache.get(key);
                                                         if (cached != null) return cached;
-                                                        SourceEngine source =
-                                                                engine(a, site, detailContext);
-                                                        timing.engineReady =
-                                                                SystemClock.elapsedRealtime();
-                                                        String fetched =
-                                                                SourceGate.measured(
-                                                                        phases,
-                                                                        () -> source.detail(id));
-                                                        return fetched;
+                                                        // The engine lookup used to validate the
+                                                        // search context; keep that same gate
+                                                        // before asking the site.
+                                                        if (!detailContext.matches(
+                                                                a.config,
+                                                                a.privateMode,
+                                                                a.engineEpoch)) {
+                                                            throw new IOException("搜索上下文已失效");
+                                                        }
+                                                        return gateway.detailRaw(
+                                                                siteRef, id, gatewayTiming);
                                                     });
-                                    if (timing.engineReady == 0)
-                                        timing.engineReady = SystemClock.elapsedRealtime();
-                                    timing.gateWaitNanos = phases[0];
-                                    timing.delegateNanos = phases[1];
+                                    if (timing.engineReady == 0) {
+                                        timing.engineReady =
+                                                gatewayTiming[0] != 0
+                                                        ? gatewayTiming[0]
+                                                        : SystemClock.elapsedRealtime();
+                                    }
+                                    timing.gateWaitNanos = gatewayTiming[1];
+                                    timing.delegateNanos = gatewayTiming[2];
                                     timing.returned = SystemClock.elapsedRealtime();
                                 } else
                                     timing.engineReady =
                                             timing.returned = SystemClock.elapsedRealtime();
                                 if (Thread.currentThread().isInterrupted()) return;
-                                Cms.Listing listing = Cms.listing(raw);
-                                if (listing.videos.isEmpty()) throw new IOException("来源没有返回影片详情");
+                                MediaDetail detail = gateway.parseDetail(raw);
+                                if (detail == null) throw new IOException("来源没有返回影片详情");
                                 timing.parsed = SystemClock.elapsedRealtime();
-                                Cms.Video video = listing.videos.get(0);
+                                Cms.Video video = gateway.toVideo(detail);
                                 if ((video.id == null || video.id.trim().isEmpty()) && id != null) {
                                     video.id = id.trim();
                                 }
@@ -884,7 +885,7 @@ final class SourceController {
                                 expandSourcesAsync(a, site, video);
                                 LibraryAggregator.enrichMetadata(a, video);
                                 if (!timing.cached
-                                        && hasPlayableDetailLines(video)
+                                        && detail.playable()
                                         && detailContext.matches(
                                                 a.config, a.privateMode, a.engineEpoch)) {
                                     a.detailCache.put(key, raw);

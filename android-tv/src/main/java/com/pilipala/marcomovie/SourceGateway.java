@@ -19,4 +19,16 @@ interface SourceGateway {
      * fallback order the wall always used (home → video feed → a few category probes).
      */
     List<MediaRef> home(SiteRef site, int limit) throws GatewayException;
+
+    /**
+     * Fetches a site's raw detail payload (no caching — the caller owns caches and single-flight).
+     *
+     * @param timings optional out-parameter filled with the diagnostics the detail log has always
+     *     reported: {@code [0]} the clock when the engine became ready, {@code [1]} the per-engine
+     *     gate wait in ns, {@code [2]} the time spent inside the site call in ns.
+     */
+    String detailRaw(SiteRef site, String id, long[] timings) throws GatewayException;
+
+    /** Parses a raw detail payload; returns null when it cannot be parsed or carries no title. */
+    MediaDetail parseDetail(String raw);
 }
