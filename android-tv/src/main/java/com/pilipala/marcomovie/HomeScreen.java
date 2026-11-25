@@ -3159,7 +3159,7 @@ final class HomeScreen {
             wallFilterRow.setVisibility(View.GONE);
             return;
         }
-        wallFilterRow.setVisibility(state.filtersExpanded ? View.VISIBLE : View.GONE);
+        wallFilterRow.setVisibility(View.GONE);
         if (!state.filtersExpanded) return;
 
         LinearLayout sourceRow = a.row();
@@ -3319,7 +3319,141 @@ final class HomeScreen {
         return out;
     }
 
+    /**
+     * 筛选：对话框形态（临时形态，等片库重构换成内联面板）。
+     * 只改状态 + 重渲染网格，不动标题行和任何已存在的控件，焦点不会跳。
+     */
     void toggleWallFilters() {
+        final String[] names = {
+            "全部（清除过滤）",
+            "只看网盘" + (wallNetdiskOnly ? "（已开）" : ""),
+            "多源合并" + (wallMultiOnly ? "（已开）" : ""),
+            "按名称" + (wallSortByName ? "（已开）" : ""),
+            "来源限制…",
+            "年份…",
+            "地区…",
+            "类别…"
+        };
+        new AppDialog.Builder(a)
+                .setTitle("片库筛选")
+                .wrapChoices()
+                .setItems(
+                        names,
+                        (d, which) -> {
+                            switch (which) {
+                                case 0:
+                                    wallNetdiskOnly = false;
+                                    wallMultiOnly = false;
+                                    wallSortByName = false;
+                                    wallSourceFilter = "";
+                                    wallYear = "";
+                                    wallArea = "";
+                                    wallGenre = "";
+                                    applyWallFilterChange();
+                                    break;
+                                case 1:
+                                    wallNetdiskOnly = !wallNetdiskOnly;
+                                    applyWallFilterChange();
+                                    break;
+                                case 2:
+                                    wallMultiOnly = !wallMultiOnly;
+                                    applyWallFilterChange();
+                                    break;
+                                case 3:
+                                    wallSortByName = !wallSortByName;
+                                    applyWallFilterChange();
+                                    break;
+                                case 4:
+                                    pickWallSource();
+                                    break;
+                                case 5:
+                                    pickWallFacet(true);
+                                    break;
+                                case 6:
+                                    pickWallFacet(false);
+                                    break;
+                                default:
+                                    pickWallGenre();
+                                    break;
+                            }
+                        })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    void pickWallSource() {
+        List<Cms.Site> sites = wallChipSites();
+        String[] labels = new String[sites.size() + 1];
+        labels[0] = "合并墙（全部来源）";
+        int checked = wallSourceFilter.isEmpty() ? 0 : -1;
+        for (int i = 0; i < sites.size(); i++) {
+            labels[i + 1] = sites.get(i).name;
+            if (sites.get(i).key.equals(wallSourceFilter)) checked = i + 1;
+        }
+        new AppDialog.Builder(a)
+                .setTitle("来源限制")
+                .wrapChoices()
+                .setSingleChoiceItems(
+                        labels,
+                        checked,
+                        (d, which) -> {
+                            wallSourceFilter = which == 0 ? "" : sites.get(which - 1).key;
+                            applyWallFilterChange();
+                        })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    void pickWallFacet(boolean years) {
+        List<String> values = wallTaxonomy(years);
+        String[] labels = new String[values.size() + 1];
+        labels[0] = "全部";
+        String active = years ? wallYear : wallArea;
+        int checked = 0;
+        for (int i = 0; i < values.size(); i++) {
+            labels[i + 1] = values.get(i);
+            if (values.get(i).equals(active)) checked = i + 1;
+        }
+        new AppDialog.Builder(a)
+                .setTitle(years ? "年份" : "地区")
+                .wrapChoices()
+                .setSingleChoiceItems(
+                        labels,
+                        checked,
+                        (d, which) -> {
+                            String value = which == 0 ? "" : values.get(which - 1);
+                            if (years) wallYear = value;
+                            else wallArea = value;
+                            applyWallFilterChange();
+                        })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    void pickWallGenre() {
+        List<String> values = wallGenres();
+        String[] labels = new String[values.size() + 1];
+        labels[0] = "全部";
+        int checked = 0;
+        for (int i = 0; i < values.size(); i++) {
+            labels[i + 1] = values.get(i);
+            if (values.get(i).equals(wallGenre)) checked = i + 1;
+        }
+        new AppDialog.Builder(a)
+                .setTitle("类别")
+                .wrapChoices()
+                .setSingleChoiceItems(
+                        labels,
+                        checked,
+                        (d, which) -> {
+                            wallGenre = which == 0 ? "" : values.get(which - 1);
+                            applyWallFilterChange();
+                        })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    void toggleWallFiltersUnused() {
         state.filtersExpanded = !state.filtersExpanded;
         rebuildWallFilters();
         if (state.filtersExpanded && wallFilterRow != null && wallFilterRow.getChildCount() > 0) {
