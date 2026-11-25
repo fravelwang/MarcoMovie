@@ -39,6 +39,9 @@ import java.util.concurrent.TimeUnit;
 final class LibraryAggregator {
     static final String TAG = "LibraryAgg";
     static final int PER_SITE_LIMIT = 12;
+
+    /** Channels tried when a site's home page carries no videos (see fetch). */
+    static final int MAX_CATEGORY_PROBES = 3;
     static final int MAX_CONCURRENCY = 6;
     // A shorter per-site timeout lets one 15 s budget reach ~18 sites instead of ~11; sites that
     // need longer than this are usually dead or engine-backed anyway.
@@ -434,7 +437,7 @@ final class LibraryAggregator {
         return raw.replaceAll("[\\s\\u00a0\\u3000]+", "");
     }
 
-    /** First home page, then the home video feed, then the first category, mirroring HomeScreen. */
+    /** First home page, then the home video feed, then the first few categories, like HomeScreen. */
     private static List<Cms.Video> fetch(MainActivity a, Cms.Site site, SourceEngine engine)
             throws Exception {
         String raw = engine.home();
@@ -448,9 +451,19 @@ final class LibraryAggregator {
             } catch (Throwable ignored) {
             }
         }
-        if (listing.videos.isEmpty() && !categories.isEmpty()) {
-            listing = Cms.listing(engine.category(categories.get(0).id, 1));
-            HomeScreen.clean(listing.videos);
+        // Sites whose home page only carries channel buttons (measured in the 2026-11-25 site check:
+        // CNTV 69 categories, opera 68, Bilibili collection 42) have no home videos at all. Their
+        // first channel is often empty too, so try a few in order and take the first that lists
+        // something; one empty channel is not evidence that the site is dead.
+        for (int index = 0;
+                listing.videos.isEmpty() && index < Math.min(MAX_CATEGORY_PROBES, categories.size());
+                index++) {
+            try {
+                listing = Cms.listing(engine.category(categories.get(index).id, 1));
+                HomeScreen.clean(listing.videos);
+            } catch (Throwable ignored) {
+                // Keep probing: one bad channel should not end the fallback.
+            }
         }
         List<Cms.Video> picked = new ArrayList<>(PER_SITE_LIMIT);
         for (Cms.Video video : listing.videos) {

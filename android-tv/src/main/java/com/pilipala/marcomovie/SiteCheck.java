@@ -182,6 +182,26 @@ final class SiteCheck {
                                     categories = Cms.categories(raw).size();
                                 } catch (Throwable ignored) {
                                 }
+                                final int categoryCount = categories;
+                                // Mirror the wall: a site whose home page only lists channels is not
+                                // empty until a few channels have been tried.
+                                for (int probe = 0;
+                                        videos == 0
+                                                && probe < Math.min(3, categoryCount);
+                                        probe++) {
+                                    long probeStarted = SystemClock.elapsedRealtime();
+                                    try {
+                                        String channel =
+                                                engine.category(
+                                                        Cms.categories(raw).get(probe).id, 1);
+                                        Cms.Listing listing2 = Cms.listing(channel);
+                                        videos = listing2 == null ? 0 : listing2.videos.size();
+                                        outcome.homeMs +=
+                                                SystemClock.elapsedRealtime() - probeStarted;
+                                    } catch (Throwable ignored) {
+                                        // One dead channel does not end the probe loop.
+                                    }
+                                }
                                 outcome.items = videos;
                                 if (videos > 0) {
                                     outcome.verdict = "EMIT";
