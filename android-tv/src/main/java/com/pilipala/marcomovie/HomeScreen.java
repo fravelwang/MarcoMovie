@@ -72,9 +72,17 @@ final class HomeScreen {
     boolean wallNetdiskOnly;
     /** Multi-level classification filters, applied together (empty = 不限). */
     String wallYear = "", wallArea = "", wallGenre = "";
+    /**
+     * Source restriction inside the merged wall. Kept apart from {@link #librarySiteFilter}, which
+     * switches the library between the wall and a single site: sharing one field made choosing a
+     * netdisk chip flip the whole screen into per-site mode and hide the 筛选 button.
+     */
+    String wallSourceFilter = "";
     boolean wallMultiOnly;
     boolean wallSortByName;
     LinearLayout wallFilterRow;
+    /** Chips of the expanded filter panel, with the predicate that decides their selected look. */
+    final List<TextView> wallChipViews = new ArrayList<>();
 
     static final class Snapshot {
         long time = System.currentTimeMillis();
@@ -757,7 +765,6 @@ final class HomeScreen {
     /** Hides single-site category chrome: the wall is already merged and pre-sorted. */
     void prepareLibraryWallChrome() {
         a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
-        rebuildWallFilters();
         if (filters != null) filters.setVisibility(View.GONE);
         if (categoryScroll != null) categoryScroll.setVisibility(View.GONE);
         if (inlineFilters != null) inlineFilters.setVisibility(View.GONE);
@@ -888,7 +895,9 @@ final class HomeScreen {
         List<LibraryAggregator.Item> shown = new ArrayList<>();
         for (LibraryAggregator.Item item : result.items) {
             if (item == null || item.video == null) continue;
-            if (!librarySiteFilter.isEmpty() && !item.hasSite(librarySiteFilter)) continue;
+            if (usesLibraryWall()) {
+                if (!wallSourceFilter.isEmpty() && !item.hasSite(wallSourceFilter)) continue;
+            } else if (!librarySiteFilter.isEmpty() && !item.hasSite(librarySiteFilter)) continue;
             if (wallNetdiskOnly && !LibraryAggregator.hasShareSource(item)) continue;
             if (wallMultiOnly && item.sites.size() < 2) continue;
             if (!wallYear.isEmpty() && !wallYear.equals(valueOf(item.video.year))) continue;
@@ -3145,6 +3154,7 @@ final class HomeScreen {
     void rebuildWallFilters() {
         if (wallFilterRow == null) return;
         wallFilterRow.removeAllViews();
+        wallChipViews.clear();
         if (!usesLibraryWall()) {
             wallFilterRow.setVisibility(View.GONE);
             return;
@@ -3155,9 +3165,9 @@ final class HomeScreen {
         LinearLayout sourceRow = a.row();
         sourceRow.setGravity(Gravity.CENTER_VERTICAL);
         sourceRow.setClipChildren(false);
-        addWallChip(sourceRow, "合并墙", "wall-site-all", librarySiteFilter.isEmpty(), () -> {
-            librarySiteFilter = "";
-            rebuildWallFilters();
+        addWallChip(sourceRow, "合并墙", "wall-site-all", wallSourceFilter.isEmpty(), () -> {
+            wallSourceFilter = "";
+            restyleWallChips();
             applyWallFilterChange();
         });
         for (Cms.Site target : wallChipSites()) {
@@ -3166,10 +3176,10 @@ final class HomeScreen {
                     sourceRow,
                     label,
                     "wall-site:" + target.key,
-                    target.key.equals(librarySiteFilter),
+                    target.key.equals(wallSourceFilter),
                     () -> {
-                        librarySiteFilter = target.key;
-                        rebuildWallFilters();
+                        wallSourceFilter = target.key;
+                        restyleWallChips();
                         applyWallFilterChange();
                     });
         }
@@ -3180,34 +3190,34 @@ final class HomeScreen {
         optionRow.setClipChildren(false);
         addWallChip(optionRow, "只看网盘", "wall-netdisk", wallNetdiskOnly, () -> {
             wallNetdiskOnly = !wallNetdiskOnly;
-            rebuildWallFilters();
+            restyleWallChips();
             applyWallFilterChange();
         });
         addWallChip(optionRow, "多源合并", "wall-multi", wallMultiOnly, () -> {
             wallMultiOnly = !wallMultiOnly;
-            rebuildWallFilters();
+            restyleWallChips();
             applyWallFilterChange();
         });
         addWallChip(optionRow, "按名称", "wall-sort", wallSortByName, () -> {
             wallSortByName = !wallSortByName;
-            rebuildWallFilters();
+            restyleWallChips();
             applyWallFilterChange();
         });
         wallFilterRow.addView(optionRow, new LinearLayout.LayoutParams(-1, -2));
 
         addTaxonomyRow("年份", wallTaxonomy(true), wallYear, value -> {
             wallYear = wallYear.equals(value) ? "" : value;
-            rebuildWallFilters();
+            restyleWallChips();
             applyWallFilterChange();
         });
         addTaxonomyRow("地区", wallTaxonomy(false), wallArea, value -> {
             wallArea = wallArea.equals(value) ? "" : value;
-            rebuildWallFilters();
+            restyleWallChips();
             applyWallFilterChange();
         });
         addTaxonomyRow("类别", wallGenres(), wallGenre, value -> {
             wallGenre = wallGenre.equals(value) ? "" : value;
-            rebuildWallFilters();
+            restyleWallChips();
             applyWallFilterChange();
         });
     }
@@ -3330,6 +3340,38 @@ final class HomeScreen {
                 new LinearLayout.LayoutParams(-2, a.dp(Math.round(32 * navScale)));
         lp.rightMargin = a.dp(8);
         row.addView(chip, lp);
+        wallChipViews.add(chip);
+    }
+
+    /**
+     * Restyles the live chips from the current filter state. Used after a chip press instead of
+     * rebuilding the panel: rebuilding detached every chip (and the one being focused), which is
+     * what made focus jump into the grid and the panel disappear.
+     */
+    void restyleWallChips() {
+        for (TextView chip : wallChipViews) {
+            if (chip == null) continue;
+            boolean active = wallChipSelected(String.valueOf(chip.getTag()));
+            chip.setTextColor(active ? MainActivity.WHITE : 0xffc8c8d0);
+            chip.setBackground(a.bg(active ? 0xff2f6bd8 : 0xff24242b, Math.round(18 * navScale)));
+        }
+    }
+
+    /** Selected look for a chip, derived from the live filter state and the chip's tag. */
+    boolean wallChipSelected(String tag) {
+        if (tag == null) return false;
+        if (tag.equals("wall-site-all")) return wallSourceFilter.isEmpty();
+        if (tag.startsWith("wall-site:")) return tag.substring(10).equals(wallSourceFilter);
+        if (tag.equals("wall-netdisk")) return wallNetdiskOnly;
+        if (tag.equals("wall-multi")) return wallMultiOnly;
+        if (tag.equals("wall-sort")) return wallSortByName;
+        if (tag.startsWith("wall-年份:")) return tag.substring(8).equals(wallYear);
+        if (tag.startsWith("wall-地区:")) return tag.substring(8).equals(wallArea);
+        if (tag.startsWith("wall-类别:")) return tag.substring(8).equals(wallGenre);
+        if (tag.equals("wall-年份-all")) return wallYear.isEmpty();
+        if (tag.equals("wall-地区-all")) return wallArea.isEmpty();
+        if (tag.equals("wall-类别-all")) return wallGenre.isEmpty();
+        return false;
     }
 
     void applyWallFilterChange() {
