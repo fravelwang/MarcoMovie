@@ -104,6 +104,25 @@ final class LibraryModel {
         List<String> genres() {
             return genres;
         }
+
+        /**
+         * Read port for {@link WallFacetSource}: one axis' values in display order
+         * ({@code year} / {@code area} / {@code genre}), without any recomputation.
+         */
+        List<String> valuesFor(String axis) {
+            if ("year".equals(axis)) return years();
+            if ("area".equals(axis)) return areas();
+            if ("genre".equals(axis)) return genres();
+            return Collections.emptyList();
+        }
+
+        /** Read port for {@link WallFacetSource}: one axis' counts; uncounted values are absent. */
+        Map<String, Integer> countsFor(String axis) {
+            if ("year".equals(axis)) return yearCounts;
+            if ("area".equals(axis)) return areaCounts;
+            if ("genre".equals(axis)) return genreCounts;
+            return Collections.emptyMap();
+        }
     }
 
     static LibraryModel from(LibraryAggregator.Result result) {

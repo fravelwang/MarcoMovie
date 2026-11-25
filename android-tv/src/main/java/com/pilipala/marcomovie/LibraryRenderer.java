@@ -84,21 +84,22 @@ final class LibraryRenderer {
 
     private boolean panelExpanded;
 
-    private static final int AXIS_SOURCE = 0, AXIS_NETDISK = 1, AXIS_MULTI = 2, AXIS_SORT = 3;
-    private static final int AXIS_YEAR = 4, AXIS_AREA = 5, AXIS_GENRE = 6;
-    /** Same 10-value budget the old taxonomy rows used; values beyond it are not shown. */
-    private static final int MAX_FACET_VALUES = 10;
+    /**
+     * The dimensions the panel was built from. The wall uses {@link WallFacetSource}; the panel
+     * never reads {@code LibraryModel.Facets} or the screen's filter fields itself.
+     */
+    private FacetSource facetSource;
 
-    /** One focusable facet chip and the filter field it drives. */
+    /** One focusable facet chip and the facet/value it drives. */
     private static final class Chip {
         final TextView view;
-        final int axis;
+        final Facet facet;
         /** Facet value; empty for the "全部" / "合并墙" entry. */
         final String value;
 
-        Chip(TextView view, int axis, String value) {
+        Chip(TextView view, Facet facet, String value) {
             this.view = view;
-            this.axis = axis;
+            this.facet = facet;
             this.value = value == null ? "" : value;
         }
     }
@@ -345,32 +346,20 @@ final class LibraryRenderer {
         panelChips.clear();
         panelBuilt = false;
         if (model == null || model.mode != LibraryModel.Mode.WALL) {
+            facetSource = null;
             applyPanelVisibility();
             return;
         }
-        addSourceRow(model);
-        addOptionRow();
-        addFacetRow(
-                "年份",
-                model.facets == null ? null : model.facets.years(),
-                model.facets == null ? null : model.facets.yearCounts,
-                AXIS_YEAR);
-        addFacetRow(
-                "地区",
-                model.facets == null ? null : model.facets.areas(),
-                model.facets == null ? null : model.facets.areaCounts,
-                AXIS_AREA);
-        addFacetRow(
-                "类别",
-                model.facets == null ? null : model.facets.genres(),
-                model.facets == null ? null : model.facets.genreCounts,
-                AXIS_GENRE);
+        // The seam: the panel is rendered entirely from these facets. The wall implementation
+        // reproduces the rows the panel has always shown, so nothing here knows what a wall is.
+        facetSource = new WallFacetSource(host, model);
+        for (Facet facet : facetSource.facets()) addFacetRow(facet);
         panelBuilt = true;
         applyPanelVisibility();
         // A rebuilt panel drops focus (the tree above was detached). Put it back on the same
-        // axis/value, not on the panel's first item; only a value that vanished falls back.
+        // facet/value, not on the panel's first item; only a value that vanished falls back.
         if (panelExpanded && focusedBefore != null) {
-            Chip match = findChip(focusedBefore.axis, focusedBefore.value);
+            Chip match = findChip(focusedBefore.facet.id, focusedBefore.value);
             View target = match != null ? match.view : firstPanelChip();
             if (target != null && target.isAttachedToWindow()) target.requestFocus();
         }
@@ -384,125 +373,61 @@ final class LibraryRenderer {
         return null;
     }
 
-    /** The live chip for an axis/value pair, or null when the value is no longer present. */
-    private Chip findChip(int axis, String value) {
+    /** The live chip for a facet id/value pair, or null when the value is no longer present. */
+    private Chip findChip(String facetId, String value) {
         String wanted = value == null ? "" : value;
         for (Chip chip : panelChips) {
-            if (chip != null && chip.axis == axis && wanted.equals(chip.value)) return chip;
+            if (chip == null || chip.facet == null) continue;
+            if (chip.facet.id.equals(facetId) && wanted.equals(chip.value)) return chip;
         }
         return null;
     }
 
-    /** Row 1: 合并墙 (no source restriction) then every aggregation target from the model. */
-    private void addSourceRow(LibraryModel model) {
+    /**
+     * One facet = one panel row: an optional heading, then one chip per value. Text, tag and count
+     * formatting are exactly what the panel always produced; only where the values come from moved.
+     */
+    private void addFacetRow(Facet facet) {
+        if (facet == null || facet.values.isEmpty()) return;
         LinearLayout row = panelRow();
-        addChip(
-                row,
-                "合并墙",
-                "wall-facet:source:all",
-                AXIS_SOURCE,
-                "",
-                () -> {
-                    if (host.wallSourceFilter == null || host.wallSourceFilter.isEmpty()) return;
-                    host.wallSourceFilter = "";
-                    host.applyWallFilterChange();
-                });
-        for (Cms.Site site : model.sources) {
-            if (site == null || site.key == null || site.key.trim().isEmpty()) continue;
-            final String key = site.key;
-            String label =
-                    site.name == null || site.name.trim().isEmpty() ? site.key : site.name;
+        if (!facet.label.isEmpty()) {
+            TextView head = host.a.text(facet.label, 12f * host.navScale, MainActivity.MUTED);
+            head.setPadding(0, 0, host.a.dp(8), 0);
+            row.addView(head);
+        }
+        for (Facet.Value value : facet.values) {
+            if (value == null) continue;
+            String text = value.count > 0 ? value.label + " · " + value.count : value.label;
             addChip(
                     row,
-                    label,
-                    "wall-facet:source:" + key,
-                    AXIS_SOURCE,
-                    key,
+                    text,
+                    chipTag(facet, value),
+                    facet,
+                    value.value,
                     () -> {
-                        if (key.equals(host.wallSourceFilter)) return;
-                        host.wallSourceFilter = key;
-                        host.applyWallFilterChange();
+                        if (facetSource == null) return;
+                        // Only a press that changes this chip's own selection mutates the wall:
+                        // that reproduces the old early returns (pressing the selected 合并墙 /
+                        // 全部 was a no-op; pressing a selected 年份 value clears it) while the
+                        // panel itself is never rebuilt.
+                        boolean was = facetSource.isSelected(facet, value.value);
+                        facetSource.select(facet, value.value);
+                        boolean now = facetSource.isSelected(facet, value.value);
+                        if (was != now) host.applyWallFilterChange();
                     });
         }
         addPanelRow(row);
     }
 
-    /** Row 2: the wall-local switches, same three the old panel offered. */
-    private void addOptionRow() {
-        LinearLayout row = panelRow();
-        addChip(
-                row,
-                "只看网盘",
-                "wall-facet:netdisk",
-                AXIS_NETDISK,
-                "",
-                () -> {
-                    host.wallNetdiskOnly = !host.wallNetdiskOnly;
-                    host.applyWallFilterChange();
-                });
-        addChip(
-                row,
-                "多源合并",
-                "wall-facet:multi",
-                AXIS_MULTI,
-                "",
-                () -> {
-                    host.wallMultiOnly = !host.wallMultiOnly;
-                    host.applyWallFilterChange();
-                });
-        addChip(
-                row,
-                "按名称",
-                "wall-facet:sort",
-                AXIS_SORT,
-                "",
-                () -> {
-                    host.wallSortByName = !host.wallSortByName;
-                    host.applyWallFilterChange();
-                });
-        addPanelRow(row);
-    }
-
-    /** Rows 3-5: one taxonomy row: 全部 + up to ten values from the model facets, with counts. */
-    private void addFacetRow(
-            String label, List<String> values, Map<String, Integer> counts, int axis) {
-        LinearLayout row = panelRow();
-        TextView head = host.a.text(label, 12f * host.navScale, MainActivity.MUTED);
-        head.setPadding(0, 0, host.a.dp(8), 0);
-        row.addView(head);
-        addChip(
-                row,
-                "全部",
-                "wall-facet:" + label + ":all",
-                axis,
-                "",
-                () -> {
-                    if (facetValue(axis).isEmpty()) return;
-                    setFacet(axis, "");
-                    host.applyWallFilterChange();
-                });
-        if (values != null) {
-            int shown = 0;
-            for (String value : values) {
-                if (value == null || value.trim().isEmpty()) continue;
-                if (shown++ >= MAX_FACET_VALUES) break;
-                Integer count = counts == null ? null : counts.get(value);
-                final String picked = value;
-                final String text = count == null ? value : value + " · " + count;
-                addChip(
-                        row,
-                        text,
-                        "wall-facet:" + label + ":" + value,
-                        axis,
-                        value,
-                        () -> {
-                            // Second press on the selected value clears it (old panel behavior).
-                            setFacet(axis, picked.equals(facetValue(axis)) ? "" : picked);
-                            host.applyWallFilterChange();
-                        });
-            }
-        }
-        addPanelRow(row);
+    /**
+     * Legacy chip tags kept verbatim ({@code wall-facet:source:<key>}, {@code wall-facet:netdisk},
+     * {@code wall-facet:年份:<value>}) so focus tags and lookups behave exactly as before.
+     */
+    private String chipTag(Facet facet, Facet.Value value) {
+        String key = value == null ? "" : value.value;
+        if (WallFacetSource.OPTIONS.equals(facet.id)) return "wall-facet:" + key;
+        String row = WallFacetSource.SOURCE.equals(facet.id) ? "source" : facet.label;
+        return "wall-facet:" + row + ":" + (key.isEmpty() ? "all" : key);
     }
 
     private LinearLayout panelRow() {
@@ -539,7 +464,7 @@ final class LibraryRenderer {
             LinearLayout row,
             String label,
             String tag,
-            int axis,
+            Facet facet,
             String value,
             Runnable action) {
         final TextView chip = host.pill(label, tag, () -> {});
@@ -548,7 +473,7 @@ final class LibraryRenderer {
                 new LinearLayout.LayoutParams(-2, host.a.dp(Math.round(32 * host.navScale)));
         lp.rightMargin = host.a.dp(8);
         row.addView(chip, lp);
-        final Chip spec = new Chip(chip, axis, value);
+        final Chip spec = new Chip(chip, facet, value);
         panelChips.add(spec);
         // The press only changes filter state; the chip itself must keep focus while the grid is
         // re-queried underneath the panel.
@@ -603,63 +528,9 @@ final class LibraryRenderer {
                 chip.view.getText() + (selected ? "，已选择" : "，按确认键应用"));
     }
 
+    /** Selected look comes from the same {@link FacetSource} the chips were built from. */
     private boolean selected(Chip chip) {
-        switch (chip.axis) {
-            case AXIS_SOURCE:
-                return chip.value.isEmpty()
-                        ? host.wallSourceFilter == null || host.wallSourceFilter.isEmpty()
-                        : chip.value.equals(host.wallSourceFilter);
-            case AXIS_NETDISK:
-                return host.wallNetdiskOnly;
-            case AXIS_MULTI:
-                return host.wallMultiOnly;
-            case AXIS_SORT:
-                return host.wallSortByName;
-            case AXIS_YEAR:
-                return chip.value.isEmpty()
-                        ? host.wallYear.isEmpty()
-                        : chip.value.equals(host.wallYear);
-            case AXIS_AREA:
-                return chip.value.isEmpty()
-                        ? host.wallArea.isEmpty()
-                        : chip.value.equals(host.wallArea);
-            case AXIS_GENRE:
-                return chip.value.isEmpty()
-                        ? host.wallGenre.isEmpty()
-                        : chip.value.equals(host.wallGenre);
-            default:
-                return false;
-        }
-    }
-
-    private String facetValue(int axis) {
-        switch (axis) {
-            case AXIS_YEAR:
-                return host.wallYear;
-            case AXIS_AREA:
-                return host.wallArea;
-            case AXIS_GENRE:
-                return host.wallGenre;
-            default:
-                return "";
-        }
-    }
-
-    private void setFacet(int axis, String value) {
-        String next = value == null ? "" : value;
-        switch (axis) {
-            case AXIS_YEAR:
-                host.wallYear = next;
-                break;
-            case AXIS_AREA:
-                host.wallArea = next;
-                break;
-            case AXIS_GENRE:
-                host.wallGenre = next;
-                break;
-            default:
-                break;
-        }
+        return facetSource != null && chip != null && facetSource.isSelected(chip.facet, chip.value);
     }
 
     /** Sources + facet value/count fingerprint; equal means the built panel still matches. */

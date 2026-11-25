@@ -34,6 +34,21 @@ final class InlineFilters extends LinearLayout {
         setVisibility(GONE);
     }
 
+    /**
+     * The single-site dimensions as the shared {@link FacetSource} model.
+     *
+     * <p>Seam only in this axis: the inline panel below still renders through its own rows, but
+     * the next axis can read the exact same dimensions/selections through this provider instead
+     * of re-deriving them from {@link VideoFilters}. Reads the live definition list and the live
+     * {@code state.selectedFilters}, so selections made by the existing UI are visible here too.
+     */
+    FacetSource facetSource() {
+        if (home == null || home.state == null || home.snapshot == null) {
+            return SiteFacetSource.EMPTY;
+        }
+        return new SiteFacetSource(home.filterDefinitions(), home.state.selectedFilters);
+    }
+
     boolean canShowForCurrentCategory() {
         return a.isTvDevice()
                 && home.snapshot != null
