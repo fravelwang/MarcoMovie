@@ -63,6 +63,11 @@ final class HomeScreen {
      * otherwise it holds one site key picked in the filter menu.
      */
     String librarySiteFilter = "";
+    /** Wall-local filters: no request, they only narrow the merged result already on screen. */
+    boolean wallNetdiskOnly;
+    boolean wallMultiOnly;
+    boolean wallSortByName;
+    LinearLayout wallFilterRow;
 
     static final class Snapshot {
         long time = System.currentTimeMillis();
@@ -278,6 +283,13 @@ final class HomeScreen {
         }
         inlineFilters = new InlineFilters(this);
         libraryParent.addView(inlineFilters, new LinearLayout.LayoutParams(-1, -2));
+        wallFilterRow = a.row();
+        wallFilterRow.setGravity(Gravity.CENTER_VERTICAL);
+        wallFilterRow.setClipChildren(false);
+        wallFilterRow.setPadding(0, 0, 0, a.dp(8));
+        wallFilterRow.setVisibility(View.GONE);
+        libraryParent.addView(wallFilterRow, new LinearLayout.LayoutParams(-1, -2));
+        rebuildWallFilters();
         status = a.text("正在整理片单…", 13, MainActivity.MUTED);
         status.setPadding(a.dp(4), a.dp(12), 0, a.dp(12));
         libraryParent.addView(status);
@@ -723,6 +735,7 @@ final class HomeScreen {
     /** Hides single-site category chrome: the wall is already merged and pre-sorted. */
     void prepareLibraryWallChrome() {
         a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+        rebuildWallFilters();
         if (filters != null) filters.setVisibility(View.GONE);
         if (categoryScroll != null) categoryScroll.setVisibility(View.GONE);
         if (inlineFilters != null) inlineFilters.setVisibility(View.GONE);
@@ -846,11 +859,24 @@ final class HomeScreen {
     void applyLibraryWall(LibraryAggregator.Result result) {
         if (result == null || state == null || content == null) return;
         List<Cms.Video> videos = new ArrayList<>();
+        List<LibraryAggregator.Item> shown = new ArrayList<>();
         for (LibraryAggregator.Item item : result.items) {
             if (item == null || item.video == null) continue;
             if (!librarySiteFilter.isEmpty() && !item.hasSite(librarySiteFilter)) continue;
-            videos.add(item.video);
+            if (wallNetdiskOnly && !LibraryAggregator.hasShareSource(item)) continue;
+            if (wallMultiOnly && item.sites.size() < 2) continue;
+            shown.add(item);
         }
+        if (wallSortByName) {
+            Collections.sort(
+                    shown,
+                    (left, right) -> {
+                        String l = left.video.title == null ? "" : left.video.title;
+                        String r = right.video.title == null ? "" : right.video.title;
+                        return l.compareTo(r);
+                    });
+        }
+        for (LibraryAggregator.Item item : shown) videos.add(item.video);
         // The wall owns the flat list; category paging is bypassed while the filter is active.
         state.category = "";
         state.page = 1;
@@ -3037,6 +3063,69 @@ final class HomeScreen {
         view.setFocusableInTouchMode(true);
         view.setClickable(true);
         a.pressFeedback(view);
+    }
+
+    /**
+     * Wall filters. The merged wall lost the per-site category chrome when it became cross-site, so
+     * these chips give it back as local narrowing: netdisk-only, multi-source, and a name sort.
+     * They never trigger a fetch.
+     */
+    void rebuildWallFilters() {
+        if (wallFilterRow == null) return;
+        wallFilterRow.removeAllViews();
+        if (!usesLibraryWall()) {
+            wallFilterRow.setVisibility(View.GONE);
+            return;
+        }
+        wallFilterRow.setVisibility(View.VISIBLE);
+        addWallChip("全部", "wall-all", !wallNetdiskOnly && !wallMultiOnly && !wallSortByName, () -> {
+            wallNetdiskOnly = false;
+            wallMultiOnly = false;
+            wallSortByName = false;
+            applyWallFilterChange();
+        });
+        addWallChip(
+                "只看网盘",
+                "wall-netdisk",
+                wallNetdiskOnly,
+                () -> {
+                    wallNetdiskOnly = !wallNetdiskOnly;
+                    applyWallFilterChange();
+                });
+        addWallChip(
+                "多源合并",
+                "wall-multi",
+                wallMultiOnly,
+                () -> {
+                    wallMultiOnly = !wallMultiOnly;
+                    applyWallFilterChange();
+                });
+        addWallChip(
+                "按名称",
+                "wall-sort",
+                wallSortByName,
+                () -> {
+                    wallSortByName = !wallSortByName;
+                    applyWallFilterChange();
+                });
+    }
+
+    void addWallChip(String label, String tag, boolean active, Runnable action) {
+        TextView chip = pill(label, tag, action);
+        chip.setPadding(a.dp(13), 0, a.dp(13), 0);
+        chip.setTextColor(active ? MainActivity.WHITE : 0xffc8c8d0);
+        chip.setBackground(a.bg(active ? 0xff2f6bd8 : 0xff24242b, Math.round(18 * navScale)));
+        chip.setOnFocusChangeListener((v, f) -> outline(chip, f, Math.round(18 * navScale), 0xff24242b));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(Math.round(32 * navScale)));
+        lp.rightMargin = a.dp(8);
+        wallFilterRow.addView(chip, lp);
+    }
+
+    void applyWallFilterChange() {
+        rebuildWallFilters();
+        LibraryAggregator.Result cached = a.libraryWall;
+        if (cached == null || a.libraryWallEpoch != a.engineEpoch) return;
+        applyLibraryWall(cached);
     }
 
     TextView pill(String label, String tag, Runnable action) {
