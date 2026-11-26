@@ -292,6 +292,14 @@ final class BaiduLogin {
         appFilesDir = dir;
     }
 
+    /**
+     * 一次性安装的文件目录。开放平台的令牌（{@link BaiduOAuth}）与凭据放在同一个
+     * {@code files/netdisk/} 下，所以那边读这里，而不是自己再存一份路径。
+     */
+    static File filesDir() {
+        return appFilesDir;
+    }
+
     static Credential loadSaved() {
         return load(appFilesDir);
     }

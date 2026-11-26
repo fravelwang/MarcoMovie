@@ -139,22 +139,39 @@ final class NetdiskScreen {
     /**
      * 非夸克牌面的入口：先弹一个二选一。**扫码是主路**（Boss 2026-11-26 定的口径：不要手工粘
      * Cookie/token），粘贴只在扫码不好使时当兜底；115 还没有粘贴入口，只有扫码。
+     *
+     * <p>百度多一项「开放平台授权（取直链）」：扫码登录拿到的是账号 Cookie（转存、删除够用），
+     * 取自己文件的直链还要一份 OAuth 令牌（{@link BaiduOAuth}），所以登录之后点一次它，
+     * 播放才会走「先转存到 /MarcoMovie、播前清理、再取直链」那条主路。
      */
     private void showLoginChoice(final String key) {
         boolean paste = NetdiskWebLogin.supportsPaste(key);
-        String[] choices =
-                paste
-                        ? new String[] {"扫码登录（推荐）", "手工粘贴凭据（兜底）"}
-                        : new String[] {"扫码登录（推荐）"};
+        boolean authorize = BaiduLogin.PROVIDER.equals(key);
+        final List<String> options = new ArrayList<>();
+        options.add("扫码登录（推荐）");
+        if (authorize) options.add("开放平台授权（取直链）");
+        if (paste) options.add("手工粘贴凭据（兜底）");
+        final String[] choices = options.toArray(new String[0]);
+        StringBuilder message =
+                new StringBuilder(
+                        "扫码登录：电视上会打开这家的网页登录页，用手机 App 扫屏幕上的二维码，"
+                                + "登录成功后凭据自动保存，不用手工粘贴。");
+        if (authorize) {
+            message.append(
+                    "「开放平台授权」是在扫码登录之后再做一次：换一份取直链的令牌，"
+                            + "之后百度分享会先把这一集转存到网盘的 /MarcoMovie、播前清理旧副本，"
+                            + "再用自己文件的直链播放。");
+        }
         new AppDialog.Builder(a)
                 .setTitle(NetdiskWebLogin.label(key) + " · 登录")
-                .setMessage(
-                        "扫码登录：电视上会打开这家的网页登录页，用手机 App 扫屏幕上的二维码，"
-                                + "登录成功后凭据自动保存，不用手工粘贴。")
+                .setMessage(message.toString())
                 .setItems(
                         choices,
                         (dialog, which) -> {
-                            if (which != 1) {
+                            String picked = choices[which];
+                            if (picked.startsWith("开放平台")) {
+                                BaiduOAuth.showAuthorize(a, this::reloadSelf);
+                            } else if (picked.startsWith("扫码")) {
                                 scanLogin(key);
                             } else {
                                 pasteLogin(key);
@@ -274,12 +291,18 @@ final class NetdiskScreen {
         if (BaiduLogin.PROVIDER.equals(driveKey)) {
             // 百度的原生浏览不在本次范围：这里只把登录状态与去哪播说清楚，不摆一个死格子。
             BaiduLogin.Credential saved = BaiduLogin.loadSaved();
+            String authorize = BaiduOAuth.describeShort();
             status.setText(
                     saved == null
-                            ? "百度网盘还没登录：点上面的「百度」牌面选「扫码登录」，用手机百度网盘 App 扫电视上的二维码。这次只做登录与分享线路，原生浏览还没做。"
+                            ? "百度网盘还没登录：点上面的「百度」牌面选「扫码登录」，用手机百度网盘 App 扫电视上的二维码。"
+                                    + "登录之后再做一次「开放平台授权（取直链）」，播放才会先转存到 /MarcoMovie 再播。"
+                                    + "原生浏览还没做。"
                             : "百度网盘已登录（"
                                     + BaiduLogin.describe(saved)
-                                    + "）。这次只做登录与分享线路：播放走详情页的「百度分享」线路，原生浏览还没做。");
+                                    + "）· "
+                                    + authorize
+                                    + "。播放走详情页的「百度分享」线路：先转存到网盘的 /MarcoMovie、播前清理旧副本，"
+                                    + "再用自己文件的直链播放；没有授权时退回网页直链。原生浏览还没做。");
             return;
         }
         if (AliLogin.PROVIDER.equals(driveKey)) {
