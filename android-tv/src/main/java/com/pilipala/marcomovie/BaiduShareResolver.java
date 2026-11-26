@@ -31,11 +31,11 @@ import java.util.Map;
  *       到网盘再播，像夸克那样，播前清理）：{@code GET /api/gettemplatevariable} 换 {@code bdstoken}
  *       → {@code POST /api/create?a=commit} 备好 {@code /MarcoMovie} → {@code POST /api/filemanager?
  *       opera=delete} 清掉上一份副本 → {@code POST /share/transfer} 把这一集转存进去拿到
- *       {@code to_fs_id} → {@code GET /rest/2.0/xpan/multimedia?method=filemetas&dlink=1&access_token=…}
- *       取直链。{@code access_token} 来自开放平台 OAuth（见 {@link BaiduOAuth}），因为网页端的
- *       {@code /api/filemetas} 要分享页 {@code yunData} 里的 {@code sign}、{@code gettemplatevariable}
- *       又不给，而 {@code xpan} 只认令牌；转存与删除本来就吃账号 Cookie，已经实测通（{@code errno 0}）。
- *       这条路拿到的直链是自己盘里的文件，最稳；没有授权 / 任何一步失败就往下走；
+ *       {@code to_fs_id} → {@code GET /api/filemetas?dlink=1&fsids=[to_fs_id]} 取直链。取直链只要
+ *       账号 Cookie，**不需要 {@code sign} / {@code timestamp} / {@code access_token}**（2026-11-26
+ *       深夜实测，见 {@link #filemetas}）。上一版误判成「网页接口要 sign」，是因为把参数名写成了
+ *       {@code target}（百度当年那个形状），百度回 {@code errno 12 / 31021}；改成 {@code fsids} 就
+ *       {@code errno 0}。这条路拿到的直链是自己盘里的文件，最稳；任何一步失败就往下走；
  *   <li><b>网页接口（第二条）</b>：{@code POST https://pan.baidu.com/api/sharedownload?sign=…&
  *       timestamp=…&channel=chunlei&web=1&app_id=250528&clienttype=0}，表单
  *       {@code encrypt=0&product=share&uk=…&primaryid=…&fid_list=[…]&extra={"sekey":"…"}}，Cookie
@@ -186,6 +186,9 @@ final class BaiduShareResolver {
      */
     private static final int ERRNO_SIGNATURE_REJECTED = 8001;
 
+    /** 转存时「文件已存在 / 已转存」的 errno：不是失败，用它回的现成 fs_id（实测）。 */
+    private static final int ERRNO_ALREADY_SAVED = 4;
+
     /** 上一次解析拒绝播放的原因，成功或没轮到它时为空（与 UC 那边同款，UI 线程读）。 */
     private static volatile String lastRefusalReason = "";
 
@@ -227,11 +230,10 @@ final class BaiduShareResolver {
                         + (ident.ticket.hasSignature() ? "yes" : "no")
                         + " surl="
                         + (ident.ticket.surl.isEmpty() ? "no" : "yes")
-                        + " token="
-                        + (BaiduOAuth.loadSaved() == null ? "no" : "yes"));
+                        + ")");
         try {
-            // 主路：先转存到自己网盘的 /MarcoMovie（播前清理上一份副本），再用开放平台令牌取自己文件
-            // 的直链。没有授权 / 任何一步失败都往下走，不在这里把播放挡死。
+            // 主路：先转存到自己网盘的 /MarcoMovie（播前清理上一份副本），再用账号 Cookie 取自己文件
+            // 的直链。任何一步失败都往下走，不在这里把播放挡死。
             Attempt save = saveAttempt(credential, ident);
             if (save.ok()) return save.episode(lineName);
             AppLog.w(TAG, "save path failed: " + save.describe() + "（errno=" + save.errno + "）");
@@ -465,19 +467,13 @@ final class BaiduShareResolver {
     private static Attempt saveAttempt(BaiduLogin.Credential credential, Ident ident) {
         Attempt out = new Attempt();
         out.attempted = true;
-        String token = BaiduOAuth.accessToken();
-        if (token.isEmpty()) {
-            out.error = "没有开放平台授权（网盘 → 百度 → 开放平台授权）";
-            AppLog.w(TAG, "save path skipped: no access_token in files/netdisk/baidu_token.json");
-            return out;
-        }
         // 0) 上一次转存成功、取直链失败留下的副本：先拿它再取一次，不重复转存。
         CopyStamp reuse = reusableCopy;
         if (reuse != null
                 && reuse.episodeFsId.equals(ident.fsId)
                 && !reuse.toFsId.isEmpty()
                 && System.currentTimeMillis() - reuse.at < COPY_REUSE_MS) {
-            Attempt reused = filemetas(credential, ident, reuse.toFsId, token);
+            Attempt reused = filemetas(credential, ident, reuse.toFsId);
             if (reused.ok()) {
                 AppLog.w(TAG, "reuse transferred copy fs_id=" + reuse.toFsId + " path=" + reuse.path);
                 reusableCopy = null;
@@ -505,16 +501,8 @@ final class BaiduShareResolver {
             AppLog.w(TAG, "transfer failed after clean=" + cleaned + "：" + out.describe());
             return out;
         }
-        // 5) 用自己盘里那份的 fs_id 取直链。
-        Attempt dlink = filemetas(credential, ident, copy.toFsId, token);
-        if (!dlink.ok() && isAccessTokenErrno(dlink.errno)) {
-            // 令牌过期：强制续一次再打 —— 别为一次过期就退回网页接口。
-            String fresh = BaiduOAuth.refreshAccessToken();
-            if (!fresh.isEmpty()) {
-                AppLog.w(TAG, "filemetas rejected the token, refreshed and retrying");
-                dlink = filemetas(credential, ident, copy.toFsId, fresh);
-            }
-        }
+        // 5) 用自己盘里那份的 fs_id 取直链（只要账号 Cookie，见 filemetas）。
+        Attempt dlink = filemetas(credential, ident, copy.toFsId);
         if (!dlink.ok()) {
             // 副本已经在盘里：记下来，播放失败重试时直接用它，不重复转存。
             reusableCopy =
@@ -552,7 +540,7 @@ final class BaiduShareResolver {
                         + encodePart("[\"bdstoken\",\"uk\"]");
         Response answer;
         try {
-            answer = fetch("GET", url, null, null, UA_SHARE, REFERER, credential.cookie);
+            answer = fetch("GET", url, null, null, UA_SHARE, REFERER, accountCookie(credential, ""));
         } catch (IOException error) {
             return TemplateVars.failed("连不上（" + NetdiskShareHttp.describe(error) + "）");
         }
@@ -579,7 +567,14 @@ final class BaiduShareResolver {
         return new TemplateVars(token, uk, "");
     }
 
-    /** 从 {@code gettemplatevariable} 的返回里取一个字段：顶层 / {@code data} / {@code result[]} 键值行。 */
+    /**
+     * 从 {@code gettemplatevariable} 的返回里取一个字段：顶层 / {@code data} / {@code result} 对象 /
+     * {@code result[]} 键值行。
+     *
+     * <p>{@code result} 现在回的是**对象**（{@code {"errno":0,"result":{"bdstoken":"…","uk":…}}},
+     * 2026-11-26 盒子与 PC 实测），老部署回过 {@code [{"key":…,"value":…}]} 数组，两种都认。
+     * 只认数组时 {@code bdstoken} 永远取不到，主路第一步就走不动（当晚就是这样卡住的）。
+     */
     private static String templateValue(JsonObject body, String name) {
         if (body == null || text(name).isEmpty()) return "";
         String direct = NetdiskShareHttp.optString(body, name).trim();
@@ -590,6 +585,10 @@ final class BaiduShareResolver {
             if (!nested.isEmpty()) return nested;
         }
         JsonElement result = body.get("result");
+        if (result != null && result.isJsonObject()) {
+            String nested = NetdiskShareHttp.optString(result.getAsJsonObject(), name).trim();
+            if (!nested.isEmpty()) return nested;
+        }
         if (result != null && result.isJsonArray()) {
             for (JsonElement item : result.getAsJsonArray()) {
                 if (item == null || !item.isJsonObject()) continue;
@@ -626,7 +625,7 @@ final class BaiduShareResolver {
                             "application/x-www-form-urlencoded",
                             UA_SHARE,
                             REFERER,
-                            credential.cookie);
+                            accountCookie(credential, ""));
             JsonObject body = NetdiskShareHttp.parseObjectOrNull(answer.body);
             int errno = body == null ? -1 : NetdiskShareHttp.optInt(body, "errno", -1);
             boolean ready = errno == 0 || errno == -8;
@@ -667,7 +666,7 @@ final class BaiduShareResolver {
                         + "&web=1&app_id=250528&clienttype=0";
         Response answer;
         try {
-            answer = fetch("GET", url, null, null, UA_SHARE, REFERER, credential.cookie);
+            answer = fetch("GET", url, null, null, UA_SHARE, REFERER, accountCookie(credential, ""));
         } catch (IOException error) {
             out.error = "连不上（" + NetdiskShareHttp.describe(error) + "）";
             return out;
@@ -739,7 +738,7 @@ final class BaiduShareResolver {
                             "application/x-www-form-urlencoded",
                             UA_SHARE,
                             REFERER,
-                            credential.cookie);
+                            accountCookie(credential, ""));
             JsonObject body = NetdiskShareHttp.parseObjectOrNull(answer.body);
             int errno = body == null ? -1 : NetdiskShareHttp.optInt(body, "errno", -1);
             AppLog.w(TAG, "delete old copy n=" + paths.size() + " errno=" + errno);
@@ -771,8 +770,9 @@ final class BaiduShareResolver {
 
     /**
      * 转存本集到 {@link #SAVE_DIR}：{@code POST /share/transfer?shareid&from&sekey&bdstoken}，表单
-     * {@code fsidlist=[<fsid>]&path=/MarcoMovie}（父会话 2026-11-26 实测 {@code errno 0}，回
-     * {@code to_fs_id}）。
+     * {@code fsidlist=[<fsid>]&path=/MarcoMovie}。2026-11-26 深夜复测：{@code errno 0} 时返回体里
+     * **没有** {@code to_fs_id}（只有 {@code extra.list[].to}），所以下面那条「列目录取最新」不是兜底
+     * 而是主路径；同一份再转一次会回 {@code errno 4}（已转存），带 {@code duplicated.list[].fs_id}。
      *
      * <p>{@code to_fs_id} 从顶层 / {@code extra.list[]} / {@code list[]} 三处找；返回里一个都没有时再
      * 列一次目录，按时间取最新的那个文件（刚转存进来的就是它）。
@@ -830,6 +830,15 @@ final class BaiduShareResolver {
         }
         out.errno = NetdiskShareHttp.optInt(body, "errno", 0);
         out.show = baiduMessage(body);
+        if (out.errno == ERRNO_ALREADY_SAVED) {
+            // 目录里已经有同一份（上一次没清干净，或两个解析撞在一起）。百度把现成的 fs_id 放在
+            // duplicated.list[] 里：这不是失败，直接用那一份，别再转一次。
+            out.toFsId = duplicatedFsId(body);
+            if (!out.toFsId.isEmpty()) {
+                AppLog.w(TAG, "transfer says already saved, reuse fs_id=" + out.toFsId);
+                return out;
+            }
+        }
         if (out.errno != 0) return out;
         out.toFsId = transferFsId(body);
         out.path = transferPath(body);
@@ -854,6 +863,24 @@ final class BaiduShareResolver {
             out.error = "errno=0 但没找到转存后的文件（to_fs_id 与目录里都没有）";
         }
         return out;
+    }
+
+    /**
+     * {@code errno=4} 时百度回的现成 fs_id：{@code duplicated.list[].fs_id}（实测形状，2026-11-26
+     * 同一条分享连转两次复现）。取不到返回空串，调用方按普通失败处理。
+     */
+    private static String duplicatedFsId(JsonObject body) {
+        if (body == null) return "";
+        JsonElement dup = body.get("duplicated");
+        if (dup == null || !dup.isJsonObject()) return "";
+        JsonElement list = dup.getAsJsonObject().get("list");
+        if (list == null || !list.isJsonArray()) return "";
+        for (JsonElement item : list.getAsJsonArray()) {
+            if (item == null || !item.isJsonObject()) continue;
+            String id = NetdiskShareHttp.optString(item.getAsJsonObject(), "fs_id").trim();
+            if (!id.isEmpty()) return id;
+        }
+        return "";
     }
 
     /** 转存返回里所有可能带 {@code to_fs_id} 的行：{@code extra.list[]} 优先，其次顶层 {@code list[]}。 */
@@ -926,33 +953,36 @@ final class BaiduShareResolver {
     }
 
     /**
-     * 开放平台取自己文件的直链：{@code GET /rest/2.0/xpan/multimedia?method=filemetas&access_token=…&
-     * dlink=1&fsids=[<fsid>]&thumb=0} → {@code list[0].dlink}。
+     * 取自己盘里一个文件的直链：{@code GET /api/filemetas?dlink=1&fsids=[<fsid>]}，只要账号 Cookie。
      *
-     * <p>这条路就是本次任务卡要补的那一步：{@code /api/filemetas} 要分享页 {@code sign}（网页才给），
-     * 而 {@code xpan} 只认 {@code access_token}。拿到的直链用 {@link #UA_DLINK} 播放（百度对
-     * {@code dlink} 的 UA 要求）。令牌过期（errno -6 / 110 / 111）由调用方续一次再打。
+     * <p>2026-11-26 深夜在 PC 上用 curl 逐条对过（同样几组参数在盒子上也复现过，记录见
+     * {@code 14-master/records/2026-11-26-网盘支持矩阵.md}）：
+     *
+     * <table>
+     *   <caption>实测：什么参数是必须的</caption>
+     *   <tr><th>写法</th><th>结果</th></tr>
+     *   <tr><td>{@code fsids=[…]} 或干脆只留这一项</td><td>{@code errno 0}，给出 dlink</td></tr>
+     *   <tr><td>写成 {@code target=[…]}（百度当年那个参数名）</td><td>{@code errno 12}，{@code info[0].errno=31021}</td></tr>
+     *   <tr><td>不带 {@code bdstoken} / 不带 {@code PANWEB=1}</td><td>{@code errno 0}（都不是必须）</td></tr>
+     *   <tr><td>{@code /rest/2.0/xpan/multimedia?method=filemetas}（要 {@code access_token}）</td>
+     *       <td>没令牌回 {@code 9019 need verify}</td></tr>
+     * </table>
+     *
+     * <p>拿到的 {@code dlink} 指向 {@code d.pcs.baidu.com}，会再 302 到 {@code *.baidupcs.com}
+     * 落地域名；下载时**必须**用 {@link #UA_DLINK} 当 UA 并带上同一份账号 Cookie，否则落地域名回
+     * {@code 31362 sign error}（UA 不对）或 {@code 31045 user not exists}（缺 Cookie）。这里先把
+     * 302 跟掉，把落地 URL 直接交给播放器 —— 播放器跟不跟跳转、跳转后还带不带 Cookie 都不再赌。
      */
-    private static Attempt filemetas(
-            BaiduLogin.Credential credential, Ident ident, String fsId, String accessToken) {
+    private static Attempt filemetas(BaiduLogin.Credential credential, Ident ident, String fsId) {
         Attempt out = new Attempt();
         out.attempted = true;
         out.ua = UA_DLINK;
         out.cookie = accountCookie(credential, ident.sekey);
         String url =
-                "https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&access_token="
-                        + encodePart(accessToken)
-                        + "&dlink=1&fsids="
+                "https://pan.baidu.com/api/filemetas?dlink=1&fsids="
                         + encodePart("[" + fsId + "]")
-                        + "&thumb=0";
-        AppLog.w(
-                TAG,
-                "filemetas request fs_id="
-                        + fsId
-                        + " token_len="
-                        + text(accessToken).trim().length()
-                        + " url="
-                        + maskQueryValue(url, "access_token"));
+                        + "&thumb=0&channel=chunlei&web=1&app_id=250528&clienttype=0";
+        AppLog.w(TAG, "filemetas request fs_id=" + fsId);
         Response answer;
         try {
             answer = fetch("GET", url, null, null, UA_MEDIA, REFERER, out.cookie);
@@ -969,14 +999,83 @@ final class BaiduShareResolver {
         }
         out.errno = NetdiskShareHttp.optInt(body, "errno", 0);
         out.show = baiduMessage(body);
-        if (out.errno != 0) return out;
-        out.dlink = mediaUrl(dlinkOf(body, fsId));
-        if (out.dlink.isEmpty()) {
+        if (out.errno != 0) {
+            // errno 在顶层，具体原因常在 info[0].errno（例如 31021）。
+            JsonArray info = body.has("info") && body.get("info").isJsonArray()
+                    ? body.getAsJsonArray("info")
+                    : null;
+            if (info != null && info.size() > 0 && info.get(0).isJsonObject()) {
+                int inner = NetdiskShareHttp.optInt(info.get(0).getAsJsonObject(), "errno", 0);
+                if (inner != 0 && inner != out.errno) {
+                    out.error = "返回错误（errno=" + out.errno + "，info.errno=" + inner + "）";
+                }
+            }
+            return out;
+        }
+        String raw = mediaUrl(dlinkOf(body, fsId));
+        if (raw.isEmpty()) {
             out.error = "errno=0 但没有给出 dlink";
             return out;
         }
-        AppLog.w(TAG, "filemetas ok dlink host=" + hostOf(out.dlink) + " fs_id=" + fsId);
+        out.dlink = followDlink(raw, out.cookie);
+        AppLog.w(
+                TAG,
+                "filemetas ok fs_id="
+                        + fsId
+                        + " dlink host="
+                        + hostOf(out.dlink)
+                        + (out.dlink.equals(raw) ? "" : "（已跟掉 302）"));
         return out;
+    }
+
+    /**
+     * 把 {@code d.pcs.baidu.com} 的 302 跟到落地域名，返回最终可播 URL；任何异常都原样返回入参
+     * （跟不动也不能把播放挡死，交给播放器自己跟）。
+     *
+     * <p>只带 {@code Range: bytes=0-0} 探一跳，不读正文（那是整部电影）；Cookie 只发给百度的域名
+     * （{@code *.baidu.com} / {@code *.baidupcs.com}），别把账号凭据递给跳出去的第三方。
+     */
+    private static String followDlink(String dlink, String cookie) {
+        String current = text(dlink).trim();
+        if (current.isEmpty()) return current;
+        for (int hop = 0; hop < 3; hop++) {
+            if (!isBaiduDownloadHost(hostOf(current))) return current;
+            HttpURLConnection conn = null;
+            try {
+                conn = (HttpURLConnection) new URL(current).openConnection();
+                conn.setInstanceFollowRedirects(false);
+                conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+                conn.setReadTimeout(READ_TIMEOUT_MS);
+                conn.setRequestMethod("GET");
+                conn.setRequestProperty("User-Agent", UA_DLINK);
+                conn.setRequestProperty("Range", "bytes=0-0");
+                if (!text(cookie).isEmpty()) conn.setRequestProperty("Cookie", cookie.trim());
+                int http = conn.getResponseCode();
+                String location = text(conn.getHeaderField("Location")).trim();
+                if (http >= 300 && http < 400 && !location.isEmpty()) {
+                    current = new URL(new URL(current), location).toString();
+                    continue;
+                }
+                // 200/206/403/… 都算「落到头了」：403 交给播放器去失败，原因由它记。
+                return current;
+            } catch (IOException | RuntimeException error) {
+                AppLog.w(TAG, "follow dlink hop failed: " + NetdiskShareHttp.describe(error));
+                return current;
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }
+        return current;
+    }
+
+    /** 这个主机名是不是百度自己的下载域名（决定能不能把 Cookie 发过去）。 */
+    private static boolean isBaiduDownloadHost(String host) {
+        String value = text(host).toLowerCase(Locale.ROOT);
+        if (value.isEmpty()) return false;
+        return value.equals("baidu.com")
+                || value.endsWith(".baidu.com")
+                || value.equals("baidupcs.com")
+                || value.endsWith(".baidupcs.com");
     }
 
     // -------------------------------------------------------------- 网页接口（第二条）
@@ -1688,6 +1787,8 @@ final class BaiduShareResolver {
     /** 账号 Cookie 头：规范化的账号 Cookie（BDUSS/STOKEN/PTOKEN/BAIDUID）+ 分享的 BDCLND。 */
     static String accountCookie(BaiduLogin.Credential credential, String sekey) {
         String base = NetdiskShareHttp.text(credential == null ? null : credential.cookie).trim();
+        // PANWEB=1 是网页端写/列操作的门票：少了它 api/list 会回 errno -9（2026-11-26 实测）。
+        if (!base.isEmpty() && !base.contains("PANWEB=")) base = base + "; PANWEB=1";
         String raw = text(sekey).trim();
         if (raw.isEmpty()) return base;
         return base.isEmpty() ? "BDCLND=" + raw : base + "; BDCLND=" + raw;
@@ -1857,6 +1958,12 @@ final class BaiduShareResolver {
             }
         }
         JsonElement result = body.get("result");
+        if (result != null && result.isJsonObject()) {
+            JsonObject inner = result.getAsJsonObject();
+            String nested = valueOf(inner, "uid");
+            if (nested.isEmpty()) nested = valueOf(inner, "uk");
+            if (!nested.isEmpty()) return nested;
+        }
         if (result != null && result.isJsonArray()) {
             for (JsonElement item : result.getAsJsonArray()) {
                 if (item == null || !item.isJsonObject()) continue;
@@ -1971,11 +2078,6 @@ final class BaiduShareResolver {
         return sb.toString();
     }
 
-    /** 开放平台令牌不对的 errno：-6 未登录、110 登录态失效、111 {@code access_token} 过期。 */
-    private static boolean isAccessTokenErrno(int errno) {
-        return errno == -6 || errno == 110 || errno == 111;
-    }
-
     /** 分享已取消 / 已过期 / 被删的 errno（与 Flutter 端 {@code _checkBaidu} 同一组）。 */
     private static boolean isShareGoneErrno(int errno) {
         return errno == -7 || errno == -9 || errno == -21 || errno == -144 || errno == -145;
@@ -2035,8 +2137,22 @@ final class BaiduShareResolver {
     }
 
     /** {@code list[]} 里 {@code fs_id} 对得上的那条的 {@code dlink}；对不上返回 ""。 */
+    /**
+     * 从响应里挑这一集的 {@code dlink}。
+     *
+     * <p>两个键都认：{@code /api/filemetas} 回的是 {@code info[]}，{@code share/list} 与
+     * {@code sharedownload} 回的是 {@code list[]}（2026-11-26 盒子实测：只认 {@code list} 时，
+     * {@code filemetas} 明明 {@code errno 0} 且有 dlink，却被判成「没有给出 dlink」）。
+     */
     private static String dlinkOf(JsonObject body, String fsId) {
-        JsonElement list = body == null ? null : body.get("list");
+        String fromInfo = dlinkIn(body, "info", fsId);
+        if (!fromInfo.isEmpty()) return fromInfo;
+        return dlinkIn(body, "list", fsId);
+    }
+
+    /** 从指定的那个数组键里挑 {@code dlink}：{@code fs_id} 对得上，或唯一一行没带 {@code fs_id}。 */
+    private static String dlinkIn(JsonObject body, String key, String fsId) {
+        JsonElement list = body == null ? null : body.get(key);
         if (list == null || !list.isJsonArray()) return "";
         JsonArray rows = list.getAsJsonArray();
         String lone = "";
