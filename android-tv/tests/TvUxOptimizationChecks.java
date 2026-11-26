@@ -631,7 +631,7 @@ public final class TvUxOptimizationChecks {
         }
 
         // 4. TvDetailHost curated source bounding excludes heavy CatPaw/Drpy/Js/Guard fan-out and
-        // caps to 4
+        // caps to 8
         java.util.List<Cms.Site> pool = new java.util.ArrayList<>();
         pool.add(catpawSite);
         Cms.Site drpySite = new Cms.Site();
@@ -671,7 +671,7 @@ public final class TvUxOptimizationChecks {
                         && !hasHeavy
                         && heavyOnly.size() == 1
                         && TvDetailHost.CURATED_MAX_CONCURRENCY == 1,
-                "TvDetailHost bounds curated fallback to 4 light sources with concurrency 1 and skips heavy Node/JS/Guard runtimes");
+                "TvDetailHost bounds curated fallback to 8 light sources with concurrency 1 and skips heavy Node/JS/Guard runtimes");
 
         // 5. Cast avatar accent handles Integer.MIN_VALUE hashCode ("polygenelubricants") safely
         int minHashAccent = TvV17DetailScreen.castAvatarAccent("polygenelubricants");

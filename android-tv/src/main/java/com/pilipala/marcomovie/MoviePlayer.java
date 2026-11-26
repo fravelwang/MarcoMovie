@@ -459,7 +459,9 @@ public class MoviePlayer {
                         trackParams.setPreferredAudioLanguages(
                                 "zh-Hans", "zh-CN", "zh", "zho", "chi", "cmn");
                     }
-                    if (sp.getBoolean(Prefs.PREFER_AAC, false))
+                    // 默认优先 AAC：网盘原盘常带 3 条 E-AC3 5.1 + 1 条 AAC 立体声，盒子选到 E-AC3
+                    // 时要么没声、要么只能直通；AAC 是最稳的那条。设置里仍可切回"默认音轨"。
+                    if (sp.getBoolean(Prefs.PREFER_AAC, true))
                         trackParams.setPreferredAudioMimeTypes(MimeTypes.AUDIO_AAC);
                     if (!this.ijkMode && sp.getBoolean(Prefs.TUNNELED_PLAYBACK, false))
                         trackParams.setTunnelingEnabled(true);

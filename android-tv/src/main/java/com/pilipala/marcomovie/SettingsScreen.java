@@ -1895,7 +1895,7 @@ final class SettingsScreen {
         toggle("内置 CPython 3.11 爬虫引擎", Prefs.NATIVE_PYTHON_ENABLED, true, a::closeEngines);
         toggle("异步 JS 源 WebView 兜底引擎", Prefs.WEBVIEW_JS_FALLBACK, true, a::closeEngines);
         toggle("优先使用兼容音频解码", Prefs.SOFTWARE_AUDIO, false, null);
-        toggle("优先选择 AAC 音轨", Prefs.PREFER_AAC, false, null);
+        toggle("优先选择 AAC 音轨", Prefs.PREFER_AAC, true, null);
         link("解码组件", "查看本机已加载的音频与视频扩展", "settings-decoders", () -> open(this::decoders));
         ints(
                 "画面比例",
