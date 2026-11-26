@@ -1889,6 +1889,37 @@ final class PlaybackController {
                                                     "HLS proxy fallback to direct URL",
                                                     proxyErr);
                                         }
+                                    } else if (netdiskHeaders && !isLiveStream) {
+                                        // Signed netdisk direct links (Quark/UC/Baidu/Ali 4K
+                                        // remuxes) are read over one upstream connection, which
+                                        // stutters on this box. Wrap them in the loopback
+                                        // multi-connection Range proxy; every failure keeps
+                                        // playUrl on the original direct URL.
+                                        try {
+                                            SourceController.ensureProxy(a, a.config);
+                                            String wrapped =
+                                                    NetdiskRangeProxy.wrap(ep, mediaHeaders);
+                                            if (wrapped != null) {
+                                                playUrl = wrapped;
+                                                AppLog.w(
+                                                        "RangeProxy",
+                                                        "route headers="
+                                                                + mediaHeaders.size()
+                                                                + " cookie="
+                                                                + (hasCookieHeader(mediaHeaders)
+                                                                        ? "yes"
+                                                                        : "no"));
+                                            } else {
+                                                AppLog.w(
+                                                        "RangeProxy",
+                                                        "route skipped, keep direct URL");
+                                            }
+                                        } catch (Exception rangeErr) {
+                                            AppLog.w(
+                                                    "RangeProxy",
+                                                    "proxy unavailable, fallback to direct URL",
+                                                    rangeErr);
+                                        }
                                     } else if (!isLiveStream) {
                                         int cacheMb = a.prefs.getInt(Prefs.MEDIA_CACHE_MB, 256);
                                         // Cloud streams resolved by the native netdisk layer opt

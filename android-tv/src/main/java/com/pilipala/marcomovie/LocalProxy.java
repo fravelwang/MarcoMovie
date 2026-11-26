@@ -54,6 +54,7 @@ public final class LocalProxy implements Closeable {
     static volatile ScriptResolver nativePythonProxy;
     static volatile ScriptResolver webViewJsProxy;
     static volatile RouteHandler hlsRouteHandler;
+    static volatile RouteHandler rangeRouteHandler;
     static volatile RouteHandler diskCacheRouteHandler;
     private static final ConcurrentHashMap<String, android.net.Uri> LOCAL_CONTENT_URIS =
             new ConcurrentHashMap<>();
@@ -475,6 +476,8 @@ public final class LocalProxy implements Closeable {
                         && (method.equals("GET") || method.equals("HEAD"));
         boolean isDiskCacheRoute =
                 path.startsWith("/kcache/") && (method.equals("GET") || method.equals("HEAD"));
+        boolean isRangeRoute =
+                "/range".equals(path) && (method.equals("GET") || method.equals("HEAD"));
         boolean isLocalContentRoute =
                 path.startsWith("/local-content/")
                         && (method.equals("GET") || method.equals("HEAD"));
@@ -482,6 +485,7 @@ public final class LocalProxy implements Closeable {
                 && !isActionRoute
                 && !isHlsRoute
                 && !isDiskCacheRoute
+                && !isRangeRoute
                 && !isLocalContentRoute) {
             AppLog.w("LocalProxy", "404 route method=" + method + " path=" + path, null);
             simple(out, 404, "Not found");
@@ -599,7 +603,8 @@ public final class LocalProxy implements Closeable {
             }
             requestToken = queryParams.get("_mm_token");
         }
-        boolean requireToken = isJs || isHlsRoute || isDiskCacheRoute || isLocalContentRoute;
+        boolean requireToken =
+                isJs || isHlsRoute || isDiskCacheRoute || isRangeRoute || isLocalContentRoute;
         if (!ProxyAddress.isAllowedRequest(
                 headers.get("host"),
                 headers.get("origin"),
@@ -618,6 +623,14 @@ public final class LocalProxy implements Closeable {
             RouteHandler handler = hlsRouteHandler;
             if (handler == null) {
                 simple(out, 404, "HLS proxy unavailable");
+                return false;
+            }
+            return handler.handle(path, method, queryParams, headers, out);
+        }
+        if (isRangeRoute) {
+            RouteHandler handler = rangeRouteHandler;
+            if (handler == null) {
+                simple(out, 404, "Range proxy unavailable");
                 return false;
             }
             return handler.handle(path, method, queryParams, headers, out);
