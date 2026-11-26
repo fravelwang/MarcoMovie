@@ -304,6 +304,22 @@ final class BaiduLogin {
         clear(appFilesDir);
     }
 
+    /**
+     * 网页扫码登录（{@link NetdiskWebLogin}）拿到的一段 Cookie → 规范化凭据并落盘。
+     *
+     * <p>与粘贴走同一条解析路（{@link #parseCookie}），所以凭据文件结构与播放侧读取口径都没变；
+     * 解析或落盘失败抛 {@link IOException}，消息已经是给人看的一句话。
+     */
+    static Credential saveRawCookie(String raw) throws IOException {
+        String text = raw == null ? "" : raw.trim();
+        if (text.isEmpty()) throw new IOException("网页登录没有拿到百度的 Cookie");
+        Credential parsed = parseCookie(text);
+        if (parsed == null) throw new IOException("网页登录拿到的 Cookie 里没有 BDUSS");
+        if (!saveSaved(parsed)) throw new IOException("凭据保存失败，请检查存储权限");
+        return parsed;
+    }
+
+
     // ------------------------------------------------------------------ 粘贴框
 
     /**

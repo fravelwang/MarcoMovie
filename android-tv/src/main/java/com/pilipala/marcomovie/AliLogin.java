@@ -426,6 +426,22 @@ final class AliLogin {
         }
     }
 
+    /**
+     * 网页扫码登录（{@link NetdiskWebLogin}）从 {@code localStorage.token} 拿到的原文 → 凭据并落盘。
+     *
+     * <p>与粘贴走同一条解析路（{@link #parsePasted}）：{@code {"refresh_token":"…"}} 这种 JSON、以及
+     * {@code refresh_token=…&access_token=…} 这种串都认。解析或落盘失败抛 {@link IOException}，
+     * 消息已经是给人看的一句话。
+     */
+    static Credential saveRawCookie(String raw) throws IOException {
+        String text = raw == null ? "" : raw.trim();
+        if (text.isEmpty()) throw new IOException("网页登录没有拿到阿里云盘的 token");
+        Credential parsed = parsePasted(text);
+        if (parsed == null) throw new IOException("网页登录拿到的 token 里没有 refresh_token");
+        if (!saveSaved(parsed)) throw new IOException("凭据保存失败，请检查存储权限");
+        return parsed;
+    }
+
     static String isoNow() {
         SimpleDateFormat fmt = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT);
         fmt.setTimeZone(TimeZone.getTimeZone("UTC"));
@@ -507,14 +523,19 @@ final class AliLogin {
                                 dialog.dismiss();
                                 a.toast("阿里云盘已登录 · refresh_token 已存，正在校验…");
                                 if (done != null) done.run();
-                                verifyAsync(a);
+                                verifySavedAsync(a);
                             });
                 });
         dialog.show();
     }
 
-    /** 后台刷一次 access_token 校验凭据；结论回投主线程（失败只提示，不改已存凭据）。 */
-    private static void verifyAsync(MainActivity a) {
+    /**
+     * 后台刷一次 access_token 校验凭据；结论回投主线程（失败只提示，不改已存凭据）。
+     *
+     * <p>包内可见：粘贴框（{@link #showPasteDialog}）与网页扫码登录（{@link NetdiskWebLogin}）保存
+     * 成功后都会调它，让 Boss 当场知道这条 refresh_token 能不能用。
+     */
+    static void verifySavedAsync(MainActivity a) {
         if (a == null) return;
         a.worker.execute(
                 () -> {

@@ -22,9 +22,11 @@ import java.util.concurrent.Executors;
  * the remote's back key goes up one level, exactly like a native drive app or FongMi's browser.
  *
  * <p>Only 夸克 has a native browser today; the other drives still say so honestly instead of showing
- * a dead grid. 百度 has a native login (paste a cookie) and 阿里 has one too (paste a refresh_token)
- * because their share lines need account credentials at playback time, but their browsers are still
- * out of scope.
+ * a dead grid. Every 牌面 now logs in the same way: 扫码为主 — {@link NetdiskWebLogin} opens that
+ * drive's own web login page, the phone App scans the QR on the TV, and the credential is captured
+ * from the WebView and saved. 手工粘贴 is kept as the 兜底 (Boss 2026-11-26: 不要手工粘 Cookie/token).
+ * 百度 / 阿里 / UC need the account credential at playback time (their share resolvers) but their
+ * browsers are still out of scope; 115 目前只存凭据。
  */
 final class NetdiskScreen {
 
@@ -84,24 +86,23 @@ final class NetdiskScreen {
             {UcLogin.PROVIDER, "UC"},
             {BaiduLogin.PROVIDER, "百度"},
             {AliLogin.PROVIDER, "阿里"},
+            {NetdiskWebLogin.PROVIDER_115, "115"},
         };
         for (String[] drive : drives) {
-            boolean current = drive[0].equals(driveKey);
-            // 四家登录态都是本机凭据文件说了算（UC 2026-11-26 起也有了自己的 uc.json）。
-            boolean logged =
-                    (QuarkQrLogin.PROVIDER.equals(drive[0]) && QuarkQrLogin.loadSaved() != null)
-                            || (UcLogin.PROVIDER.equals(drive[0])
-                                    && UcLogin.loadSaved() != null)
-                            || (BaiduLogin.PROVIDER.equals(drive[0])
-                                    && BaiduLogin.loadSaved() != null)
-                            || (AliLogin.PROVIDER.equals(drive[0])
-                                    && AliLogin.loadSaved() != null);
             final String key = drive[0];
+            boolean current = key.equals(driveKey);
+            // 五家登录态都是本机凭据文件说了算（UC 2026-11-26 起也有了自己的 uc.json；
+            // 115 的凭据由 NetdiskWebLogin 写 netdisk/115.json）。
+            boolean logged =
+                    (QuarkQrLogin.PROVIDER.equals(key) && QuarkQrLogin.loadSaved() != null)
+                            || (UcLogin.PROVIDER.equals(key) && UcLogin.loadSaved() != null)
+                            || (BaiduLogin.PROVIDER.equals(key) && BaiduLogin.loadSaved() != null)
+                            || (AliLogin.PROVIDER.equals(key) && AliLogin.loadSaved() != null)
+                            || (NetdiskWebLogin.PROVIDER_115.equals(key)
+                                    && a != null
+                                    && NetdiskWebLogin.load115(a.getFilesDir()) != null);
             boolean nativeLogin =
-                    QuarkQrLogin.PROVIDER.equals(key)
-                            || UcLogin.PROVIDER.equals(key)
-                            || BaiduLogin.PROVIDER.equals(key)
-                            || AliLogin.PROVIDER.equals(key);
+                    QuarkQrLogin.PROVIDER.equals(key) || NetdiskWebLogin.supports(key);
             String label = drive[1] + (nativeLogin ? (logged ? " · 已登录" : " · 未登录") : "");
             Button pill = a.navButton(label, "netdisk-drive:" + key, () -> onDrivePill(key));
             pill.setTextSize(13f);
@@ -118,32 +119,70 @@ final class NetdiskScreen {
     }
 
     private void onDrivePill(String key) {
-        if (UcLogin.PROVIDER.equals(key)) {
-            // UC 本次也只做「登录 + 分享线路」：pill 的入口是粘贴 Cookie（游客接口被限流时的兜底）。
-            UcLogin.showPasteDialog(a, this::reloadSelf);
+        if (QuarkQrLogin.PROVIDER.equals(key)) {
+            if (QuarkQrLogin.loadSaved() == null) {
+                QuarkLoginDialog.show(a, this::reloadSelf);
+                return;
+            }
+            QuarkQrLogin.Credential credential = QuarkQrLogin.loadSaved();
+            a.notice("已登录 · " + QuarkQrLogin.describeShort(credential));
             return;
         }
-        if (BaiduLogin.PROVIDER.equals(key)) {
-            // 百度本次只做「登录 + 分享线路」：浏览不在范围内，pill 的入口是粘贴 Cookie。
-            BaiduLogin.showPasteDialog(a, this::reloadSelf);
-            return;
-        }
-        if (AliLogin.PROVIDER.equals(key)) {
-            // 阿里同理：pill 的入口是粘贴 refresh_token（这次只做登录与分享线路）。
-            AliLogin.showPasteDialog(a, this::reloadSelf);
-            return;
-        }
-        if (!QuarkQrLogin.PROVIDER.equals(key)) {
+        if (!NetdiskWebLogin.supports(key)) {
             // 剩下的都是没接过的盘：没有登录入口也没有原生浏览。
             a.toast("这个网盘还没有原生登录，暂时只能用「更多 → 插件配置中心」里的旧登录");
             return;
         }
-        if (QuarkQrLogin.loadSaved() == null) {
-            QuarkLoginDialog.show(a, this::reloadSelf);
+        showLoginChoice(key);
+    }
+
+    /**
+     * 非夸克牌面的入口：先弹一个二选一。**扫码是主路**（Boss 2026-11-26 定的口径：不要手工粘
+     * Cookie/token），粘贴只在扫码不好使时当兜底；115 还没有粘贴入口，只有扫码。
+     */
+    private void showLoginChoice(final String key) {
+        boolean paste = NetdiskWebLogin.supportsPaste(key);
+        String[] choices =
+                paste
+                        ? new String[] {"扫码登录（推荐）", "手工粘贴凭据（兜底）"}
+                        : new String[] {"扫码登录（推荐）"};
+        new AppDialog.Builder(a)
+                .setTitle(NetdiskWebLogin.label(key) + " · 登录")
+                .setMessage(
+                        "扫码登录：电视上会打开这家的网页登录页，用手机 App 扫屏幕上的二维码，"
+                                + "登录成功后凭据自动保存，不用手工粘贴。")
+                .setItems(
+                        choices,
+                        (dialog, which) -> {
+                            if (which != 1) {
+                                scanLogin(key);
+                            } else {
+                                pasteLogin(key);
+                            }
+                        })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    private void scanLogin(String key) {
+        NetdiskWebLogin.show(a, key, this::reloadSelf);
+    }
+
+    private void pasteLogin(String key) {
+        if (UcLogin.PROVIDER.equals(key)) {
+            // 兜底：游客接口被限流时也能靠账号 Cookie 换直链。
+            UcLogin.showPasteDialog(a, this::reloadSelf);
             return;
         }
-        QuarkQrLogin.Credential credential = QuarkQrLogin.loadSaved();
-        a.notice("已登录 · " + QuarkQrLogin.describeShort(credential));
+        if (BaiduLogin.PROVIDER.equals(key)) {
+            BaiduLogin.showPasteDialog(a, this::reloadSelf);
+            return;
+        }
+        if (AliLogin.PROVIDER.equals(key)) {
+            AliLogin.showPasteDialog(a, this::reloadSelf);
+            return;
+        }
+        a.toast("这家暂时只有扫码登录");
     }
 
     private void reloadSelf() {
@@ -237,7 +276,7 @@ final class NetdiskScreen {
             BaiduLogin.Credential saved = BaiduLogin.loadSaved();
             status.setText(
                     saved == null
-                            ? "百度网盘还没登录：点上面的「百度」pill 粘贴 Cookie。这次只做登录与分享线路，原生浏览还没做。"
+                            ? "百度网盘还没登录：点上面的「百度」牌面选「扫码登录」，用手机百度网盘 App 扫电视上的二维码。这次只做登录与分享线路，原生浏览还没做。"
                             : "百度网盘已登录（"
                                     + BaiduLogin.describe(saved)
                                     + "）。这次只做登录与分享线路：播放走详情页的「百度分享」线路，原生浏览还没做。");
@@ -248,7 +287,7 @@ final class NetdiskScreen {
             AliLogin.Credential saved = AliLogin.loadSaved();
             status.setText(
                     saved == null
-                            ? "阿里云盘还没登录：点上面的「阿里」pill 粘贴 refresh_token。这次只做登录与分享线路，原生浏览还没做。"
+                            ? "阿里云盘还没登录：点上面的「阿里」牌面选「扫码登录」，用手机阿里云盘 App 扫电视上的二维码。这次只做登录与分享线路，原生浏览还没做。"
                             : "阿里云盘已登录（"
                                     + AliLogin.describe(saved)
                                     + "）。这次只做登录与分享线路：播放走详情页的「阿里分享」线路，原生浏览还没做。");
@@ -259,10 +298,21 @@ final class NetdiskScreen {
             UcLogin.Credential saved = UcLogin.loadSaved();
             status.setText(
                     saved == null
-                            ? "UC 网盘还没登录：点上面的「UC」pill 粘贴 Cookie。这次只做登录与分享线路，原生浏览还没做。"
+                            ? "UC 网盘还没登录：点上面的「UC」牌面选「扫码登录」，用手机 UC 扫码。这次只做登录与分享线路，原生浏览还没做。"
                             : "UC 网盘已登录（"
                                     + UcLogin.describe(saved)
                                     + "）。这次只做登录与分享线路：播放走详情页的「UC」线路，游客接口被限流时自动改用账号 Cookie；原生浏览还没做。");
+            return;
+        }
+        if (NetdiskWebLogin.PROVIDER_115.equals(driveKey)) {
+            // 115 本卡只存凭据、不接播放，所以这一页只说清楚状态。
+            NetdiskWebLogin.Cookie115 saved = NetdiskWebLogin.load115(a.getFilesDir());
+            status.setText(
+                    saved == null
+                            ? "115 网盘还没登录：点上面的「115」牌面选「扫码登录」，用手机 115 App 扫电视上的二维码。这次只存凭据，原生浏览与播放都还没接。"
+                            : "115 网盘已登录（"
+                                    + NetdiskWebLogin.describe115(saved)
+                                    + "）。这次只存凭据，原生浏览与播放都还没接。");
             return;
         }
         if (!QuarkQrLogin.PROVIDER.equals(driveKey)) {
