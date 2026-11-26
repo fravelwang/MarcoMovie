@@ -868,7 +868,21 @@ final class PlaybackController {
                                                                                                     "tip",
                                                                                                     "")))
                                                                     .trim();
-                                                    if (!spiderMsg.isEmpty()) {
+                                                    // 网盘线路的失败原因是我们自己解析出来的（阿里：分享失效 /
+                                                    // 需要提取码 / 需要登录 / 登录失效 / 无直链；UC：分享失效 /
+                                                    // 需要提取码 / 需要登录 UC；百度：需要登录 / 登录失效 /
+                                                    // 分享失效），比插件那句笼统的「PC端未登录或Cookie失效」
+                                                    // 准确：有就先说它。夸克与普通线路仍走下面原来的顺序，
+                                                    // 一个字节都不变。
+                                                    String netdiskRefusal =
+                                                            netdiskRefusalReason(finalEp);
+                                                    if (!netdiskRefusal.isEmpty()) {
+                                                        failInPlaceSwitch(
+                                                                a,
+                                                                s,
+                                                                PlaybackFailure.Attribution.SOURCE,
+                                                                netdiskRefusal);
+                                                    } else if (!spiderMsg.isEmpty()) {
                                                         failInPlaceSwitch(
                                                                 a,
                                                                 s,
@@ -953,8 +967,9 @@ final class PlaybackController {
 
     /**
      * Native netdisk fallback for a line the config-center plugin could not resolve: returns the
-     * episode built by our own 夸克 client, or null so the caller keeps its original "no address"
-     * handling (same toast, same cross-source failover).
+     * episode built by our own native resolver (阿里 when the id starts with {@code al}, 百度 when
+     * it starts with {@code bd}, UC when it has four segments, 夸克 otherwise), or null so the
+     * caller keeps its original "no address" handling (same toast, same cross-source failover).
      *
      * <p>Deliberately narrow: only when the plugin answered empty, did not ask for the web parser,
      * the episode url is not already a plain media link, and the id is a netdisk share id. Runs on
@@ -977,9 +992,30 @@ final class PlaybackController {
             AppLog.w("QuarkShare", "skip: plugin returned url=[" + pluginUrl + "]");
             return null;
         }
+        // 按 id 形状分派：第一段 al 的阿里四段、第一段 bd 的百度五段、四段是 UC 分享，其余（五段
+        // 夸克分享等）仍走原来那条，夸克那边一行不改。判据只看形状，不看站名/线路名：虎斑的
+        // 「UC原画13」这种线路名和四段 id 形状已经够用。
+        final boolean aliShare = AliShareResolver.looksLikeShareId(rawEp);
+        final boolean baiduShare = !aliShare && BaiduShareResolver.looksLikeShareId(rawEp);
+        final boolean ucShare =
+                !aliShare && !baiduShare && UcShareResolver.looksLikeShareId(rawEp);
+        final String logTag =
+                aliShare
+                        ? "AliShare"
+                        : baiduShare ? "BaiduShare" : ucShare ? "UcShare" : "QuarkShare";
         try {
             Cms.Episode nativeEp =
-                    QuarkShareResolver.resolve(site == null ? "" : site.api, lineName, rawEp);
+                    aliShare
+                            ? AliShareResolver.resolve(
+                                    site == null ? "" : site.api, lineName, rawEp)
+                            : baiduShare
+                                    ? BaiduShareResolver.resolve(
+                                            site == null ? "" : site.api, lineName, rawEp)
+                                    : ucShare
+                                            ? UcShareResolver.resolve(
+                                                    site == null ? "" : site.api, lineName, rawEp)
+                                            : QuarkShareResolver.resolve(
+                                                    site == null ? "" : site.api, lineName, rawEp);
             if (nativeEp != null && nativeEp.url != null && !nativeEp.url.trim().isEmpty()) {
                 // The synthesized episode carries only the media address. Keep the share-id
                 // episode as its origin so auto-next advances through the real episode list and
@@ -997,13 +1033,29 @@ final class PlaybackController {
                 // Auto-next simply falls back to the episode list when this copy fails.
             }
         }
-                AppLog.w("QuarkShare", "native episode ready name=" + nativeEp.name);
+                AppLog.w(logTag, "native episode ready name=" + nativeEp.name);
                 return nativeEp;
             }
         } catch (RuntimeException error) {
-            AppLog.w("QuarkShare", "native resolution crashed", error);
+            AppLog.w(logTag, "native resolution crashed", error);
         }
         return null;
+    }
+
+    /**
+     * 网盘线路失败时给用户看的原因（阿里：分享失效 / 需要提取码 / 需要登录 / 登录失效 / 无直链；
+     * UC：分享失效 / 需要提取码 / 需要登录 UC；百度：需要登录 / 登录失效 / 分享失效）。只有
+     * episode id 真是对应那家的形状才去读它的 {@code lastFailureReason()}，免得把上一次解析留下的
+     * 旧原因错挂到别的线路上。不是网盘线路返回 ""，调用方按原来的顺序处理。
+     */
+    private static String netdiskRefusalReason(Cms.Episode ep) {
+        if (ep == null || ep.url == null) return "";
+        if (AliShareResolver.looksLikeShareId(ep.url)) return AliShareResolver.lastFailureReason();
+        if (UcShareResolver.looksLikeShareId(ep.url)) return UcShareResolver.lastFailureReason();
+        if (BaiduShareResolver.looksLikeShareId(ep.url)) {
+            return BaiduShareResolver.lastFailureReason();
+        }
+        return "";
     }
 
     static void resolveCmsWithParser(

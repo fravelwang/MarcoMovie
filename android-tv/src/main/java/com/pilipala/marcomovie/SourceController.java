@@ -850,6 +850,29 @@ final class SourceController {
         }
     }
 
+    /**
+     * 把一次已经取到、且判定可播的详情放进两级缓存（探测已经付过这次网络代价）。
+     *
+     * <p>为什么需要它：换站走 {@code openListing} 会重建页面，新页面按同一个 id 又取一遍详情，
+     * 探测那几秒等于白付（实测换站后还要再等一趟）。这里只搬缓存、不碰取数链路：内存键与
+     * {@link #loadDetail} 同一条公式，写前用网关再判一次"解析得开、真有可播线路"，不可播就不写；
+     * 磁盘那级 {@code writeDetailDiskCache} 自己会跳过私密空间、精简模式与配置站。
+     *
+     * @param raw 调用方已经拿到的详情原文；null 直接跳过
+     */
+    static void rememberDetail(MainActivity a, Cms.Site site, String id, String raw) {
+        if (a == null || site == null || site.key == null || id == null || raw == null) return;
+        try {
+            MediaDetail detail = new FongMiGateway(a).parseDetail(raw);
+            if (detail == null || !detail.playable()) return;
+            String key = a.engineEpoch + ":" + site.key.length() + ":" + site.key + id;
+            a.detailCache.put(key, raw);
+            if (!a.privateMode) writeDetailDiskCache(a, site, id, raw);
+        } catch (Throwable failure) {
+            AppLog.w("SourceController", "remember detail: " + failure);
+        }
+    }
+
     static void loadDetail(
             MainActivity a, Cms.Site site, String id, MainActivity.Done<Cms.Video> done) {
         loadDetail(a, site, id, done, null);
@@ -1049,8 +1072,34 @@ final class SourceController {
                 });
     }
 
+    private static final String GENERIC_MESSAGE =
+            "连接超时、来源不可达或数据格式不受支持。请检查配置与网络后重试。";
+
     static String message(Throwable e) {
-        if (e == null) return "连接超时、来源不可达或数据格式不受支持。请检查配置与网络后重试。";
+        return message(e, 0);
+    }
+
+    /**
+     * The gateway folds every vendor failure into one {@link GatewayException} with the original
+     * failure as its cause, so a gateway failure is judged by that cause first — the specific
+     * sentences below are the ones the app always showed — and only then by its kind. Kinds that
+     * carry no user-actionable detail (empty page, unparsable payload) still end in the generic
+     * sentence.
+     */
+    private static String message(Throwable e, int depth) {
+        if (e == null) return GENERIC_MESSAGE;
+        if (e instanceof GatewayException) {
+            GatewayException gateway = (GatewayException) e;
+            Throwable cause = gateway.getCause();
+            if (cause != null && depth < 3) {
+                String inner = message(cause, depth + 1);
+                if (!GENERIC_MESSAGE.equals(inner)) return inner;
+            }
+            if (gateway.kind == GatewayException.Kind.TIMEOUT)
+                return "来源响应超时，请重试或切换其他来源。";
+            if (gateway.kind == GatewayException.Kind.DEAD)
+                return "无法连接来源服务，请重试或切换其他来源。";
+        }
         String s = e.getMessage();
         if (e instanceof CspEngine.EngineException) return s;
         if (e instanceof com.pilipala.catpaw.CatPawHost.DrpySourceException
@@ -1073,7 +1122,7 @@ final class SourceController {
                         || s.startsWith("剧集返回")
                         || s.startsWith("媒体地址返回")
                         || s.startsWith("此剧集"))) return s;
-        return "连接超时、来源不可达或数据格式不受支持。请检查配置与网络后重试。";
+        return GENERIC_MESSAGE;
     }
 
     static void learnTitles(MainActivity a, List<Cms.Video> videos) {

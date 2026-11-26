@@ -21,8 +21,10 @@ import java.util.concurrent.Executors;
  * rest (plugin fallback, ordering, cookie paste) sits behind 更多. Each folder is its own screen, so
  * the remote's back key goes up one level, exactly like a native drive app or FongMi's browser.
  *
- * <p>Only 夸克 has a native client today; the other drives still say so honestly instead of showing
- * a dead grid.
+ * <p>Only 夸克 has a native browser today; the other drives still say so honestly instead of showing
+ * a dead grid. 百度 has a native login (paste a cookie) and 阿里 has one too (paste a refresh_token)
+ * because their share lines need account credentials at playback time, but their browsers are still
+ * out of scope.
  */
 final class NetdiskScreen {
 
@@ -85,14 +87,19 @@ final class NetdiskScreen {
         };
         for (String[] drive : drives) {
             boolean current = drive[0].equals(driveKey);
+            // 三家登录态都是本机凭据文件说了算；UC 还没有原生登录，只显示盘名。
             boolean logged =
-                    QuarkQrLogin.PROVIDER.equals(drive[0]) && QuarkQrLogin.loadSaved() != null;
+                    (QuarkQrLogin.PROVIDER.equals(drive[0]) && QuarkQrLogin.loadSaved() != null)
+                            || (BaiduLogin.PROVIDER.equals(drive[0])
+                                    && BaiduLogin.loadSaved() != null)
+                            || (AliLogin.PROVIDER.equals(drive[0])
+                                    && AliLogin.loadSaved() != null);
             final String key = drive[0];
-            String label =
-                    drive[1]
-                            + (QuarkQrLogin.PROVIDER.equals(key)
-                                    ? (logged ? " · 已登录" : " · 未登录")
-                                    : "");
+            boolean nativeLogin =
+                    QuarkQrLogin.PROVIDER.equals(key)
+                            || BaiduLogin.PROVIDER.equals(key)
+                            || AliLogin.PROVIDER.equals(key);
+            String label = drive[1] + (nativeLogin ? (logged ? " · 已登录" : " · 未登录") : "");
             Button pill = a.navButton(label, "netdisk-drive:" + key, () -> onDrivePill(key));
             pill.setTextSize(13f);
             if (!current) pill.setAlpha(.62f);
@@ -108,9 +115,19 @@ final class NetdiskScreen {
     }
 
     private void onDrivePill(String key) {
+        if (BaiduLogin.PROVIDER.equals(key)) {
+            // 百度本次只做「登录 + 分享线路」：浏览不在范围内，pill 的入口是粘贴 Cookie。
+            BaiduLogin.showPasteDialog(a, this::reloadSelf);
+            return;
+        }
+        if (AliLogin.PROVIDER.equals(key)) {
+            // 阿里同理：pill 的入口是粘贴 refresh_token（这次只做登录与分享线路）。
+            AliLogin.showPasteDialog(a, this::reloadSelf);
+            return;
+        }
         if (!QuarkQrLogin.PROVIDER.equals(key)) {
-            a.toast(
-                    "UC / 百度 / 阿里的原生浏览还没做，暂时只能用「更多 → 插件配置中心」里的旧登录");
+            // 现在只剩 UC 走到这里：阿里与百度各有自己的粘贴入口。
+            a.toast("UC 的原生浏览还没做，暂时只能用「更多 → 插件配置中心」里的旧登录");
             return;
         }
         if (QuarkQrLogin.loadSaved() == null) {
@@ -207,8 +224,30 @@ final class NetdiskScreen {
     private void load() {
         final int mine = ++generation;
         gridHost.removeAllViews();
+        if (BaiduLogin.PROVIDER.equals(driveKey)) {
+            // 百度的原生浏览不在本次范围：这里只把登录状态与去哪播说清楚，不摆一个死格子。
+            BaiduLogin.Credential saved = BaiduLogin.loadSaved();
+            status.setText(
+                    saved == null
+                            ? "百度网盘还没登录：点上面的「百度」pill 粘贴 Cookie。这次只做登录与分享线路，原生浏览还没做。"
+                            : "百度网盘已登录（"
+                                    + BaiduLogin.describe(saved)
+                                    + "）。这次只做登录与分享线路：播放走详情页的「百度分享」线路，原生浏览还没做。");
+            return;
+        }
+        if (AliLogin.PROVIDER.equals(driveKey)) {
+            // 阿里的原生浏览不在本次范围：这里只把登录状态与去哪播说清楚，不摆一个死格子。
+            AliLogin.Credential saved = AliLogin.loadSaved();
+            status.setText(
+                    saved == null
+                            ? "阿里云盘还没登录：点上面的「阿里」pill 粘贴 refresh_token。这次只做登录与分享线路，原生浏览还没做。"
+                            : "阿里云盘已登录（"
+                                    + AliLogin.describe(saved)
+                                    + "）。这次只做登录与分享线路：播放走详情页的「阿里分享」线路，原生浏览还没做。");
+            return;
+        }
         if (!QuarkQrLogin.PROVIDER.equals(driveKey)) {
-            status.setText("这个网盘还没有原生浏览（下一步做 UC / 百度 / 阿里）");
+            status.setText("这个网盘还没有原生浏览（下一步做 UC）");
             return;
         }
         QuarkQrLogin.Credential credential = QuarkQrLogin.loadSaved();
