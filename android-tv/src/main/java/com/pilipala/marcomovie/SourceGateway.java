@@ -1,6 +1,7 @@
 package com.pilipala.marcomovie;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * The anti-corruption seam between the app and the FongMi base: the only way the rest of the app
@@ -19,6 +20,27 @@ interface SourceGateway {
      * fallback order the wall always used (home → video feed → a few category probes).
      */
     List<MediaRef> home(SiteRef site, int limit) throws GatewayException;
+
+    /**
+     * One page of a site category; {@code filters} are the server-side values the site can
+     * understand (may be an empty map). No caching, no local filtering and no decision whether to
+     * turn the page — those stay in the caller. Failures are thrown as {@link GatewayException};
+     * an empty page is a normal answer.
+     *
+     * @param timings optional out-parameter filled with the same three diagnostics the detail path
+     *     reports: {@code [0]} the clock when the engine became ready, {@code [1]} the per-engine
+     *     gate wait in ns, {@code [2]} the time spent inside the site call in ns.
+     */
+    MediaPage category(
+            SiteRef site, String categoryId, int page, Map<String, String> filters, long[] timings)
+            throws GatewayException;
+
+    /** The same page where the caller does not log timings. */
+    default MediaPage category(
+            SiteRef site, String categoryId, int page, Map<String, String> filters)
+            throws GatewayException {
+        return category(site, categoryId, page, filters, null);
+    }
 
     /**
      * Fetches a site's raw detail payload (no caching — the caller owns caches and single-flight).

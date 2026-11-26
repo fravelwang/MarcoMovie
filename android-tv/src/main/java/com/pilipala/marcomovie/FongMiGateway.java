@@ -1,7 +1,9 @@
 package com.pilipala.marcomovie;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The anti-corruption adapter: the only place in the app that turns FongMi/FongMi-like site data
@@ -11,9 +13,10 @@ import java.util.List;
  * and maps the payload. Business decisions (which site is preferred, whether to search at all) stay
  * in the callers; this layer only answers "what does this site say".
  *
- * <p>{@link #search} backs the focused-card source expansion; {@link #home} backs the wall round.
- * The wall's first-page parser/cleaner still live in {@code HomeScreen} and are called from here
- * (moving them is a later slice).
+ * <p>{@link #search} backs the focused-card source expansion; {@link #home} backs the wall round;
+ * {@link #category} backs the home screen's category tab and the catalog page. The wall's
+ * first-page parser/cleaner still live in {@code HomeScreen} and are called from here (moving them
+ * is a later slice).
  */
 final class FongMiGateway implements SourceGateway {
 
@@ -106,6 +109,65 @@ final class FongMiGateway implements SourceGateway {
             picked.add(toMedia(site.key, video));
         }
         return picked;
+    }
+
+    /**
+     * One category page, fetched the way the home screen always fetched it: resolve the engine,
+     * take the same {@link SourceGate#measured} path (the per-engine gate and its two phases are
+     * unchanged), parse, then clean with the same rule the caller used to apply (empty ids and
+     * duplicate ids dropped).
+     *
+     * <p>No caching and no paging decision: {@code MediaPage.pageCount} is the site's own number,
+     * and whether another page is worth asking for stays with the caller. An empty page is a
+     * normal answer, so it comes back as an empty list, not as a failure.
+     */
+    @Override
+    public MediaPage category(
+            SiteRef site, String categoryId, int page, Map<String, String> filters, long[] timings)
+            throws GatewayException {
+        Cms.Site target = resolve(site);
+        SourceEngine engine;
+        try {
+            engine = SourceController.engine(activity, target);
+        } catch (Throwable failure) {
+            throw normalize("category", site, failure);
+        }
+        if (timings != null && timings.length >= 3) {
+            timings[0] = android.os.SystemClock.elapsedRealtime();
+        }
+        // Some engines walk the map, so hand them an empty one rather than null.
+        Map<String, String> values = filters == null ? Collections.emptyMap() : filters;
+        long[] phases = new long[2];
+        String raw;
+        try {
+            raw = SourceGate.measured(phases, () -> engine.category(categoryId, page, values));
+        } catch (Throwable failure) {
+            throw normalize("category", site, failure);
+        }
+        if (timings != null && timings.length >= 3) {
+            timings[1] = phases[0];
+            timings[2] = phases[1];
+        }
+        if (raw == null || raw.trim().isEmpty()) {
+            // An empty body is a site saying "nothing on this page", not a failure: the caller's
+            // local scan stops on an empty page and the catalog shows its "no videos" line. It
+            // must not turn into an error banner.
+            return new MediaPage(Collections.emptyList(), 0);
+        }
+        Cms.Listing listing;
+        try {
+            listing = Cms.listing(raw);
+        } catch (Throwable failure) {
+            throw new GatewayException(
+                    GatewayException.Kind.PARSE,
+                    "category " + site.key + " returned an unparsable payload",
+                    failure);
+        }
+        if (listing == null) return new MediaPage(Collections.emptyList(), 0);
+        HomeScreen.clean(listing.videos);
+        List<MediaRef> items = new ArrayList<>(listing.videos.size());
+        for (Cms.Video video : listing.videos) items.add(toMedia(site.key, video));
+        return new MediaPage(items, listing.pageCount);
     }
 
     /**
@@ -220,6 +282,22 @@ final class FongMiGateway implements SourceGateway {
         video.director = emptyToNull(ref.director);
         video.doubanId = emptyToNull(ref.doubanId);
         return video;
+    }
+
+    /**
+     * Turns a gateway page back into the base's listing object, for the callers whose filter and
+     * paging pipelines still run on {@code Cms.Listing}. The conversion lives here and nowhere
+     * else, the same rule {@link #toListing(MediaRef)} follows.
+     */
+    Cms.Listing toListing(MediaPage page) {
+        Cms.Listing listing = new Cms.Listing();
+        if (page == null) return listing;
+        for (MediaRef ref : page.items) {
+            Cms.Video video = toListing(ref);
+            if (video != null) listing.videos.add(video);
+        }
+        listing.pageCount = page.pageCount;
+        return listing;
     }
 
     /** Current config's site for this reference; a switch mid-flight is a normal gateway failure. */

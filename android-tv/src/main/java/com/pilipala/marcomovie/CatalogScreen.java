@@ -12,6 +12,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -93,11 +94,20 @@ final class CatalogScreen {
         a.load(
                 "正在读取影片…",
                 () -> {
-                    SourceEngine selected = a.engine(s);
-                    return Cms.listing(
-                            search != null
-                                    ? selected.search(search, page)
-                                    : selected.category(cat, page));
+                    // Search stays on the engine for this slice; asking for a category page goes
+                    // through the gateway, which maps the vendor payload back to the same listing
+                    // type the card renderer below already consumes.
+                    if (search != null) {
+                        SourceEngine selected = a.engine(s);
+                        return Cms.listing(selected.search(search, page));
+                    }
+                    FongMiGateway gateway = new FongMiGateway(a);
+                    return gateway.toListing(
+                            gateway.category(
+                                    new SiteRef(s.key, s.name),
+                                    cat,
+                                    page,
+                                    Collections.emptyMap()));
                 },
                 list -> {
                     if (list.videos.isEmpty()) a.paragraph("这一页没有影片。");
