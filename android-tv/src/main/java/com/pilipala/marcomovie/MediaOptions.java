@@ -40,6 +40,44 @@ final class MediaOptions {
         return false;
     }
 
+    /**
+     * True when this URL is a 百度 direct-link landing host ({@code d.pcs.baidu.com} or a
+     * {@code *.baidupcs.com} node). Those hosts answer {@code 31362 sign error} without
+     * {@code UA: pan.baidu.com} and {@code 31045 user not exists} without the account cookie
+     * (measured on the box 2026-11-26), so both are filled in below when the source did not.
+     */
+    private static boolean isBaiduDlinkUrl(String url) {
+        if (url == null || url.isEmpty()) return false;
+        try {
+            String host = new URL(url).getHost();
+            if (host == null) return false;
+            host = host.toLowerCase(Locale.ROOT);
+            return host.equals("d.pcs.baidu.com")
+                    || host.equals("baidupcs.com")
+                    || host.endsWith(".baidupcs.com");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Same idea as {@link #quarkTarget}: the final URL, the raw result URL, or the original. */
+    private static boolean baiduDlinkTarget(String finalUrl, JSONObject result, Cms.Episode original) {
+        if (isBaiduDlinkUrl(finalUrl)) return true;
+        if (result != null) {
+            if (isBaiduDlinkUrl(result.optString("url"))) return true;
+            if (isBaiduDlinkUrl(result.optString("playUrl"))) return true;
+        }
+        if (original != null) {
+            if (isBaiduDlinkUrl(original.url)) return true;
+            if (original.headers != null) {
+                for (String value : original.headers.values()) {
+                    if (value != null && value.contains("baidupcs.com")) return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static boolean hasHeader(Map<String, String> headers, String name) {
         if (headers == null) return false;
         for (String key : headers.keySet()) {
@@ -113,6 +151,18 @@ final class MediaOptions {
                 && quarkTarget(out.url, result, original)
                 && !hasHeader(out.headers, "Cookie")) {
             out.headers.put("Cookie", quarkCredential.cookie);
+        }
+        // 百度 direct links have the same "credential from the native account layer" problem as
+        // 夸克, plus a UA rule: the landing host only accepts UA "pan.baidu.com". Only apply both to
+        // an actual baidu download host, never to a share page or a third-party URL.
+        if (baiduDlinkTarget(out.url, result, original)) {
+            BaiduLogin.Credential baiduCredential = BaiduLogin.loadSaved();
+            if (baiduCredential != null && !hasHeader(out.headers, "Cookie")) {
+                out.headers.put("Cookie", baiduCredential.cookie);
+            }
+            if (!hasHeader(out.headers, "User-Agent")) {
+                put(out.headers, "User-Agent", BaiduShareResolver.UA_DLINK);
+            }
         }
         Object subtitles = result.opt("subtitles");
         if (subtitles == null) subtitles = result.opt("subs");

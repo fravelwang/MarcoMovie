@@ -21,17 +21,22 @@ import java.util.concurrent.Executors;
  * rest (plugin fallback, ordering, cookie paste) sits behind 更多. Each folder is its own screen, so
  * the remote's back key goes up one level, exactly like a native drive app or FongMi's browser.
  *
- * <p>Only 夸克 has a native browser today; the other drives still say so honestly instead of showing
- * a dead grid. Every 牌面 now logs in the same way: 扫码为主 — {@link NetdiskWebLogin} opens that
- * drive's own web login page, the phone App scans the QR on the TV, and the credential is captured
- * from the WebView and saved. 手工粘贴 is kept as the 兜底 (Boss 2026-11-26: 不要手工粘 Cookie/token).
- * 百度 / 阿里 / UC need the account credential at playback time (their share resolvers) but their
+ * <p>Every pill now switches the page to that drive ({@link #onDrivePill}): 夸克 and 百度 have a
+ * native browser ({@link QuarkDriveClient} / {@link BaiduDriveClient} behind {@link NetdiskDrive}),
+ * the other drives still say so honestly instead of showing a dead grid — and never leave the
+ * previous drive's rows behind. Every 牌面 logs in the same way: 扫码为主 — {@link NetdiskWebLogin}
+ * opens that drive's own web login page, the phone App scans the QR on the TV, and the credential is
+ * captured from the WebView and saved. 手工粘贴 is kept as the 兜底 (Boss 2026-11-26: 不要手工粘
+ * Cookie/token). 阿里 / UC / 115 keep their account credential for their share resolvers; their
  * browsers are still out of scope; 115 目前只存凭据。
  */
 final class NetdiskScreen {
 
     private static final ExecutorService WORKER = Executors.newSingleThreadExecutor();
     private static final int VIDEO_CARD_W = 210;
+
+    /** Watch-history ids are prefixed with the drive key so two drives never share one progress row. */
+    private static final String HISTORY_PREFIX_QUARK = QuarkQrLogin.PROVIDER + ":";
 
     private final MainActivity a;
     private final String driveKey;
@@ -51,6 +56,11 @@ final class NetdiskScreen {
         this.driveKey = driveKey;
         this.dirFid = dirFid;
         this.dirName = dirName;
+    }
+
+    /** The dir id a drive calls its root; the 网盘 and 百度 use different shapes. */
+    private static String rootDirOf(String key) {
+        return BaiduLogin.PROVIDER.equals(key) ? "/" : "0";
     }
 
     void show() {
@@ -91,16 +101,7 @@ final class NetdiskScreen {
         for (String[] drive : drives) {
             final String key = drive[0];
             boolean current = key.equals(driveKey);
-            // 五家登录态都是本机凭据文件说了算（UC 2026-11-26 起也有了自己的 uc.json；
-            // 115 的凭据由 NetdiskWebLogin 写 netdisk/115.json）。
-            boolean logged =
-                    (QuarkQrLogin.PROVIDER.equals(key) && QuarkQrLogin.loadSaved() != null)
-                            || (UcLogin.PROVIDER.equals(key) && UcLogin.loadSaved() != null)
-                            || (BaiduLogin.PROVIDER.equals(key) && BaiduLogin.loadSaved() != null)
-                            || (AliLogin.PROVIDER.equals(key) && AliLogin.loadSaved() != null)
-                            || (NetdiskWebLogin.PROVIDER_115.equals(key)
-                                    && a != null
-                                    && NetdiskWebLogin.load115(a.getFilesDir()) != null);
+            boolean logged = isLoggedIn(key);
             boolean nativeLogin =
                     QuarkQrLogin.PROVIDER.equals(key) || NetdiskWebLogin.supports(key);
             String label = drive[1] + (nativeLogin ? (logged ? " · 已登录" : " · 未登录") : "");
@@ -118,7 +119,31 @@ final class NetdiskScreen {
         a.body.addView(strip, new LinearLayout.LayoutParams(-1, -2));
     }
 
+    /**
+     * 五家登录态都是本机凭据文件说了算（UC 2026-11-26 起也有了自己的 uc.json；115 的凭据由
+     * {@link NetdiskWebLogin} 写 netdisk/115.json）。
+     */
+    private boolean isLoggedIn(String key) {
+        return (QuarkQrLogin.PROVIDER.equals(key) && QuarkQrLogin.loadSaved() != null)
+                || (UcLogin.PROVIDER.equals(key) && UcLogin.loadSaved() != null)
+                || (BaiduLogin.PROVIDER.equals(key) && BaiduLogin.loadSaved() != null)
+                || (AliLogin.PROVIDER.equals(key) && AliLogin.loadSaved() != null)
+                || (NetdiskWebLogin.PROVIDER_115.equals(key)
+                        && a != null
+                        && NetdiskWebLogin.load115(a.getFilesDir()) != null);
+    }
+
+    /**
+     * 点牌面：点别的盘 = 切到那个盘（{@link #switchDrive}），点当前盘 = 原来的登录入口。
+     *
+     * <p>这样“点哪个盘就显示哪个盘的内容”是一条直线，而登录仍在同一处：切过去之后牌面已经选中，
+     * 再点一次就是扫码/粘贴/授权那条老流程。
+     */
     private void onDrivePill(String key) {
+        if (!key.equals(driveKey)) {
+            switchDrive(key);
+            return;
+        }
         if (QuarkQrLogin.PROVIDER.equals(key)) {
             if (QuarkQrLogin.loadSaved() == null) {
                 QuarkLoginDialog.show(a, this::reloadSelf);
@@ -134,6 +159,15 @@ final class NetdiskScreen {
             return;
         }
         showLoginChoice(key);
+    }
+
+    /** Replaces the page with the same browser pointed at another drive, at that drive's root. */
+    private void switchDrive(final String key) {
+        final String dir = rootDirOf(key);
+        a.open(
+                new MainActivity.Screen(
+                        () -> new NetdiskScreen(a, key, dir, "").show()),
+                true);
     }
 
     /**
@@ -202,9 +236,13 @@ final class NetdiskScreen {
         a.toast("这家暂时只有扫码登录");
     }
 
+    /** Re-renders the same drive at the same folder; keeps the drive after a login dialog. */
     private void reloadSelf() {
         if (a.body != null) {
-            a.open(new MainActivity.Screen(() -> new NetdiskScreen(a).show()), true);
+            a.open(
+                    new MainActivity.Screen(
+                            () -> new NetdiskScreen(a, driveKey, dirFid, dirName).show()),
+                    true);
         }
     }
 
@@ -285,32 +323,19 @@ final class NetdiskScreen {
 
     // ------------------------------------------------------------------ grid
 
+    /**
+     * 每个盘一段自己的状态话；只有真正接了原生浏览的盘（夸克、百度）才去列目录。没接的盘
+     * 在这里就 return，格子区永远是空的 —— 不会残留上一个盘的文件。
+     */
     private void load() {
         final int mine = ++generation;
         gridHost.removeAllViews();
-        if (BaiduLogin.PROVIDER.equals(driveKey)) {
-            // 百度的原生浏览不在本次范围：这里只把登录状态与去哪播说清楚，不摆一个死格子。
-            BaiduLogin.Credential saved = BaiduLogin.loadSaved();
-            String authorize = BaiduOAuth.describeShort();
-            status.setText(
-                    saved == null
-                            ? "百度网盘还没登录：点上面的「百度」牌面选「扫码登录」，用手机百度网盘 App 扫电视上的二维码。"
-                                    + "登录之后再做一次「开放平台授权（取直链）」，播放才会先转存到 /MarcoMovie 再播。"
-                                    + "原生浏览还没做。"
-                            : "百度网盘已登录（"
-                                    + BaiduLogin.describe(saved)
-                                    + "）· "
-                                    + authorize
-                                    + "。播放走详情页的「百度分享」线路：先转存到网盘的 /MarcoMovie、播前清理旧副本，"
-                                    + "再用自己文件的直链播放；没有授权时退回网页直链。原生浏览还没做。");
-            return;
-        }
         if (AliLogin.PROVIDER.equals(driveKey)) {
             // 阿里的原生浏览不在本次范围：这里只把登录状态与去哪播说清楚，不摆一个死格子。
             AliLogin.Credential saved = AliLogin.loadSaved();
             status.setText(
                     saved == null
-                            ? "阿里云盘还没登录：点上面的「阿里」牌面选「扫码登录」，用手机阿里云盘 App 扫电视上的二维码。这次只做登录与分享线路，原生浏览还没做。"
+                            ? "阿里云盘还没登录：点上面已选中的「阿里」牌面，再选「扫码登录」，用手机阿里云盘 App 扫电视上的二维码。这次只做登录与分享线路，原生浏览还没做。"
                             : "阿里云盘已登录（"
                                     + AliLogin.describe(saved)
                                     + "）。这次只做登录与分享线路：播放走详情页的「阿里分享」线路，原生浏览还没做。");
@@ -321,7 +346,7 @@ final class NetdiskScreen {
             UcLogin.Credential saved = UcLogin.loadSaved();
             status.setText(
                     saved == null
-                            ? "UC 网盘还没登录：点上面的「UC」牌面选「扫码登录」，用手机 UC 扫码。这次只做登录与分享线路，原生浏览还没做。"
+                            ? "UC 网盘还没登录：点上面已选中的「UC」牌面，再选「扫码登录」，用手机 UC 扫码。这次只做登录与分享线路，原生浏览还没做。"
                             : "UC 网盘已登录（"
                                     + UcLogin.describe(saved)
                                     + "）。这次只做登录与分享线路：播放走详情页的「UC」线路，游客接口被限流时自动改用账号 Cookie；原生浏览还没做。");
@@ -332,10 +357,21 @@ final class NetdiskScreen {
             NetdiskWebLogin.Cookie115 saved = NetdiskWebLogin.load115(a.getFilesDir());
             status.setText(
                     saved == null
-                            ? "115 网盘还没登录：点上面的「115」牌面选「扫码登录」，用手机 115 App 扫电视上的二维码。这次只存凭据，原生浏览与播放都还没接。"
+                            ? "115 网盘还没登录：点上面已选中的「115」牌面，再选「扫码登录」，用手机 115 App 扫电视上的二维码。这次只存凭据，原生浏览与播放都还没接。"
                             : "115 网盘已登录（"
                                     + NetdiskWebLogin.describe115(saved)
                                     + "）。这次只存凭据，原生浏览与播放都还没接。");
+            return;
+        }
+        if (BaiduLogin.PROVIDER.equals(driveKey)) {
+            BaiduLogin.Credential saved = BaiduLogin.loadSaved();
+            if (saved == null) {
+                status.setText(
+                        "百度网盘还没登录：点上面已选中的「百度」牌面，再选「扫码登录」，用手机百度网盘 App 扫电视上的二维码。"
+                                + "登录之后就能在这里浏览自己的文件、直接点视频播放。");
+                return;
+            }
+            listAsync(new BaiduDriveClient(saved), mine);
             return;
         }
         if (!QuarkQrLogin.PROVIDER.equals(driveKey)) {
@@ -348,23 +384,27 @@ final class NetdiskScreen {
             renderLoginCard();
             return;
         }
+        listAsync(new QuarkDriveClient(credential.cookie), mine);
+    }
+
+    /** Lists one directory off the UI thread and hands the rows (or the error) to the grid. */
+    private void listAsync(final NetdiskDrive drive, final int mine) {
         status.setText("正在读取…");
-        final QuarkDriveClient client = new QuarkDriveClient(credential.cookie);
         WORKER.execute(
                 () -> {
-                    List<QuarkDriveClient.Entry> rows = null;
+                    List<NetdiskEntry> rows = null;
                     String error = null;
                     try {
-                        rows = client.list(dirFid);
+                        rows = drive.list(dirFid);
                     } catch (Throwable t) {
                         error = t.getMessage() == null ? "读取失败" : t.getMessage();
                     }
-                    final List<QuarkDriveClient.Entry> done = rows;
+                    final List<NetdiskEntry> done = rows;
                     final String err = error;
                     a.ui.post(
                             () -> {
                                 if (generation != mine) return;
-                                renderGrid(client, done, err);
+                                renderGrid(drive, done, err);
                             });
                 });
     }
@@ -397,8 +437,7 @@ final class NetdiskScreen {
         gridHost.addView(wrap, new LinearLayout.LayoutParams(-1, -2));
     }
 
-    private void renderGrid(
-            QuarkDriveClient client, List<QuarkDriveClient.Entry> rows, String error) {
+    private void renderGrid(NetdiskDrive drive, List<NetdiskEntry> rows, String error) {
         gridHost.removeAllViews();
         if (error != null) {
             status.setText(error);
@@ -408,12 +447,12 @@ final class NetdiskScreen {
             status.setText("这个文件夹是空的");
             return;
         }
-        List<QuarkDriveClient.Entry> folders = new ArrayList<>();
-        List<QuarkDriveClient.Entry> videos = new ArrayList<>();
-        List<QuarkDriveClient.Entry> others = new ArrayList<>();
-        for (QuarkDriveClient.Entry row : rows) {
+        List<NetdiskEntry> folders = new ArrayList<>();
+        List<NetdiskEntry> videos = new ArrayList<>();
+        List<NetdiskEntry> others = new ArrayList<>();
+        for (NetdiskEntry row : rows) {
             if (row.dir) folders.add(row);
-            else if (client.isVideoName(row.name)) videos.add(row);
+            else if (NetdiskEntry.isVideoName(row.name)) videos.add(row);
             else others.add(row);
         }
         status.setText(
@@ -425,7 +464,7 @@ final class NetdiskScreen {
         int cardW = Math.max(a.dp(150), (a.windowWidth() - a.dp(96) - gap * (cols - 1)) / cols);
 
         View first = null;
-        List<QuarkDriveClient.Entry> all = new ArrayList<>();
+        List<NetdiskEntry> all = new ArrayList<>();
         all.addAll(folders);
         all.addAll(videos);
         all.addAll(others);
@@ -439,9 +478,9 @@ final class NetdiskScreen {
                 rlp.bottomMargin = a.dp(16);
                 gridHost.addView(row, rlp);
             }
-            QuarkDriveClient.Entry entry = all.get(i);
-            boolean playable = !entry.dir && client.isVideoName(entry.name);
-            View card = buildCard(entry, playable, cardW);
+            NetdiskEntry entry = all.get(i);
+            boolean playable = !entry.dir && NetdiskEntry.isVideoName(entry.name);
+            View card = buildCard(drive, entry, playable, cardW);
             if (first == null) first = card;
             LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, -2, 1f);
             if (i % cols < cols - 1) clp.rightMargin = gap;
@@ -456,7 +495,8 @@ final class NetdiskScreen {
         if (first != null) a.tvInitialFocus = first;
     }
 
-    private View buildCard(QuarkDriveClient.Entry entry, boolean playable, int width) {
+    private View buildCard(
+            final NetdiskDrive drive, final NetdiskEntry entry, boolean playable, int width) {
         LinearLayout card = a.vertical();
         card.setClipChildren(false);
         LinearLayout face = a.vertical();
@@ -491,9 +531,9 @@ final class NetdiskScreen {
                                                         .show()),
                                 true);
                     } else if (playable) {
-                        play(entry);
+                        play(drive, entry);
                     } else {
-                        a.toast("这个文件不是视频，暂时只能在夸克 App 里打开");
+                        a.toast("这个文件不是视频，暂时只能在网盘 App 里打开");
                     }
                 });
         card.setOnFocusChangeListener(
@@ -512,10 +552,10 @@ final class NetdiskScreen {
         return card;
     }
 
-    private void play(final QuarkDriveClient.Entry entry) {
+    private void play(final NetdiskDrive drive, final NetdiskEntry entry) {
         // -1: no manual tier choice. NetdiskQualityGuard then skips tiers this device already
         // failed to decode (4K first unless the device memory says otherwise).
-        play(entry, -1);
+        play(drive, entry, -1);
     }
 
     /**
@@ -525,20 +565,14 @@ final class NetdiskScreen {
      *     choice (6) wins over the guard's device memory; -1 means automatic. The browser has no
      *     quality picker yet, so today only -1 is passed.
      */
-    private void play(final QuarkDriveClient.Entry entry, final int manualRank) {
-        QuarkQrLogin.Credential credential = QuarkQrLogin.loadSaved();
-        if (credential == null) {
-            a.toast("先登录夸克");
-            return;
-        }
+    private void play(final NetdiskDrive drive, final NetdiskEntry entry, final int manualRank) {
         // A decision queued for the previous netdisk playback must not reopen it after this click.
         NetdiskQualityGuard.disarm();
         a.toast("正在取播放地址…");
-        final QuarkDriveClient client = new QuarkDriveClient(credential.cookie);
         final int startRank = NetdiskQualityGuard.preferredStartRank(a, manualRank);
         // Only an automatic start may relax upward when the remembered memory leaves no tier;
         // a manual pick must not silently turn 2K into 4K.
-        startNetdiskPlayback(entry, credential.cookie, client, startRank, 0, 0, manualRank < 0);
+        startNetdiskPlayback(drive, entry, startRank, 0, 0, manualRank < 0);
     }
 
     /**
@@ -552,38 +586,36 @@ final class NetdiskScreen {
      *     {@code requestedRank} exists, play the only offered tier instead of failing
      */
     private void startNetdiskPlayback(
-            final QuarkDriveClient.Entry entry,
-            final String cookie,
-            final QuarkDriveClient client,
+            final NetdiskDrive drive,
+            final NetdiskEntry entry,
             final int requestedRank,
             final int downgrades,
             final int fromRank,
             final boolean relaxMissingTier) {
         WORKER.execute(
                 () -> {
-                    QuarkDriveClient.PlayVariant variant = null;
+                    NetdiskDrive.Play play = null;
                     String error = null;
                     try {
-                        variant = client.playVariant(entry.fid, requestedRank);
-                        if (variant == null
+                        play = drive.play(entry.fid, requestedRank);
+                        if (play == null
                                 && relaxMissingTier
                                 && requestedRank < NetdiskQualityGuard.RANK_4K) {
                             // The remembered tier left no lower variant (the file only has 4K), so
                             // play what exists instead of refusing to play. The guard re-reads the
                             // real rank and only reports later misses; it does not loop.
-                            variant = client.playVariant(entry.fid, NetdiskQualityGuard.RANK_4K);
+                            play = drive.play(entry.fid, NetdiskQualityGuard.RANK_4K);
                         }
                     } catch (Throwable t) {
                         error = t.getMessage() == null ? "取播放地址失败" : t.getMessage();
                     }
-                    final QuarkDriveClient.PlayVariant done = variant;
+                    final NetdiskDrive.Play done = play;
                     final String err = error;
                     a.ui.post(
                             () ->
                                     onPlaybackResolved(
+                                            drive,
                                             entry,
-                                            cookie,
-                                            client,
                                             done,
                                             err,
                                             downgrades,
@@ -594,10 +626,9 @@ final class NetdiskScreen {
 
     /** Runs on the UI thread after the URL (or its error) is known. */
     private void onPlaybackResolved(
-            final QuarkDriveClient.Entry entry,
-            final String cookie,
-            final QuarkDriveClient client,
-            final QuarkDriveClient.PlayVariant variant,
+            final NetdiskDrive drive,
+            final NetdiskEntry entry,
+            final NetdiskDrive.Play play,
             final String error,
             final int downgrades,
             final int fromRank,
@@ -608,26 +639,29 @@ final class NetdiskScreen {
             else a.notice(error);
             return;
         }
-        if (variant == null || variant.url == null || variant.url.isEmpty()) {
+        if (play == null || play.url == null || play.url.isEmpty()) {
             if (fromRank > 0) a.toast("没有更低一档可切，继续用当前画质");
             else if (relaxMissingTier) a.notice("没拿到播放地址");
             else a.toast("这个文件没有所选画质，换一个档位试试");
             return;
         }
-        if (fromRank > 0 && (variant.rank <= 0 || variant.rank >= fromRank)) {
+        if (fromRank > 0 && (play.rank <= 0 || play.rank >= fromRank)) {
             // The service has no lower tier for this file: keep playing the current one.
             a.toast("没有更低一档可切，继续用当前画质");
             return;
         }
         Cms.Site site = new Cms.Site();
         site.key = "netdisk-native";
-        site.name = "我的夸克网盘";
+        site.name = "我的" + drive.label() + "网盘";
         Cms.Video video = new Cms.Video();
-        video.id = entry.fid;
+        // Drive-keyed watch-history id: 夸克 and 百度 can have the same bare file id, and a shared
+        // id would make one overwrite the other's progress. The browser's legacy fallback in
+        // PlaybackController.lookupSavedBookmark still reads pre-2026-11-27 bare-id rows.
+        video.id = driveKey + ":" + entry.fid;
         video.title = entry.name;
         Cms.Episode episode = new Cms.Episode();
         episode.name = entry.name;
-        episode.url = variant.url;
+        episode.url = play.url;
         try {
             episode.media.put("_noCache", true);
             // MPV handles high-bitrate 4K on this box far better than the Media3/MediaCodec path;
@@ -642,29 +676,49 @@ final class NetdiskScreen {
         } catch (org.json.JSONException ignored) {
             // org.json's checked exception; the flag is optional.
         }
-        episode.headers.put("Cookie", cookie);
-        episode.headers.put("User-Agent", "Mozilla/5.0");
-        episode.headers.put("Referer", "https://pan.quark.cn/");
+        // The drive hands back the headers its direct URL actually requires: 夸克 wants its cookie
+        // and the browser UA, 百度 wants the account cookie and UA "pan.baidu.com" (its landing
+        // host answers 31362/31045 otherwise). The player forwards these on every request.
+        if (!play.cookie.isEmpty()) episode.headers.put("Cookie", play.cookie);
+        if (!play.userAgent.isEmpty()) episode.headers.put("User-Agent", play.userAgent);
+        if (!play.referer.isEmpty()) episode.headers.put("Referer", play.referer);
+        // A one-episode line for this file: PlaybackController only records watch history when both
+        // activeLine and activeEpisode are set, and the 网盘 browser is not a detail page that would
+        // set them. Line/episode names are what the history row shows ("百度网盘 · 08.mp4").
+        Cms.Line line = new Cms.Line();
+        line.name = drive.label() + "网盘";
+        line.episodes.add(episode);
+        video.lines.add(line);
+        a.activeLine = line;
+        a.activeEpisode = episode;
+        AppLog.w(
+                "NetdiskScreen",
+                "native episode ready name="
+                        + entry.name
+                        + " drive="
+                        + driveKey
+                        + " rank="
+                        + play.rank);
         a.openPlayer(site, video, episode);
-        if (fromRank > 0 && variant.rank > 0) {
+        if (fromRank > 0 && play.rank > 0) {
             a.toast(
                     "设备跑不动"
                             + NetdiskQualityGuard.labelOfRank(fromRank)
                             + "，已切换到"
-                            + NetdiskQualityGuard.labelOfRank(variant.rank));
+                            + NetdiskQualityGuard.labelOfRank(play.rank));
         }
         NetdiskQualityGuard.arm(
                 a,
                 episode,
-                variant.rank,
-                variant.resolution,
+                play.rank,
+                play.resolution,
                 downgrades,
                 new NetdiskQualityGuard.Hooks() {
                     @Override
                     public void restart(int maxRank, int nextDowngrades, int from) {
                         if (a.isFinishing()) return;
                         startNetdiskPlayback(
-                                entry, cookie, client, maxRank, nextDowngrades, from, false);
+                                drive, entry, maxRank, nextDowngrades, from, false);
                     }
 
                     @Override
@@ -672,6 +726,19 @@ final class NetdiskScreen {
                         a.toast(message);
                     }
                 });
+    }
+
+    /**
+     * The bare file id that watch history used before ids were prefixed with the drive key
+     * (2026-11-27). Only 夸克 rows predate the change; anything else returns "" so no cross-drive
+     * id is ever invented.
+     */
+    static String legacyHistoryId(String bookmarkId) {
+        String id = bookmarkId == null ? "" : bookmarkId;
+        if (id.startsWith(HISTORY_PREFIX_QUARK)) {
+            return id.substring(HISTORY_PREFIX_QUARK.length());
+        }
+        return "";
     }
 
     private static String size(long bytes) {

@@ -264,6 +264,67 @@ final class BaiduShareResolver {
         return null;
     }
 
+    // ------------------------------------------------- 网盘中心：自己盘里的文件（原生浏览）
+
+    /**
+     * 一次「把**自己盘里**的文件换成可播直链」的结果，供 {@link BaiduDriveClient} 用。直链落地在
+     * {@code *.baidupcs.com}，播放时**必须**带 {@link #ua}（{@code pan.baidu.com}）与 {@link #cookie}，
+     * 这两项由这里一起交出去，调用方不用再猜。
+     */
+    static final class OwnFile {
+        final String url;
+        final String cookie;
+        final String ua;
+        final String referer;
+        final String error;
+
+        OwnFile(String url, String cookie, String ua, String referer, String error) {
+            this.url = text(url).trim();
+            this.cookie = text(cookie).trim();
+            this.ua = text(ua).trim();
+            this.referer = text(referer).trim();
+            this.error = text(error).trim();
+        }
+
+        boolean ok() {
+            return !url.isEmpty();
+        }
+
+        static OwnFile failed(String reason) {
+            return new OwnFile("", "", UA_DLINK, REFERER, reason);
+        }
+    }
+
+    /**
+     * 网盘中心「百度」牌面的入口：把**自己网盘里**一个 {@code fs_id} 换成可播直链。
+     *
+     * <p>只复用本类已有的 {@link #filemetas}（{@code /api/filemetas?dlink=1&fsids=[…]} + 跟掉 302），
+     * 不复制实现、也不走分享那三条路：这条入口没有 share id，只有 fs_id。
+     */
+    static OwnFile ownFileDlink(BaiduLogin.Credential credential, String fsId) {
+        String id = text(fsId).trim();
+        if (id.isEmpty()) return OwnFile.failed("文件 id 为空，无法获取播放地址");
+        if (credential == null || text(credential.cookie).trim().isEmpty()) {
+            return OwnFile.failed("百度网盘还没登录，请先扫码登录");
+        }
+        Attempt attempt = filemetas(credential, "", id);
+        if (!attempt.ok()) {
+            AppLog.w(TAG, "own file dlink failed fs_id=" + id + "：" + attempt.describe());
+            return OwnFile.failed(attempt.describe());
+        }
+        return new OwnFile(attempt.dlink, attempt.cookie, attempt.ua, REFERER, "");
+    }
+
+    /**
+     * {@code bdstoken}：{@code /api/list} 这类网页端读操作也要它（2026-11-26 实测）。失败返回空串，
+     * 原因已由 {@link #bdstokenOf} 记进日志。
+     */
+    static String ownBdstoken(BaiduLogin.Credential credential) {
+        TemplateVars vars = bdstokenOf(credential);
+        if (vars.bdstoken.isEmpty()) AppLog.w(TAG, "bdstoken unavailable: " + vars.reason);
+        return vars.bdstoken;
+    }
+
     /**
      * 一次「取直链」的完整结果。成功时 {@code dlink} 非空；失败时留着 HTTP 状态、errno 与百度
      * 自己那句话（{@code show_msg} / {@code errmsg}），由 {@link #describe()} 拼成一段原因，
@@ -974,10 +1035,19 @@ final class BaiduShareResolver {
      * 302 跟掉，把落地 URL 直接交给播放器 —— 播放器跟不跟跳转、跳转后还带不带 Cookie 都不再赌。
      */
     private static Attempt filemetas(BaiduLogin.Credential credential, Ident ident, String fsId) {
+        return filemetas(credential, ident == null ? "" : ident.sekey, fsId);
+    }
+
+    /**
+     * 同上，但直接给 {@code sekey}：网盘中心浏览自己的盘没有分享坐标，只需要账号 Cookie
+     * （{@code sekey} 为空）。
+     */
+    private static Attempt filemetas(
+            BaiduLogin.Credential credential, String sekey, String fsId) {
         Attempt out = new Attempt();
         out.attempted = true;
         out.ua = UA_DLINK;
-        out.cookie = accountCookie(credential, ident.sekey);
+        out.cookie = accountCookie(credential, sekey);
         String url =
                 "https://pan.baidu.com/api/filemetas?dlink=1&fsids="
                         + encodePart("[" + fsId + "]")

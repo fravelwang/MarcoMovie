@@ -521,23 +521,62 @@ final class PlaybackController {
                 || ep == null) {
             return null;
         }
-        int epIdx = line != null ? line.episodes.indexOf(ep) : -1;
-        for (WatchHistory.Entry entry : a.watchHistory()) {
-            if (s.key.equals(entry.site) && v.id.equals(entry.id)) {
-                boolean sameName = ep.name != null && ep.name.equals(entry.episode);
-                boolean sameIndex =
-                        line != null
-                                && line.name != null
-                                && line.name.equals(entry.line)
-                                && epIdx >= 0
-                                && epIdx == entry.index;
-                if (sameName || sameIndex) {
-                    return entry;
-                }
-                break;
+        WatchHistory.Entry found = matchBookmark(a.watchHistory(), s.key, v.id, line, ep);
+        if (found != null) return found;
+        // 网盘中心 native playback used the bare file id before 2026-11-27; ids now carry the drive
+        // key (quark:/baidu:). Read the old row so existing progress is not lost, then rewrite its
+        // key once so the same file does not end up with two rows.
+        String legacyId = NetdiskScreen.legacyHistoryId(v.id);
+        if (!legacyId.isEmpty()) {
+            WatchHistory.Entry legacy = matchBookmark(a.watchHistory(), s.key, legacyId, line, ep);
+            if (legacy != null) {
+                migrateBookmarkKey(a, s.key, legacy, v.id);
+                return legacy;
             }
         }
         return null;
+    }
+
+    /** The one entry for {@code siteKey + id} whose episode still matches this line/episode. */
+    private static WatchHistory.Entry matchBookmark(
+            List<WatchHistory.Entry> history,
+            String siteKey,
+            String bookmarkId,
+            Cms.Line line,
+            Cms.Episode ep) {
+        if (history == null || siteKey == null || bookmarkId == null) return null;
+        int epIdx = line != null ? line.episodes.indexOf(ep) : -1;
+        for (WatchHistory.Entry entry : history) {
+            if (!siteKey.equals(entry.site) || !bookmarkId.equals(entry.id)) continue;
+            boolean sameName = ep.name != null && ep.name.equals(entry.episode);
+            boolean sameIndex =
+                    line != null
+                            && line.name != null
+                            && line.name.equals(entry.line)
+                            && epIdx >= 0
+                            && epIdx == entry.index;
+            return sameName || sameIndex ? entry : null;
+        }
+        return null;
+    }
+
+    /**
+     * Rewrites one legacy native-netdisk history key to the drive-prefixed one. The single storage
+     * executor runs the upsert before the remove, so the intermediate state has both rows and the
+     * final state exactly one; nothing else in the history is touched.
+     */
+    private static void migrateBookmarkKey(
+            MainActivity a, String siteKey, WatchHistory.Entry legacy, String newId) {
+        if (a == null || legacy == null || newId == null || newId.isEmpty()) return;
+        final String oldKey = legacy.site + "\n" + legacy.id;
+        WatchHistory.Entry migrated = WatchHistory.cloneEntry(legacy);
+        migrated.id = newId;
+        final WatchHistory.Persistence persistence = a.historyPersistence();
+        WatchHistory.enqueueUpsert(persistence, migrated);
+        WatchHistory.enqueueRemove(persistence, oldKey, null);
+        AppLog.w(
+                "PlaybackController",
+                "history key migrated site=" + siteKey + " old_id=" + legacy.id + " new_id=" + newId);
     }
 
     private static Cms.Site findPushSite(MainActivity a) {

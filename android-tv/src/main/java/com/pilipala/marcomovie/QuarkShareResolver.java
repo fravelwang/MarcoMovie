@@ -399,7 +399,7 @@ final class QuarkShareResolver {
      */
     private static String ensureSaveDir(QuarkDriveClient client, String cookie) {
         try {
-            for (QuarkDriveClient.Entry entry : client.list(ROOT_FID)) {
+            for (NetdiskEntry entry : client.list(ROOT_FID)) {
                 if (entry.dir && SAVE_DIR_NAME.equals(text(entry.name).trim())) {
                     AppLog.w(TAG, "save dir hit: " + SAVE_DIR_NAME + " fid=" + entry.fid);
                     return entry.fid;
@@ -478,7 +478,7 @@ final class QuarkShareResolver {
         for (int page = 0; page < 8; page++) {
             List<String> fids = new ArrayList<>();
             try {
-                for (QuarkDriveClient.Entry entry : client.list(saveDirFid)) {
+                for (NetdiskEntry entry : client.list(saveDirFid)) {
                     if (entry.dir) continue;
                     if (!fids.contains(entry.fid)) fids.add(entry.fid);
                 }
@@ -694,7 +694,7 @@ final class QuarkShareResolver {
         List<String> looked = new ArrayList<>();
         if (!hit.name.isEmpty()) {
             try {
-                for (QuarkDriveClient.Entry entry : client.search(hit.name)) {
+                for (NetdiskEntry entry : client.search(hit.name)) {
                     if (!entry.dir && entry.size == ident.size) {
                         looked.add(entry.fid);
                         break;
@@ -706,7 +706,7 @@ final class QuarkShareResolver {
         }
         if (looked.isEmpty()) {
             try {
-                for (QuarkDriveClient.Entry entry : client.list(saveDirFid)) {
+                for (NetdiskEntry entry : client.list(saveDirFid)) {
                     if (!entry.dir && entry.size == ident.size) {
                         looked.add(entry.fid);
                         break;

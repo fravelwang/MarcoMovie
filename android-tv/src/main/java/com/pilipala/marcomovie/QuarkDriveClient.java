@@ -36,7 +36,7 @@ import java.util.Locale;
  * dead. The direct link that {@link #directUrl} returns is meant to be handed to the player
  * verbatim, together with the same cookie (it also supports HTTP Range requests).
  */
-final class QuarkDriveClient {
+final class QuarkDriveClient implements NetdiskDrive {
 
     /** Only the cookie matters for the PC endpoints; {@code driveSt} is not used here. */
     private static final String UA = "Mozilla/5.0";
@@ -56,29 +56,6 @@ final class QuarkDriveClient {
     private static final String SORT = "file_type:asc,file_name:asc";
 
     private static final String LOGIN_EXPIRED = "夸克登录已失效，请重新扫码";
-
-    /** Extensions {@link #isVideoName} accepts, matched case-insensitively against the tail. */
-    private static final String[] VIDEO_SUFFIXES = {
-        ".mp4", ".mkv", ".ts", ".mov", ".avi", ".flv", ".wmv", ".m4v", ".webm", ".rmvb"
-    };
-
-    /**
-     * One directory entry or search hit. {@code dir} comes from the API's {@code file_type}:
-     * 0 = directory, 1 = file (any other value is treated as a file).
-     */
-    static final class Entry {
-        final String fid;
-        final String name;
-        final boolean dir;
-        final long size;
-
-        Entry(String fid, String name, boolean dir, long size) {
-            this.fid = fid;
-            this.name = name;
-            this.dir = dir;
-            this.size = size;
-        }
-    }
 
     /**
      * One playable transcoded tier. {@code rank} uses the same scale as
@@ -123,6 +100,28 @@ final class QuarkDriveClient {
         return new QuarkDriveClient(credential.cookie);
     }
 
+    @Override
+    public String label() {
+        return "夸克";
+    }
+
+    @Override
+    public String rootDir() {
+        return "0";
+    }
+
+    /**
+     * {@link NetdiskDrive#play(String, int)}: the adaptive tier pick plus the cookie and headers a
+     * 夸克 direct URL needs. Same {@link #playVariant} logic the quality guard and the browser used
+     * before the drive interface existed, so what the grid renders and the player opens is unchanged.
+     */
+    @Override
+    public Play play(String fileId, int maxRank) throws IOException {
+        PlayVariant variant = playVariant(fileId, maxRank);
+        if (variant == null) return null;
+        return new Play(variant.url, variant.resolution, variant.rank, cookie, UA, REFERER);
+    }
+
     /**
      * Lists one directory. A null or empty {@code dirFid} means the root ({@code "0"}).
      *
@@ -131,7 +130,8 @@ final class QuarkDriveClient {
      * dropped; {@link #lastTotal()} still reports the server-side {@code metadata._total} so the UI
      * can say "showing the first 40".
      */
-    List<Entry> list(String dirFid) throws IOException {
+    @Override
+    public List<NetdiskEntry> list(String dirFid) throws IOException {
         String fid = dirFid == null || dirFid.trim().isEmpty() ? "0" : dirFid.trim();
         String url =
                 BASE
@@ -149,7 +149,7 @@ final class QuarkDriveClient {
      * as {@link #list(String)}: one page of {@value #SEARCH_PAGE_SIZE} hits is returned, and
      * {@link #lastTotal()} reports {@code metadata._total}.
      */
-    List<Entry> search(String keyword) throws IOException {
+    List<NetdiskEntry> search(String keyword) throws IOException {
         String q = keyword == null ? "" : keyword.trim();
         if (q.isEmpty()) throw new IOException("搜索关键词不能为空");
         String url =
@@ -295,16 +295,6 @@ final class QuarkDriveClient {
         }
     }
 
-    /** True for the container formats the player can open; extension match, case-insensitive. */
-    boolean isVideoName(String name) {
-        if (name == null || name.isEmpty()) return false;
-        String lower = name.toLowerCase(Locale.ROOT);
-        for (String suffix : VIDEO_SUFFIXES) {
-            if (lower.endsWith(suffix)) return true;
-        }
-        return false;
-    }
-
     /** {@code metadata._total} of the last list/search call; -1 when the service did not report it. */
     int lastTotal() {
         return lastTotal;
@@ -393,9 +383,9 @@ final class QuarkDriveClient {
         }
     }
 
-    private List<Entry> parseEntries(JsonObject body) {
+    private List<NetdiskEntry> parseEntries(JsonObject body) {
         lastTotal = readTotal(body);
-        List<Entry> out = new ArrayList<>();
+        List<NetdiskEntry> out = new ArrayList<>();
         JsonElement data = body.get("data");
         if (data == null || !data.isJsonObject()) return out;
         JsonElement list = data.getAsJsonObject().get("list");
@@ -406,7 +396,7 @@ final class QuarkDriveClient {
             String fid = optString(obj, "fid");
             if (fid.isEmpty()) continue;
             out.add(
-                    new Entry(
+                    new NetdiskEntry(
                             fid,
                             optString(obj, "file_name"),
                             optInt(obj, "file_type", -1) == 0,
