@@ -480,13 +480,22 @@ final class TvV17DetailScreen {
                 synopsisMoreBtn.getVisibility() == View.VISIBLE
                         ? synopsisMoreBtn.getId()
                         : favorite.getId();
+        // A disabled play button is not focusable, so the row's down step has to follow what the
+        // page can still do: 切换来源 when the ledger knows another site, otherwise 返回 — never
+        // the sideways drift that used to land on 刮削/选集 and made play look unreachable.
+        int actionDownId =
+                play.isEnabled()
+                        ? play.getId()
+                        : (switchSourceBtn.getVisibility() == View.VISIBLE
+                                ? switchSourceBtn.getId()
+                                : back.getId());
         play.setNextFocusUpId(abovePlayId);
         episodesBtn.setNextFocusUpId(abovePlayId);
         seasonsBtn.setNextFocusUpId(abovePlayId);
         scrapeBtn.setNextFocusUpId(abovePlayId);
         switchSourceBtn.setNextFocusUpId(abovePlayId);
         synopsisMoreBtn.setNextFocusUpId(favorite.getId());
-        synopsisMoreBtn.setNextFocusDownId(play.isEnabled() ? play.getId() : View.NO_ID);
+        synopsisMoreBtn.setNextFocusDownId(actionDownId);
         favorite.setNextFocusUpId(back.getId());
         back.setNextFocusDownId(favorite.getId());
         if (synopsisMoreBtn.getVisibility() == View.VISIBLE) {
@@ -499,7 +508,7 @@ final class TvV17DetailScreen {
         // The source line sits between the title and the action row; it takes the first D-pad step.
         if (sourceRow != null && sourceRow.getVisibility() == View.VISIBLE) {
             sourceRow.setNextFocusUpId(favorite.getId());
-            sourceRow.setNextFocusDownId(play.isEnabled() ? play.getId() : View.NO_ID);
+            sourceRow.setNextFocusDownId(actionDownId);
             favorite.setNextFocusDownId(sourceRow.getId());
         }
     }
@@ -555,6 +564,15 @@ final class TvV17DetailScreen {
         sourceRow.setContentDescription(label + "，按确认键换站");
         sourceRow.setVisibility(View.VISIBLE);
         wireHeroFocus();
+    }
+
+    /**
+     * Re-reads the ledger's sites for the "来自 N 个站点" row without adopting a new default. The
+     * curated page uses it when the match budget ran out: the sites it already matched stay
+     * reachable as 换站观看 entries even though nothing bound on this page.
+     */
+    void refreshKnownSourcesRow() {
+        refreshSourceRow();
     }
 
     /** Picker over the wall-known sites; choosing one reopens this title on that site. */
@@ -685,6 +703,31 @@ final class TvV17DetailScreen {
     }
 
     /**
+     * 换站探测已经派发、结果还没回来：播放按钮显示过渡文案（调用方给，{@code TvDetailHost} 常量），
+     * 按钮与集数按钮保持不可点 —— 这一刻点了也播不出来，但也不该显示「该来源暂无线路」那种死路文案。
+     */
+    void showSourceSwitchInProgress(String playLabel) {
+        showPlayDeadEnd(playLabel);
+    }
+
+    /**
+     * {@link #showSourceSwitchInProgress} 的反向操作：一轮探测全灭（一个候选都播不了）时，播放区
+     * 收回死路文案（调用方给，{@code TvDetailHost} 的 {@code NO_PLAYABLE_LINES_PLAY_LABEL}），
+     * 按钮仍然不可点、集数按钮仍然隐藏 —— 只是不再说"正在换源"，因为已经换不成了。
+     */
+    void clearSourceSwitchInProgress(String playLabel) {
+        showPlayDeadEnd(playLabel);
+    }
+
+    /** 两种"不可播"状态共用的按钮态：不可点、集数按钮隐藏，只换文案。 */
+    private void showPlayDeadEnd(String playLabel) {
+        play.setEnabled(false);
+        if (playLabel != null && !playLabel.trim().isEmpty()) play.setText(playLabel.trim());
+        episodesBtn.setEnabled(false);
+        episodesBtn.setVisibility(View.GONE);
+    }
+
+    /**
      * Patches the live detail screen in-place when async source detail / curated lookup finishes,
      * keeping the official backdrop and Douban enrichment completely intact with zero screen flash.
      */
@@ -701,10 +744,14 @@ final class TvV17DetailScreen {
         if (resolvedVideo != null) this.video = resolvedVideo;
         this.currentBookmark = bookmark;
 
-        boolean playable =
-                this.video != null && this.video.lines != null && !this.video.lines.isEmpty();
+        // 与宿主绑定处的判定同一个口径：一条线路全被 LineHealth 标坏时，这个来源对播放来说等
+        // 同于"没有线路"，按钮就不能再承诺能播（文案由宿主在换源分支里换成过渡态/死路文案）。
+        boolean playable = TvDetailHost.hasUsableLine(host, site, this.video);
         play.setEnabled(playable);
-        play.setText(playLabel != null && !playLabel.isEmpty() ? playLabel : "► 开始播放");
+        play.setText(
+                playable
+                        ? (playLabel != null && !playLabel.isEmpty() ? playLabel : "► 开始播放")
+                        : TvDetailHost.NO_PLAYABLE_LINES_PLAY_LABEL);
         episodesBtn.setEnabled(playable);
         episodesBtn.setVisibility(playable ? View.VISIBLE : View.GONE);
         if (episodesButtonLabel != null && !episodesButtonLabel.isEmpty()) {

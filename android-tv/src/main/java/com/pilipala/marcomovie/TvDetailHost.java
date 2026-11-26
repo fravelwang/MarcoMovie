@@ -11,12 +11,44 @@ import java.util.Objects;
 
 /** TV-only bridge to detail loading, curated source resolution, favorites, and bookmark playback. */
 final class TvDetailHost {
-    static final int CURATED_MAX_SOURCES = 4;
+    static final int CURATED_MAX_SOURCES = 8;
     static final int CURATED_MAX_CONCURRENCY = 1;
+
     /** A detail that has not bound its lines after this long gets the slow-source hint. */
     static final long SLOW_SOURCE_HINT_MS = 6000L;
+
     /** Appended under the loading line; the loader itself keeps running. */
     static final String SLOW_SOURCE_HINT = "当前源较慢，可按「切换来源」换一个";
+
+    /**
+     * 网盘默认源过了这么久还没落地，才值得提前探其它候选：比 {@link #SLOW_SOURCE_HINT_MS} 宽得多，
+     * 让 8–12 秒内答完的原盘/高码率网盘站不被换掉，只救那种几十秒的（实测 31 秒）。
+     */
+    static final long PROBE_AHEAD_DELAY_MS = 15000L;
+
+    /**
+     * 换站探测已经派发、结果还没回来时的状态行文案。这一刻还没定"没有线路"，
+     * 写成死路文案就等于让用户先看到失败（实测那两秒的观感问题）。
+     */
+    static final String SWITCHING_SOURCE_STATUS = "正在尝试其他来源…";
+
+    /** 同一时刻播放按钮的文案：按钮保持不可点，焦点留在「切换来源」上。 */
+    static final String SWITCHING_SOURCE_PLAY_LABEL = "正在换源…";
+
+    /** 真的没有可播放线路（探测没派发，或派发了但一轮全灭）时的状态行。 */
+    static final String NO_PLAYABLE_LINES_STATUS = "该来源没有返回可播放线路";
+
+    /** 同一状态的播放按钮文案：按钮不可点。 */
+    static final String NO_PLAYABLE_LINES_PLAY_LABEL = "该来源暂无线路";
+
+    /**
+     * Hard budget for a curated cross-site match. Past this the page stops matching and says so:
+     * a show the ledger does not know yet must not leave the viewer on a spinning line.
+     */
+    static final long CURATED_MATCH_BUDGET_MS = 20000L;
+
+    /** Shown when the match budget ran out before any playable line bound. */
+    static final String CURATED_MATCH_BUDGET_MESSAGE = "20 秒内没匹配到可播放线路，可按「🔍 全站搜索」查找更多来源";
 
     interface Valid {
         boolean get();
@@ -31,6 +63,51 @@ final class TvDetailHost {
             this.site = site;
             this.listing = listing;
             this.score = score;
+        }
+    }
+
+    /**
+     * One-shot phase log for a curated cross-site match: how many candidates shared the budget,
+     * when the first one answered, when playable lines actually bound, how long the whole thing
+     * took, and how it ended (bound / budget / nosource). Numbers and phase names only — never a
+     * site address or a title, the same rule {@link DetailRequest} follows.
+     */
+    private static final class MatchTiming {
+        private final long started;
+        private final int candidates;
+        private long firstMatch = -1L;
+        private long firstPlayable = -1L;
+        private boolean logged;
+
+        MatchTiming(long started, int candidates) {
+            this.started = started;
+            this.candidates = candidates;
+        }
+
+        void firstMatch() {
+            if (firstMatch < 0) firstMatch = android.os.SystemClock.elapsedRealtime();
+        }
+
+        void firstPlayable() {
+            if (firstPlayable < 0) firstPlayable = android.os.SystemClock.elapsedRealtime();
+        }
+
+        void log(String outcome) {
+            if (logged) return;
+            logged = true;
+            long total = android.os.SystemClock.elapsedRealtime() - started;
+            android.util.Log.i(
+                    "MovieMatchTiming",
+                    "candidates="
+                            + candidates
+                            + " first_match_ms="
+                            + (firstMatch < 0 ? -1L : firstMatch - started)
+                            + " first_playable_ms="
+                            + (firstPlayable < 0 ? -1L : firstPlayable - started)
+                            + " total_ms="
+                            + total
+                            + " outcome="
+                            + outcome);
         }
     }
 
@@ -179,10 +256,33 @@ final class TvDetailHost {
         }
     }
 
-    private static boolean hasPlayableLines(Cms.Video video) {
+    /** Package-private so the detail screen judges playability by the exact same rule. */
+    static boolean hasPlayableLines(Cms.Video video) {
         if (video == null || video.lines == null) return false;
         for (Cms.Line line : video.lines) {
             if (line != null && line.episodes != null && !line.episodes.isEmpty()) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 至少一条线路既有剧集、又没有被 {@link LineHealth} 判成坏线路。
+     *
+     * <p>「有剧集」沿用 {@link #hasPlayableLines} 的口径；「坏」用线路弹窗里那条判定
+     * （{@link LineHealth#badge}，同一个站 + 同一个线路名）：只有弹窗会标出来的那几类
+     * （线路问题 / 解析问题 / 片源问题 / 设备问题）才算坏，没有探测记录的一律算可用 ——
+     * 未知不等于坏，否则每部新片第一次进详情都会被当成死路。
+     *
+     * <p>为什么要单独一个方法：一条线路全被标坏的站，对播放器来说等同于"这个站没有线路"，
+     * 详情绑定处必须走同一条自动换源，不能只看"有没有集"。
+     */
+    static boolean hasUsableLine(MainActivity a, Cms.Site site, Cms.Video video) {
+        if (!hasPlayableLines(video)) return false;
+        for (Cms.Line line : video.lines) {
+            if (line == null || line.episodes == null || line.episodes.isEmpty()) continue;
+            String badge = LineHealth.badge(a, site, line);
+            // 空徽标 = 没有探测记录（未知），算可用；同一个字面量口径见 SourcePreferences。
+            if (badge.isEmpty() || "可用".equals(badge)) return true;
         }
         return false;
     }
@@ -367,7 +467,17 @@ final class TvDetailHost {
 
                             public void play() {
                                 Cms.Video v = activeVideo[0];
-                                if (!valid.get() || !hasPlayableLines(v)) return;
+                                if (!valid.get()) return;
+                                if (!hasPlayableLines(v)) {
+                                    // The button is already disabled in this state; this only
+                                    // fires on the edge path, and it must say why nothing plays.
+                                    TvV17DetailScreen page = holder[0];
+                                    a.notice(
+                                            page != null && page.showKnownSourceSwitch()
+                                                    ? "当前来源没有可播放线路，请按「切换来源」换一个"
+                                                    : "当前来源没有可播放线路");
+                                    return;
+                                }
                                 WatchHistory.Entry bm = activeBookmark[0];
                                 int[] sel =
                                         initialSelection(
@@ -502,7 +612,9 @@ final class TvDetailHost {
                     activeVideo[0] = resolved;
                     WatchHistory.Entry bm = findBookmark(a, site, resolved);
                     activeBookmark[0] = bm;
-                    boolean playable = hasPlayableLines(resolved);
+                    // 判定的是「有可用的线路」：全是已知坏线路时与"这个站没线路"同一条路 ——
+                    // 先试同站网盘分享，再自动换源（SourceAutoSwitch 探到能播的就换过去）。
+                    boolean playable = hasUsableLine(a, site, resolved);
                     int[] sel =
                             playable
                                     ? initialSelection(
@@ -540,16 +652,51 @@ final class TvDetailHost {
                                     a, fallbackBm, site.key, "原片源暂无可播放线路", true);
                             return;
                         }
-                        ui.setLoadingStatus("该来源没有返回可播放线路");
-                        // Prefer the ledger picker when another site is known; global search is
-                        // the fallback for a title with a single known source.
-                        if (!ui.showKnownSourceSwitch()
-                                && resolved.title != null
-                                && !resolved.title.trim().isEmpty()) {
-                            ui.setSourceSwitchAction(
-                                    "🔍 换其他源", () -> a.openSearch(resolved.title.trim()));
+                        // 同站自救：网盘站详情页的下载区里挂着的夸克分享，本身就是线路。派发得出去就先
+                        // 等它（拿到就地重绑，见 rebindAfterShare）；拿不到（没链接 / 全失效 / 没登录
+                        // 夸克）再走下面的换源。这个先后顺序就是卡里定的"先试分享、再试自动换源"。
+                        // forceDefault 必须为 true：这个分支判成"没有可播线路"，但片子身上常常还挂着
+                        // 几条被标坏的线路（盒子上实测《两京十五日》虎斑：两条 UC、各 2 集），
+                        // initialSelection 会照样选中第一条；只有显式选分享线，「播放」才走它。
+                        if (NetdiskShareLines.buildAsync(
+                                a,
+                                site,
+                                resolved,
+                                valid,
+                                shareLines ->
+                                        rebindAfterShare(
+                                                a,
+                                                site,
+                                                resolved,
+                                                bm,
+                                                ui,
+                                                valid,
+                                                shareLines,
+                                                true),
+                                () -> recoverWithoutLines(a, site, resolved, ui, valid))) {
+                            return;
                         }
+                        recoverWithoutLines(a, site, resolved, ui, valid);
                     } else {
+                        // 有线路，但一条都不是夸克可解析 id（例如全是 UC 四段 id，本应用没有 UC 原生
+                        // 解析器，插件又报"PC端未登录或Cookie失效"）：页面里有夸克分享就补一条，并把
+                        // 它设为默认选中，让「播放」直接走它。正常片不会走到这里，也就不多打夸克接口。
+                        NetdiskShareLines.buildAsync(
+                                a,
+                                site,
+                                resolved,
+                                valid,
+                                shareLines ->
+                                        rebindAfterShare(
+                                                a,
+                                                site,
+                                                resolved,
+                                                bm,
+                                                ui,
+                                                valid,
+                                                shareLines,
+                                                true),
+                                null);
                         ui.setLoadingStatus("");
                         bindSeasonPopupDiscovery(a, site, resolved, ui);
                         View curFocus = a.getCurrentFocus();
@@ -581,7 +728,14 @@ final class TvDetailHost {
                                 a, fallbackBm, site.key, "原片源加载失败", true);
                         return;
                     }
-                    ui.setLoadingStatus(a.message(error));
+                    // The source failed outright: same probe-and-switch fallback as the empty-lines
+                    // path, dispatched before the error state. This is the branch that runs instead
+                    // of the curated matching page when the ledger knows another source.
+                    boolean switching =
+                            SourceAutoSwitch.switchIfDefaultHasNoLines(
+                                    a, site, activeVideo[0], valid, switchExhaustedHint(ui, valid));
+                    // 同样是"还可能有别的来源"：派发了探测就说正在尝试，别先报错。
+                    ui.setLoadingStatus(switching ? SWITCHING_SOURCE_STATUS : a.message(error));
                     String fallbackTitle =
                             initialVideo.title != null ? initialVideo.title.trim() : "";
                     // A known alternative is the fastest recovery from a dead source; global
@@ -608,8 +762,140 @@ final class TvDetailHost {
             }
         } else {
             scheduleSlowSourceHint(a, ui, detailSettled, valid);
+            // 默认源是网盘站时，若它 15 秒还没把详情拿回来（那 31 秒的网盘详情就是这样），就让其它候选
+            // 的探测在后台开始，探到能播的就换过去。15 秒内答完的网盘站（原盘/高码率）不受影响：
+            // 这条只是挂一个延迟检查，到点发现详情已落地就不探。没命中时失败分支里的
+            // switchIfDefaultHasNoLines 仍是兜底（同一条 60 秒记忆，不会重复探同一批站）。
+            SourceAutoSwitch.probeAhead(
+                    a, site, initialVideo, valid, detailSettled, switchExhaustedHint(ui, valid));
             a.loadDetail(site, listing.id, bindInPlace, onDetailError);
         }
+    }
+
+    /**
+     * 探测一轮全灭时的收尾：把「正在尝试其他来源…」换回死路文案（状态行 + 播放按钮）。
+     *
+     * <p>为什么必须有它：派发探测时页面已经切成过渡态，探完一个能播的都没有时没人收回那句话，
+     * 过渡态就成了新的死路。文案全部来自本类的常量，不在这里另写句子；页面已经换掉就不动。
+     */
+    private static Runnable switchExhaustedHint(TvV17DetailScreen ui, Valid valid) {
+        return () -> {
+            if (!valid.get()) return;
+            ui.setLoadingStatus(NO_PLAYABLE_LINES_STATUS);
+            ui.clearSourceSwitchInProgress(NO_PLAYABLE_LINES_PLAY_LABEL);
+        };
+    }
+
+    /**
+     * 「详情绑定了，但一条线路都没有」的收尾：先让自动换源去账本里探别的站，探得到就换，探不到就
+     * 停在这条死路上。
+     *
+     * <p>为什么单独成方法：同一条收尾有两处要走到 —— 进详情时本来就没线路（同步），以及「同站夸克
+     * 分享也没捞到」（{@link NetdiskShareLines} 的后台回调）。放在一处，两边的文案和判据不会走偏。
+     */
+    private static void recoverWithoutLines(
+            MainActivity a, Cms.Site site, Cms.Video resolved, TvV17DetailScreen ui, Valid valid) {
+        if (a == null || resolved == null || ui == null) return;
+        // The default source bound the title but has no episode: probe the ledger's other sites in
+        // the background and switch to the first one that really plays. Dispatched before the "no
+        // lines" state so that state is what stays when no candidate plays. For a title with two or
+        // more ledger sources this probe is also why the curated matching page is skipped
+        // (SourceAutoSwitch.prefersProbeOverCurated).
+        boolean switching =
+                SourceAutoSwitch.switchIfDefaultHasNoLines(
+                        a, site, resolved, valid, switchExhaustedHint(ui, valid));
+        // 探测派出去了就先说"正在尝试其他来源"，别让那两秒显示成"没有线路"；
+        // 没派出去（账本没有别的站）才照旧说没有可播放线路。
+        ui.setLoadingStatus(switching ? SWITCHING_SOURCE_STATUS : NO_PLAYABLE_LINES_STATUS);
+        if (switching) {
+            // 播放按钮同步换成"正在换源…"并保持不可点：点了也播不出来。
+            ui.showSourceSwitchInProgress(SWITCHING_SOURCE_PLAY_LABEL);
+        }
+        // Prefer the ledger picker when another site is known; global search is the fallback for a
+        // title with a single known source.
+        if (!ui.showKnownSourceSwitch()
+                && resolved.title != null
+                && !resolved.title.trim().isEmpty()) {
+            ui.setSourceSwitchAction("🔍 换其他源", () -> a.openSearch(resolved.title.trim()));
+        }
+    }
+
+    /**
+     * 把 {@link NetdiskShareLines} 捞到的「夸克分享」并进当前详情并就地重绑：同一个站、同一部片，只
+     * 多一条线路，不换站、不重建页面（海报、简介、来源行都不动）。
+     *
+     * <p>{@code forceDefault} 为真时顺手把页面的 {@link MainActivity.Screen#selection} 指到这条新线路
+     * 上：「播放」因此直接走夸克分享，而不是又去试那条播不了的 UC 线路。
+     *
+     * <p>两个调用点现在都传 true，理由是盒子上实测出来的：即便走的是「详情没有可播线路」那个分支，
+     * 片子身上也可能还挂着几条被 {@link LineHealth} 标坏的线路（《两京十五日》虎斑两条 UC、各 2 集），
+     * {@code initialSelection} 会照样选中第一条，于是分享线并进去了、选中的却还是播不了的那条。
+     * 参数留着，是因为"分享线要不要抢默认"是调用方的决定（卡 §6 情形 2 就是这么来的），不是恒真常量。
+     */
+    private static void rebindAfterShare(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video resolved,
+            WatchHistory.Entry bookmark,
+            TvV17DetailScreen ui,
+            Valid valid,
+            List<Cms.Line> shareLines,
+            boolean forceDefault) {
+        if (a == null || resolved == null || ui == null) return;
+        if (valid != null && !valid.get()) return;
+        int index = NetdiskShareLines.append(resolved, shareLines);
+        if (index < 0) return;
+        MainActivity.Screen screen = a.current;
+        EpisodeSelection selection = screen == null ? null : screen.selection;
+        Cms.Line shareLine = resolved.lines.get(index);
+        if (forceDefault && selection != null && shareLine != null) {
+            selection.select(
+                    shareLine.name, 0, shareLine.episodes == null ? 0 : shareLine.episodes.size());
+        }
+        int[] sel =
+                initialSelection(
+                        resolved,
+                        bookmark,
+                        a.prefs.getString(Prefs.PREFERRED_LINE, ""),
+                        selection == null ? new EpisodeSelection() : selection,
+                        a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false));
+        Cms.Line activeLine = resolved.lines.get(sel[0]);
+        Cms.Episode activeEpisode = resolveActiveEpisode(activeLine, bookmark);
+        String fileCaption = TvV17DetailScreen.formatEpisodeFileCaption(activeLine, activeEpisode);
+        ui.bindResolvedVideo(
+                site,
+                resolved,
+                bookmark,
+                Favorites.contains(
+                        a.prefs.getString(Prefs.FAVORITES, "[]"),
+                        site != null ? site.key : "",
+                        resolved.id),
+                bookmark == null ? "► 开始播放" : "► 继续播放",
+                buildEpisodesButtonLabel(resolved, sel[0]),
+                fileCaption,
+                formatHistoryCaption(a, bookmark, fileCaption));
+        ui.setLoadingStatus("");
+        bindSeasonPopupDiscovery(a, site, resolved, ui);
+        View curFocus = a.getCurrentFocus();
+        if (curFocus == null
+                || curFocus == ui.favorite
+                || curFocus == ui.back
+                || (screen != null
+                        && ("detail-favorite".equals(screen.focus)
+                                || "detail-play".equals(screen.focus)))) {
+            if (screen != null) screen.focus = "detail-play";
+            ui.play.requestFocus();
+        }
+        AppLog.w(
+                "Detail",
+                "share line bound: "
+                        + (shareLine == null ? "" : shareLine.name)
+                        + " episodes="
+                        + (shareLine == null || shareLine.episodes == null
+                                ? 0
+                                : shareLine.episodes.size())
+                        + " default="
+                        + forceDefault);
     }
 
     /**
@@ -639,8 +925,28 @@ final class TvDetailHost {
                 || curated.title.trim().isEmpty()) {
             return;
         }
+        List<Cms.Site> searchable = collectSearchableSites(a);
         List<Cms.Site> sources = collectUserSearchableSites(a);
         if (sources.isEmpty()) {
+            if (!searchable.isEmpty()) {
+                // 他有源，只是这些源都只给网盘分享：不能把「网盘站搜不出可播线路」说成「没配源」。
+                // 网盘站和采集站是两条不同的播放路径，所以给两条出路：去登录网盘，或换一份片源包。
+                new AppDialog.Builder(a)
+                        .setTitle("这个来源只提供网盘分享")
+                        .setMessage(
+                                "当前片源包里能搜到这部剧的都是网盘站，播放需要先登录对应网盘；也可以在「源」里切换含采集站的片源包。")
+                        .setPositiveButton(
+                                "去网盘登录",
+                                (d, w) ->
+                                        a.open(
+                                                new MainActivity.Screen(
+                                                        () -> new NetdiskScreen(a).show()),
+                                                true))
+                        .setNeutralButton("切换片源包", (d, w) -> SourceSwitchDialog.show(a))
+                        .setNegativeButton("取消", null)
+                        .show();
+                return;
+            }
             new AppDialog.Builder(a)
                     .setTitle("请先添加片源")
                     .setMessage(
@@ -738,12 +1044,31 @@ final class TvDetailHost {
         return true;
     }
 
-    private static List<Cms.Site> collectUserSearchableSites(MainActivity a) {
+    /**
+     * Every site the user configured that can be searched, netdisk ones included. {@link
+     * #collectUserSearchableSites} is this list minus the share-style sites, and the difference
+     * lets {@link #openCurated} tell "has no sources" apart from "has only netdisk sources".
+     */
+    private static List<Cms.Site> collectSearchableSites(MainActivity a) {
         List<Cms.Site> sources = new ArrayList<>();
         if (a == null || a.config == null || a.config.sites == null) return sources;
         for (Cms.Site site : SourcePreferences.prioritized(a, a.config.sites)) {
             if (site == null || !site.searchable || !a.available(site)) continue;
+            sources.add(site);
+        }
+        return sources;
+    }
+
+    private static List<Cms.Site> collectUserSearchableSites(MainActivity a) {
+        List<Cms.Site> sources = new ArrayList<>();
+        if (a == null) return sources;
+        for (Cms.Site site : collectSearchableSites(a)) {
             if (SourceController.isConfigOrNetdiskSite(site)) continue;
+            // Share-style sites ("…网盘") hand back a share id that still needs transferring, so
+            // they cannot answer a match with a stream that plays now: searching them only spends
+            // the budget to hear "no lines". They stay in 换站观看 and the automatic source switch;
+            // this list is only about what gets a slice of the match budget.
+            if (SourcePreferences.netdiskNamed(site)) continue;
             sources.add(site);
         }
         final String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");
@@ -757,6 +1082,8 @@ final class TvDetailHost {
     }
 
     private static void showCurated(MainActivity a, Cms.Video curated) {
+        // The match budget starts with the page itself, before anything is read or drawn.
+        final long started = android.os.SystemClock.elapsedRealtime();
         final String query = curated.title == null ? "" : curated.title.trim();
         a.renderPage(query.isEmpty() ? "热门推荐" : query, "");
         final MainActivity.Screen screen = a.current;
@@ -773,6 +1100,7 @@ final class TvDetailHost {
         final String selectedKey = a.prefs.getString(Prefs.SELECTED_SITE, "");
         final List<Cms.Site> targetSources =
                 selectCuratedSearchSources(allSources, selectedKey, CURATED_MAX_SOURCES);
+        final MatchTiming timing = new MatchTiming(started, targetSources.size());
 
         // One ledger read decides where this recommendation opens. A curated card carries only
         // metadata, so it can only open a source somebody already wrote down: the wall round, the
@@ -812,6 +1140,7 @@ final class TvDetailHost {
                         ? new ArrayList<>(targetSources.subList(1, targetSources.size()))
                         : Collections.emptyList();
         final boolean[] fallbackStarted = {false};
+        final boolean[] budgetExpired = {false};
         final Runnable[] startFallbackSearchRef = new Runnable[1];
 
         final TvV17DetailScreen[] holder = new TvV17DetailScreen[1];
@@ -838,9 +1167,14 @@ final class TvDetailHost {
                                 closeCoordinator.run();
                                 Cms.Video v = activeVideo[0];
                                 Cms.Site s = activeSite[0];
-                                if (!valid.get()
-                                        || TvCuratedHome.isCuratedSite(s)
-                                        || !hasPlayableLines(v)) {
+                                if (!valid.get() || TvCuratedHome.isCuratedSite(s)) return;
+                                if (!hasPlayableLines(v)) {
+                                    // Same backstop as the ledger page: no silent dead press.
+                                    TvV17DetailScreen page = holder[0];
+                                    a.notice(
+                                            page != null && page.showKnownSourceSwitch()
+                                                    ? "当前来源没有可播放线路，请按「切换来源」换一个"
+                                                    : "当前来源没有可播放线路");
                                     return;
                                 }
                                 playbackStarted[0] = true;
@@ -960,11 +1294,43 @@ final class TvDetailHost {
         screen.focus = "detail-switch-source";
         a.restore(screen);
 
+        // Hard budget for this match. Once it is spent the page stops searching and says so,
+        // instead of leaving the viewer on a spinning line for a show the ledger does not know. It
+        // only speaks while nothing has bound and no line fetch is in flight, so a slow source
+        // (the slow-source hint's job) is never cut off here. Sites matched so far stay in the
+        // ledger and in the 换站观看 list; only the search stops.
+        final Runnable checkBudget =
+                () -> {
+                    if (!valid.get()
+                            || detailBound[0]
+                            || detailLoading[0]
+                            || budgetExpired[0]
+                            || android.os.SystemClock.elapsedRealtime() - started
+                                    < CURATED_MATCH_BUDGET_MS) {
+                        return;
+                    }
+                    budgetExpired[0] = true;
+                    closeCoordinator.run();
+                    timing.log("budget");
+                    ui.refreshKnownSourcesRow();
+                    ui.play.setText("暂未匹配片源");
+                    ui.setLoadingStatus(CURATED_MATCH_BUDGET_MESSAGE);
+                    ui.setSourceSwitchAction(
+                            "🔍 全站搜索",
+                            () -> {
+                                closeCoordinator.run();
+                                a.openSearch(query);
+                            });
+                    ui.switchSourceBtn.requestFocus();
+                };
+        a.ui.postDelayed(checkBudget, CURATED_MATCH_BUDGET_MS);
+
         final MainActivity.Done<MatchedSource> loadMatched =
                 new MainActivity.Done<MatchedSource>() {
                     @Override
                     public void accept(MatchedSource picked) {
-                        if (!valid.get() || picked == null) return;
+                        if (!valid.get() || picked == null || budgetExpired[0]) return;
+                        timing.firstMatch();
                         // A cross-site match is a ledger write even when it only ends up as a
                         // 换站观看 entry; that is how the wall card learns this site too.
                         SourceLedger.remember(a, picked.site, picked.listing);
@@ -994,17 +1360,25 @@ final class TvDetailHost {
                                             return;
                                         }
                                         if (!detailBound[0]) {
+                                            // The budget may have run out while this load was in
+                                            // flight: then say that, instead of starting another
+                                            // round of searching nobody asked for.
+                                            checkBudget.run();
+                                            if (budgetExpired[0]) return;
                                             if (!fallbackStarted[0]
                                                     && startFallbackSearchRef[0] != null) {
                                                 startFallbackSearchRef[0].run();
                                                 return;
                                             }
+                                            timing.log("nosource");
                                             ui.setLoadingStatus("已匹配片源暂无可播放线路，可点击「全站搜索」查找更多来源");
                                         }
                                         return;
                                     }
                                     detailBound[0] = true;
                                     closeCoordinator.run();
+                                    timing.firstPlayable();
+                                    timing.log("bound");
                                     activeSite[0] = picked.site;
                                     activeVideo[0] = loaded;
                                     WatchHistory.Entry bm = findBookmark(a, picked.site, loaded);
@@ -1140,6 +1514,7 @@ final class TvDetailHost {
                 });
 
         if (primarySource == null) {
+            timing.log("nosource");
             ui.play.setText("暂未匹配片源");
             ui.setLoadingStatus("当前可用片源繁忙，可点击「全站搜索」手动查找");
             ui.setSourceSwitchAction("🔍 全站搜索", () -> a.openSearch(query));
@@ -1159,13 +1534,18 @@ final class TvDetailHost {
 
         startFallbackSearchRef[0] =
                 () -> {
-                    if (!valid.get() || detailBound[0] || fallbackStarted[0]) return;
+                    if (!valid.get() || detailBound[0] || fallbackStarted[0] || budgetExpired[0]) {
+                        return;
+                    }
+                    checkBudget.run();
+                    if (budgetExpired[0]) return;
                     fallbackStarted[0] = true;
                     if (fallbackSources.isEmpty()) {
                         if (openLedgerListing(
                                 a, curated, matches, pendingPick, triggerLoadMatched[0])) {
                             return;
                         }
+                        timing.log("nosource");
                         ui.play.setText("暂未匹配片源");
                         ui.setLoadingStatus("已添加的片源中暂未找到《" + query + "》，可点击「全站搜索」手动查找");
                         ui.setSourceSwitchAction("🔍 全站搜索", () -> a.openSearch(query));
@@ -1184,7 +1564,13 @@ final class TvDetailHost {
                                     (site, videos, outcome) ->
                                             a.ui.post(
                                                     () -> {
-                                                        if (!valid.get() || detailBound[0]) return;
+                                                        if (!valid.get()
+                                                                || detailBound[0]
+                                                                || budgetExpired[0]) {
+                                                            return;
+                                                        }
+                                                        checkBudget.run();
+                                                        if (budgetExpired[0]) return;
                                                         finishedCount[0]++;
                                                         if (videos != null && !videos.isEmpty()) {
                                                             Cms.Video bestCand = null;
@@ -1236,6 +1622,7 @@ final class TvDetailHost {
                                                                     matches,
                                                                     pendingPick,
                                                                     triggerLoadMatched[0])) {
+                                                                timing.log("nosource");
                                                                 ui.play.setText("暂未匹配片源");
                                                                 ui.setLoadingStatus(
                                                                         "已添加的片源中暂未找到《"
@@ -1292,8 +1679,11 @@ final class TvDetailHost {
                     final int foundScore = bestScore;
                     a.ui.post(
                             () -> {
-                                if (!valid.get() || detailBound[0]) return;
+                                if (!valid.get() || detailBound[0] || budgetExpired[0]) return;
+                                checkBudget.run();
+                                if (budgetExpired[0]) return;
                                 if (found != null) {
+                                    timing.firstMatch();
                                     SourceLedger.remember(a, primarySource, found);
                                     MatchedSource picked =
                                             new MatchedSource(primarySource, found, foundScore);
