@@ -879,7 +879,9 @@ public final class MpvPlayer extends MoviePlayer {
 
                     String userAgent = defaultUserAgent(context);
                     String referer = "";
-                    MPVLib.setPropertyString("http-header-fields", "");
+                    // 一条字符串设进去（mpv 的列表选项就是逗号分隔），别用 change-list 逐条 append：
+                    // 实测 append 在部分 mpv 版本上不生效，网盘直链因此缺 Cookie 直接 403。
+                    StringBuilder headerFields = new StringBuilder();
                     for (Map.Entry<String, String> entry : headers.entrySet()) {
                         String key = entry.getKey();
                         String value = entry.getValue();
@@ -889,15 +891,11 @@ public final class MpvPlayer extends MoviePlayer {
                         } else if (key.equalsIgnoreCase("Referer")) {
                             referer = value;
                         } else if (!key.equalsIgnoreCase("Host")) {
-                            MPVLib.command(
-                                    new String[] {
-                                        "change-list",
-                                        "http-header-fields",
-                                        "append",
-                                        key + ": " + value
-                                    });
+                            if (headerFields.length() > 0) headerFields.append(',');
+                            headerFields.append(key).append(": ").append(value);
                         }
                     }
+                    MPVLib.setPropertyString("http-header-fields", headerFields.toString());
                     MPVLib.setPropertyString("user-agent", userAgent);
                     if (!referer.isEmpty()) {
                         MPVLib.setPropertyString("referrer", referer);
