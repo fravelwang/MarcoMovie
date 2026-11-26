@@ -531,7 +531,9 @@ final class UcShareResolver {
                 episode.media.put("mimeType", "application/x-mpegURL");
                 episode.media.put("_netdiskHls", true);
             } else {
-                episode.media.put("_forceMpv", true);
+                // 网盘直链不再强制 mpv：盒子上的 mpv 打开这类签名直链会 audio=eof 卡住；
+                // media3 + 默认优先 AAC 音轨已经能播（12:42、15:29 实测 4K 出画面）。
+                episode.media.put("_forceMpv", false);
             }
         } catch (org.json.JSONException ignored) {
             // org.json 的受检异常；每个标记都是可选的。

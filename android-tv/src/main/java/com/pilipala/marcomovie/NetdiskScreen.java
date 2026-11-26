@@ -610,7 +610,9 @@ final class NetdiskScreen {
             // MPV handles high-bitrate 4K on this box far better than the Media3/MediaCodec path;
             // netdisk files opt in. When MPV is unavailable this episode falls back to MoviePlayer,
             // whose PlayStats listener feeds NetdiskQualityGuard's drop-rate detection.
-            episode.media.put("_forceMpv", true);
+            // 网盘直链不再强制 mpv：盒子上的 mpv 打开这类签名直链会 audio=eof 卡住；
+                // media3 + 默认优先 AAC 音轨已经能播（12:42、15:29 实测 4K 出画面）。
+                episode.media.put("_forceMpv", false);
             // Only native netdisk playback carries this marker. NetdiskQualityGuard.arm refuses
             // every episode without it, so ordinary web lines are never silently downgraded.
             episode.media.put("_netdiskNative", true);

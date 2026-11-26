@@ -193,12 +193,59 @@ final class NetdiskShareLines {
      * 绑定，跳过就能保证详情里同一家最多一条同名分享线。已经存在的同名线路也参与比较 —— 它就是这次
      * 那一家，集数以详情里的为准。
      */
+
+    /**
+     * 分享里常混进封面、字幕、主题曲：虎斑那条夸克分享的第一集就是 {@code E01.mp3}（1 分钟），
+     * 它会被当成第 1 集播出来，看起来就是"点了播放只有 1 分钟、还没声音"。这里只留视频文件；
+     * 一个视频都没有时保持原样（宁可给它原列表，也不要凭空少一条线路）。
+     */
+    private static void dropNonVideoEpisodes(Cms.Line line) {
+        if (line == null || line.episodes == null || line.episodes.size() <= 1) return;
+        List<Cms.Episode> dropped = new java.util.ArrayList<>();
+        int videos = 0;
+        for (Cms.Episode episode : line.episodes) {
+            if (episode == null) continue;
+            if (looksLikeVideoName(episode.name)) videos++;
+            else dropped.add(episode);
+        }
+        // 全是非视频时保持原样：宁可给它原列表，也不要凭空少一条线路。
+        if (videos > 0 && !dropped.isEmpty()) line.episodes.removeAll(dropped);
+    }
+
+    private static boolean looksLikeVideoName(String name) {
+        String value = text(name).trim().toLowerCase(java.util.Locale.ROOT);
+        if (value.isEmpty()) return true;
+        int dot = value.lastIndexOf('.');
+        if (dot < 0) return true;
+        String ext = value.substring(dot + 1);
+        switch (ext) {
+            case "mp3":
+            case "m4a":
+            case "flac":
+            case "wav":
+            case "aac":
+            case "jpg":
+            case "jpeg":
+            case "png":
+            case "webp":
+            case "srt":
+            case "ass":
+            case "ssa":
+            case "txt":
+            case "nfo":
+                return false;
+            default:
+                return true;
+        }
+    }
+
     static int append(Cms.Video video, List<Cms.Line> lines) {
         if (video == null || lines == null || lines.isEmpty()) return -1;
         int best = -1;
         int bestEpisodes = -1;
         for (Cms.Line incoming : lines) {
             if (incoming == null || incoming.episodes.isEmpty()) continue;
+            dropNonVideoEpisodes(incoming);
             int index = indexOf(video, incoming.name);
             if (index < 0) {
                 video.lines.add(incoming);
