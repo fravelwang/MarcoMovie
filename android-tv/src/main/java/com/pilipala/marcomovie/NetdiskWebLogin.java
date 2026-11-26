@@ -3,6 +3,7 @@ package com.pilipala.marcomovie;
 import android.app.Dialog;
 import android.net.Uri;
 import android.os.Build;
+import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
@@ -72,6 +73,12 @@ final class NetdiskWebLogin {
     private static final long SUCCESS_DISMISS_MS = 1200L;
 
     /**
+     * 「只给二维码」最多等这么久：页面加载完之后 15 秒还没找到二维码，就退回整页显示（即原来的样子）。
+     * 页面一直不出来的话，从打开登录页算起最多白等两倍时间，之后同样退回整页——绝不让人对着白屏干等。
+     */
+    private static final long QR_FALLBACK_MS = 15_000L;
+
+    /**
      * 桌面 Chrome 的 UA。各家网页版对 Android UA 会强制跳 App 或给一个不能扫码的简化页，桌面串才
      * 会给出正常的网页登录页与二维码。
      */
@@ -95,6 +102,92 @@ final class NetdiskWebLogin {
                     + "try{var o=JSON.parse(v);"
                     + "if(o&&(o.refresh_token||o.refreshToken))return v;}catch(e){}}"
                     + "return '';}catch(e){return '';}})()";
+
+    /**
+     * 「电视上只要一个二维码」的注入脚本（幂等，跑多少遍都只留一层）。
+     *
+     * <p>做法：在页面里挑一个像二维码的元素（优先 {@code canvas}，其次同源的 {@code img}），把它的像素
+     * 或地址取出来，另造一层白底容器铺满视口、正中放那张图，页面其余内容（导航、营销图、页脚）全被
+     * 盖住。这样 Boss 在电视上看到的只有二维码，官方网页整页不再铺出来。
+     *
+     * <p>判据在 {@code shown()} 里：宽高都在 120–600 px、宽高比 0.8–1.25、元素确实显示着（隐藏的、
+     * 图标大小的、横幅大小的都不算）。{@code canvas} 用 {@code toDataURL('image/png')} 取像素；{@code
+     * img} 用 {@code src}，空串、{@code blob:} 和跨域地址都跳过——跨域图拿不到干净数据就不冒这个险，
+     * 让 Java 侧到点退回整页（不报错、不比现在差）。
+     *
+     * <p>页面跳转分两种：整页跳转会换掉 document，旧容器跟着消失；SPA 只换 URL 时脚本自己认出 URL
+     * 变了，摘掉旧容器重新找一次（免得旧二维码一直盖着新页面）。同一个页面里页面自己刷新二维码（过期
+     * 重取）时，也会同步更新我们这张图，不会让 Boss 扫到过期的那张。
+     *
+     * <p>返回值给 Java 侧看：{@code "1"} 已注入（或本来就在、顺手刷新了），{@code "0"} 这轮没找到。
+     */
+    private static final String QR_ONLY_JS =
+            "(function(){try{"
+                    + "var url=String(location.href||'');"
+                    + "var old=window.__mmQrOnly||null;"
+                    // 只认「显示着、尺寸像二维码、接近正方形」的元素
+                    + "function shown(el){try{"
+                    + "if(!el||!el.getBoundingClientRect)return false;"
+                    + "var s=window.getComputedStyle?window.getComputedStyle(el):null;"
+                    + "if(s&&(s.display==='none'||s.visibility==='hidden'||s.opacity==='0'))return false;"
+                    + "var r=el.getBoundingClientRect();"
+                    + "if(!(r.width>=120&&r.width<=600&&r.height>=120&&r.height<=600))return false;"
+                    + "var q=r.width/r.height;"
+                    + "return q>=0.8&&q<=1.25;"
+                    + "}catch(e){return false;}}"
+                    // canvas 取像素、img 取地址；取不到就回空串
+                    + "function dataOf(el){try{"
+                    + "if(el.tagName==='CANVAS'){"
+                    + "var d=el.toDataURL('image/png');"
+                    + "return d&&d.length>500?d:'';}"
+                    + "var src=el.currentSrc||el.src||'';"
+                    + "if(!src)return '';"
+                    + "if(/^data:image\\//i.test(src)||/^blob:/i.test(src))return src;"
+                    + "var a=document.createElement('a');a.href=src;"
+                    + "var here=a.protocol+'//'+a.host;"
+                    + "return here===location.protocol+'//'+location.host?src:'';"
+                    + "}catch(e){return '';}}"
+                    // 收集候选：canvas 优先，其次按面积从大到小
+                    + "var nodes=document.querySelectorAll('canvas, img');"
+                    + "var list=[];"
+                    + "for(var i=0;i<nodes.length&&i<200;i++){"
+                    + "var el=nodes[i];"
+                    + "if(!shown(el))continue;"
+                    + "var rr=el.getBoundingClientRect();"
+                    + "list.push({el:el,pri:el.tagName==='CANVAS'?0:1,area:rr.width*rr.height});}"
+                    + "list.sort(function(x,y){return x.pri!==y.pri?x.pri-y.pri:y.area-x.area;});"
+                    + "var data='';"
+                    + "for(var j=0;j<list.length&&!data;j++){data=dataOf(list[j].el);}"
+                    // 这轮没找到
+                    + "if(!data){"
+                    + "if(old&&old.parentNode&&window.__mmQrUrl===url)return '1';"
+                    + "if(old&&old.parentNode)old.parentNode.removeChild(old);"
+                    + "window.__mmQrOnly=null;window.__mmQrUrl='';window.__mmQrData='';"
+                    + "return '0';}"
+                    // 同一个页面已经注入过：页面换了二维码就同步刷新那张图，别叠第二层
+                    + "if(old&&old.parentNode&&window.__mmQrUrl===url){"
+                    + "if(window.__mmQrData!==data){"
+                    + "var pic=old.getElementsByTagName('img')[0];"
+                    + "if(pic)pic.src=data;window.__mmQrData=data;}"
+                    + "return '1';}"
+                    + "if(old&&old.parentNode)old.parentNode.removeChild(old);"
+                    + "var box=document.createElement('div');"
+                    + "box.setAttribute('data-mm-qr-only','1');"
+                    + "box.style.cssText='position:fixed;left:0;top:0;right:0;bottom:0;width:100%;height:100%;"
+                    + "margin:0;padding:0;border:0;background:#fff;display:flex;flex-direction:column;"
+                    + "align-items:center;justify-content:center;z-index:2147483647;overflow:hidden;';"
+                    + "var img=document.createElement('img');"
+                    + "img.src=data;img.alt='二维码';"
+                    + "img.style.cssText='display:block;width:min(60vh,60vw);height:auto;"
+                    + "max-width:60vw;max-height:60vh;background:#fff;';"
+                    + "var tip=document.createElement('div');"
+                    + "tip.textContent='用手机 App 扫上面的二维码';"
+                    + "tip.style.cssText='margin:18px 0 0;font:400 22px/1.4 sans-serif;color:#333;text-align:center;';"
+                    + "box.appendChild(img);box.appendChild(tip);"
+                    + "(document.body||document.documentElement).appendChild(box);"
+                    + "window.__mmQrOnly=box;window.__mmQrUrl=url;window.__mmQrData=data;"
+                    + "return '1';"
+                    + "}catch(e){return '0';}})()";
 
     private NetdiskWebLogin() {}
 
@@ -160,7 +253,7 @@ final class NetdiskWebLogin {
                 BaiduLogin.PROVIDER,
                 "百度网盘",
                 "手机百度网盘 App",
-                "https://pan.baidu.com/",
+                "https://passport.baidu.com/v2/?login&tpl=netdisk&u=https%3A%2F%2Fpan.baidu.com%2Fdisk%2Fhome",
                 "pan.baidu.com",
                 new String[] {"BDUSS"},
                 false,
@@ -275,12 +368,38 @@ final class NetdiskWebLogin {
         final long[] deadline = {0L};
         /** 待保存的裸凭据：Cookie 串，或阿里的 token JSON。 */
         final String[] pending = {""};
+        /** 页面已经加载完（主框架 onPageFinished）。 */
+        final boolean[] pageLoaded = {false};
+        /** 页面已经换成「只有一个二维码」。 */
+        final boolean[] qrOnly = {false};
+        /** 兜底已触发：不再注入，页面照旧整页显示。 */
+        final boolean[] qrGivenUp = {false};
+        /** 白等的最晚时刻：页面一直不出来，到点也得把整页露出来。 */
+        final long[] qrHardDeadline = {0L};
 
         final Runnable[] poll = new Runnable[1];
         final Runnable[] begin = new Runnable[1];
 
+        /**
+         * 盖在网页上的白底。等二维码那十几秒别把官网整页铺在电视上；注入成功或兜底到点就撤掉。
+         * 撤的时候底下已经是白底二维码（JS 注入的容器也是白底），所以不会闪一下黑的。
+         */
+        final View qrCover = new View(a);
+        qrCover.setBackgroundColor(0xffffffff);
+        qrCover.setVisibility(View.VISIBLE);
+
         final Runnable stopPolling = () -> {
             if (poll[0] != null) a.ui.removeCallbacks(poll[0]);
+        };
+
+        /** 把网页露出来：注入成功、兜底到点、加载失败、崩溃都走这一条。 */
+        final Runnable revealPage = () -> qrCover.setVisibility(View.GONE);
+
+        /** 兜底计时器本体，见 {@link #QR_FALLBACK_MS}。 */
+        final Runnable[] qrFallback = new Runnable[1];
+
+        final Runnable stopQrFallback = () -> {
+            if (qrFallback[0] != null) a.ui.removeCallbacks(qrFallback[0]);
         };
 
         final Runnable resetActions = () -> {
@@ -322,6 +441,36 @@ final class NetdiskWebLogin {
                             SUCCESS_DISMISS_MS);
                 };
 
+        /**
+         * 让页面只留下二维码。幂等：跟着 1.5 秒的轮询一起跑，页面换了二维码也会同步刷新那张图。
+         *
+         * <p>放在凭据判据前面跑，是因为判据在「还在登录流程」的页面上会早退（百度的二维码正好在
+         * passport 页上），而二维码该不该显示跟登没登录无关。注入失败（WebView 坏了 / JS 被关）只影响
+         * 这条美化路，凭据检测照旧跑，到点自动退回整页。
+         */
+        final Runnable injectQr =
+                () -> {
+                    final WebView web = view[0];
+                    if (web == null || finished[0] || qrGivenUp[0] || !dialog.isShowing()) return;
+                    try {
+                        web.evaluateJavascript(
+                                QR_ONLY_JS,
+                                value -> {
+                                    if (finished[0] || !dialog.isShowing()) return;
+                                    if (!"1".equals(jsonString(value))) return;
+                                    if (qrOnly[0]) return;
+                                    qrOnly[0] = true;
+                                    revealPage.run();
+                                    status.setText(
+                                            "二维码已就位：用"
+                                                    + profile.appHint
+                                                    + "扫屏幕中间的大二维码");
+                                });
+                    } catch (Throwable error) {
+                        AppLog.w("NetdiskWebLogin", "qr-only inject failed", error);
+                    }
+                };
+
         final Runnable check =
                 () -> {
                     final WebView webView = view[0];
@@ -351,8 +500,12 @@ final class NetdiskWebLogin {
         poll[0] =
                 () -> {
                     if (finished[0] || !dialog.isShowing() || a.isFinishing()) return;
+                    // 先管二维码：这一步跟凭据判据互不影响，也不该被判据的早退挡掉。
+                    injectQr.run();
                     if (System.currentTimeMillis() >= deadline[0]) {
                         stopPolling.run();
+                        stopQrFallback.run();
+                        revealPage.run();
                         status.setText(
                                 "没检测到登录：可以点「刷新」重来，或用「手工粘贴」这条兜底路");
                         retry.setEnabled(true);
@@ -363,20 +516,44 @@ final class NetdiskWebLogin {
                     if (!finished[0]) a.ui.postDelayed(poll[0], POLL_INTERVAL_MS);
                 };
 
+        qrFallback[0] =
+                () -> {
+                    if (finished[0] || !dialog.isShowing() || qrOnly[0] || qrGivenUp[0]) return;
+                    // 页面还没出来就再等一轮（最多等到 qrHardDeadline），别在加载中途把整页顶出来。
+                    if (!pageLoaded[0] && System.currentTimeMillis() < qrHardDeadline[0]) {
+                        a.ui.postDelayed(qrFallback[0], QR_FALLBACK_MS);
+                        return;
+                    }
+                    qrGivenUp[0] = true;
+                    revealPage.run();
+                    status.setText(
+                            "没有找到二维码，已退回完整登录页：可以直接扫页面上的二维码，或点「刷新」重来");
+                };
+
         final PageEvents events =
                 new PageEvents() {
                     @Override
                     public void loaded() {
                         if (finished[0] || !dialog.isShowing()) return;
+                        pageLoaded[0] = true;
+                        // 页面加载完了再给足 15 秒找二维码：加载慢不该算在找二维码的时间里。
+                        if (!qrOnly[0] && !qrGivenUp[0]) {
+                            stopQrFallback.run();
+                            a.ui.postDelayed(qrFallback[0], QR_FALLBACK_MS);
+                        }
                         if (firstLoad[0]) return;
                         firstLoad[0] = true;
+                        if (qrOnly[0] || qrGivenUp[0]) return;
                         status.setText(
-                                "等待扫码：用" + profile.appHint + "扫屏幕上的二维码");
+                                "正在找二维码（最多 15 秒，找不到就退回完整登录页）");
                     }
 
                     @Override
                     public void failed(String reason) {
                         if (finished[0] || !dialog.isShowing()) return;
+                        stopQrFallback.run();
+                        qrGivenUp[0] = true;
+                        revealPage.run();
                         String detail = reason == null ? "" : reason.trim();
                         status.setText(
                                 "网页加载失败"
@@ -391,6 +568,8 @@ final class NetdiskWebLogin {
                         if (finished[0]) return;
                         finished[0] = true;
                         stopPolling.run();
+                        stopQrFallback.run();
+                        revealPage.run();
                         status.setText("网页进程异常退出，请关闭后重试");
                         retry.setEnabled(true);
                         retry.setAlpha(1f);
@@ -426,6 +605,8 @@ final class NetdiskWebLogin {
                             : new LoginClient(events));
             view[0] = created;
             webHost.addView(created, new FrameLayout.LayoutParams(-1, -1));
+            // 白底压在网页上面：二维码没就位之前，电视上看到的是一块干净白底，不是官网整页。
+            webHost.addView(qrCover, new FrameLayout.LayoutParams(-1, -1));
         } catch (Throwable error) {
             // 盒子上 WebView 被裁掉/版本坏掉时别把整个应用带走：这条兜底路还在。
             AppLog.w("NetdiskWebLogin", "webview unavailable", error);
@@ -439,11 +620,18 @@ final class NetdiskWebLogin {
                 () -> {
                     if (finished[0] || view[0] == null || !dialog.isShowing()) return;
                     stopPolling.run();
+                    stopQrFallback.run();
                     firstLoad[0] = false;
+                    pageLoaded[0] = false;
+                    qrOnly[0] = false;
+                    qrGivenUp[0] = false;
                     pending[0] = "";
                     deadline[0] = System.currentTimeMillis() + LOGIN_TIMEOUT_MS;
+                    qrHardDeadline[0] = System.currentTimeMillis() + QR_FALLBACK_MS * 2;
                     resetActions.run();
+                    qrCover.setVisibility(View.VISIBLE);
                     status.setText("正在打开登录页…");
+                    a.ui.postDelayed(qrFallback[0], QR_FALLBACK_MS);
                     view[0].loadUrl(profile.loginUrl);
                     a.ui.postDelayed(poll[0], POLL_INTERVAL_MS);
                 };
@@ -454,6 +642,7 @@ final class NetdiskWebLogin {
                 ignored -> {
                     finished[0] = true;
                     stopPolling.run();
+                    stopQrFallback.run();
                     final WebView closing = view[0];
                     view[0] = null;
                     if (closing != null) {

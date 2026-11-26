@@ -196,7 +196,14 @@ final class TvDetailHost {
         return "上次观看 · " + a.historyLabel(bookmark);
     }
 
-    private static Cms.Episode resolveActiveEpisode(Cms.Line line, WatchHistory.Entry bookmark) {
+    /**
+     * 书签落到这条线路上的那一集，对不上返回 null。
+     *
+     * <p>为什么不再在这里兜底「第 1 集」：换站之后要区分"书签真的管用"和"书签根本不属于这条
+     * 线路"两件事 —— 前者接着看那一集，后者该看换站交接带来的第 N 集（{@link #handoverEpisode}）。
+     * 兜底放在 {@link #resolveActiveEpisode} 里，语义才分得开。
+     */
+    private static Cms.Episode bookmarkedEpisode(Cms.Line line, WatchHistory.Entry bookmark) {
         if (line == null || line.episodes == null || line.episodes.isEmpty()) return null;
         if (bookmark != null
                 && Objects.equals(line.name, bookmark.line)
@@ -213,20 +220,64 @@ final class TvDetailHost {
                 }
             }
         }
+        return null;
+    }
+
+    private static Cms.Episode firstEpisode(Cms.Line line) {
+        if (line == null || line.episodes == null || line.episodes.isEmpty()) return null;
         return line.episodes.get(0);
     }
 
+    private static Cms.Episode resolveActiveEpisode(Cms.Line line, WatchHistory.Entry bookmark) {
+        Cms.Episode bookmarked = bookmarkedEpisode(line, bookmark);
+        return bookmarked != null ? bookmarked : firstEpisode(line);
+    }
+
+    /**
+     * 换站之后「该从哪一集开始」：书签优先（同一线路、同一集号，见 {@link #bookmarkedEpisode}），
+     * 其次是换站交接带来的第 N 集（{@link SiteSwitchHandover#resolve}，按集号再按集名），都没有
+     * 才从这条线路的第 1 集开始。
+     *
+     * <p>这一处就是"换站后选集状态以目标站为准"的落点：线路由 {@link #initialSelection} 按目标
+     * 站自己的规则选好了，集号在这里对，两边集合大小不同（虎斑 2 集、天堂 14 集）也不会拿错下标。
+     */
+    private static Cms.Episode handoverEpisode(
+            Cms.Line line, WatchHistory.Entry bookmark, SiteSwitchHandover.Want handover) {
+        Cms.Episode bookmarked = bookmarkedEpisode(line, bookmark);
+        if (bookmarked != null) return bookmarked;
+        Cms.Episode carried = SiteSwitchHandover.resolve(line, handover);
+        if (carried != null) return carried;
+        return firstEpisode(line);
+    }
+
+    /**
+     * 这部片在本站的观看记录。
+     *
+     * <p>判据是「同一个站 + 同一个影片 id + 同一部片」。片名这一道不是多余的：有些采集站的 id 会
+     * 复用（下架后同一 id 换上别的片），跨片续播比不续播更糟；两边片名都拿得到却对不上时，宁可不
+     * 认这条书签（任务卡 2026-11-26 第 2 节第 3 条）。
+     */
     private static WatchHistory.Entry findBookmark(MainActivity a, Cms.Site site, Cms.Video video) {
         if (a == null || site == null || site.key == null || video == null || video.id == null)
             return null;
         for (WatchHistory.Entry entry : a.watchHistory()) {
             if (entry != null
                     && Objects.equals(site.key, entry.site)
-                    && Objects.equals(video.id, entry.id)) {
+                    && Objects.equals(video.id, entry.id)
+                    && sameShow(entry, video)) {
                 return entry;
             }
         }
         return null;
+    }
+
+    /** 记录与影片是不是同一部片；任一边片名为空时不再卡（旧记录没有片名也要能续播）。 */
+    private static boolean sameShow(WatchHistory.Entry entry, Cms.Video video) {
+        if (entry == null || video == null) return false;
+        String entryTitle = entry.title == null ? "" : entry.title.trim();
+        String videoTitle = video.title == null ? "" : video.title.trim();
+        if (entryTitle.isEmpty() || videoTitle.isEmpty()) return true;
+        return SiteSwitchHandover.sameTitle(entryTitle, videoTitle);
     }
 
     private static void mergeListingFallback(Cms.Video target, Cms.Video fallback) {
@@ -347,7 +398,8 @@ final class TvDetailHost {
             Cms.Video video,
             WatchHistory.Entry bookmark,
             MainActivity.Screen screen,
-            TvV17DetailScreen ui) {
+            TvV17DetailScreen ui,
+            SiteSwitchHandover.Want handover) {
         if (!hasPlayableLines(video)) {
             a.toast("该来源没有可播放线路");
             return;
@@ -359,12 +411,30 @@ final class TvDetailHost {
                         a.prefs.getString(Prefs.PREFERRED_LINE, ""),
                         screen.selection,
                         a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false));
+        // 选集面板开在"这一页真正会播的那一集"所在页：换站交接带来的第 N 集也算，否则从面板里
+        // 看到的选中位置和「播放」要播的那一集对不上。
+        int popupPage = selection[1];
+        Cms.Line popupLine =
+                selection[0] >= 0 && selection[0] < video.lines.size()
+                        ? video.lines.get(selection[0])
+                        : null;
+        Cms.Episode popupEp = handoverEpisode(popupLine, bookmark, handover);
+        if (popupLine != null && popupLine.episodes != null && popupEp != null) {
+            int epIndex = popupLine.episodes.indexOf(popupEp);
+            if (epIndex >= 0) {
+                popupPage =
+                        EpisodeSelection.pageFor(
+                                epIndex,
+                                popupLine.episodes.size(),
+                                a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false));
+            }
+        }
         showEpisodesDialog(
                 a,
                 site,
                 video,
                 selection[0],
-                selection[1],
+                popupPage,
                 () -> {
                     if (!hasPlayableLines(video)) return;
                     int[] updated =
@@ -375,7 +445,7 @@ final class TvDetailHost {
                                     screen.selection,
                                     a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false));
                     Cms.Line activeLine = video.lines.get(updated[0]);
-                    Cms.Episode activeEp = resolveActiveEpisode(activeLine, bookmark);
+                    Cms.Episode activeEp = handoverEpisode(activeLine, bookmark, handover);
                     ui.updateEpisodeCaption(
                             TvV17DetailScreen.formatEpisodeFileCaption(activeLine, activeEp),
                             buildEpisodesButtonLabel(video, updated[0]));
@@ -434,15 +504,22 @@ final class TvDetailHost {
                                 screen.selection,
                                 a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false))
                         : new int[] {0, 0};
+        // 换站交接（若有）：这部片这次是换站进来的，取走凭据，绑定时按目标站自己的线路与集号落位。
+        // 只在目标页用一次，普通打开（没有交接）时这里是 null，行为与以前一致。
+        final SiteSwitchHandover.Want handover = a.siteHandover.take(site, initialVideo);
         Cms.Line initLine = initiallyPlayable ? initialVideo.lines.get(initSel[0]) : null;
-        Cms.Episode initEp = resolveActiveEpisode(initLine, activeBookmark[0]);
+        Cms.Episode initEp = handoverEpisode(initLine, activeBookmark[0], handover);
         String initFileCaption = TvV17DetailScreen.formatEpisodeFileCaption(initLine, initEp);
         String initHistoryCaption = formatHistoryCaption(a, activeBookmark[0], initFileCaption);
         String initContinueCaption =
                 TvV17DetailScreen.formatContinuePlaySubtitle(
                         activeBookmark[0], initFileCaption, initHistoryCaption);
         String initPlayLabel =
-                !initiallyPlayable ? "正在获取线路…" : (activeBookmark[0] == null ? "► 开始播放" : "► 继续播放");
+                !initiallyPlayable
+                        ? "正在获取线路…"
+                        : (activeBookmark[0] == null && handover == null
+                                ? "► 开始播放"
+                                : "► 继续播放");
 
         final TvV17DetailScreen[] holder = new TvV17DetailScreen[1];
         TvV17DetailScreen ui =
@@ -487,18 +564,18 @@ final class TvDetailHost {
                                                 screen.selection,
                                                 a.prefs.getBoolean(
                                                         Prefs.EPISODES_DESCENDING, false));
+                                Cms.Line playLine = v.lines.get(sel[0]);
+                                // 换站进来的那一次：书签对不上这页的线路时，接着看换站交接的
+                                // 第 N 集，而不是永远从第 1 集重开。
+                                Cms.Episode playEp = handoverEpisode(playLine, bm, handover);
                                 if (bm != null
                                         && (!screen.selection.selected
                                                 || Objects.equals(
-                                                        v.lines.get(sel[0]).name, bm.line))) {
+                                                        playLine == null ? null : playLine.name,
+                                                        bm.line))) {
                                     a.playBookmark(site, v, bm);
-                                } else {
-                                    Cms.Line line = v.lines.get(sel[0]);
-                                    if (line != null
-                                            && line.episodes != null
-                                            && !line.episodes.isEmpty()) {
-                                        a.resolvePlayer(site, v, line, line.episodes.get(0));
-                                    }
+                                } else if (playEp != null) {
+                                    a.resolvePlayer(site, v, playLine, playEp);
                                 }
                             }
 
@@ -510,7 +587,8 @@ final class TvDetailHost {
                                         activeVideo[0],
                                         activeBookmark[0],
                                         screen,
-                                        holder[0]);
+                                        holder[0],
+                                        handover);
                             }
 
                             public void favorite() {
@@ -625,7 +703,9 @@ final class TvDetailHost {
                                             a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false))
                                     : new int[] {0, 0};
                     Cms.Line activeLine = playable ? resolved.lines.get(sel[0]) : null;
-                    Cms.Episode activeEpisode = resolveActiveEpisode(activeLine, bm);
+                    // 换站交接：这一页是换站进来的，就按"第 N 集"落到目标站自己的线路上（书签
+                    // 对不上线路时也走它）；没有交接时与以前一致（书签 → 第 1 集）。
+                    Cms.Episode activeEpisode = handoverEpisode(activeLine, bm, handover);
                     String fileCap =
                             TvV17DetailScreen.formatEpisodeFileCaption(activeLine, activeEpisode);
                     String histCap = formatHistoryCaption(a, bm, fileCap);
@@ -637,7 +717,7 @@ final class TvDetailHost {
                                     a.prefs.getString(Prefs.FAVORITES, "[]"),
                                     site.key,
                                     resolved.id),
-                            bm == null ? "► 开始播放" : "► 继续播放",
+                            bm == null && handover == null ? "► 开始播放" : "► 继续播放",
                             buildEpisodesButtonLabel(resolved, sel[0]),
                             fileCap,
                             histCap);
@@ -1213,7 +1293,8 @@ final class TvDetailHost {
                                         activeVideo[0],
                                         activeBookmark[0],
                                         screen,
-                                        holder[0]);
+                                        holder[0],
+                                        null);
                             }
 
                             public void favorite() {

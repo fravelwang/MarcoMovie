@@ -612,6 +612,9 @@ final class TvV17DetailScreen {
                                 a.toast("「" + siteDisplayName(target) + "」里没有找到这部剧");
                                 return;
                             }
+                            // 换站交接：这一页看到第几集，目标站就按它自己的线路与集号落位
+                            // （来源站的线路名不参与匹配，见 SiteSwitchHandover）。
+                            a.prepareSiteHandover(target, listing, video, null, null, currentBookmark);
                             // 显式换站：用户在这里点名了站点，所以不经过 openTitle 的账本默认源。
                             a.openListing(target, listing);
                         })

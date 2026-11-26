@@ -103,6 +103,8 @@ public final class MainActivity extends Activity {
     WatchHistory.Entry playingBookmark;
     WatchHistory.Entry historyFallbackBookmark;
     boolean historyFallbackInFlight;
+    /** 换站交接：目标页绑定时按目标站自己的线路与集号落位（一次换站只跳一次）。 */
+    final SiteSwitchHandover siteHandover = new SiteSwitchHandover();
     String migratingHistoryOldKey;
     long lastBookmarkSave;
     final ArrayDeque<Screen> back = new ArrayDeque<>();
@@ -3355,6 +3357,59 @@ public final class MainActivity extends Activity {
 
     void playBookmark(Cms.Site site, Cms.Video video, WatchHistory.Entry bookmark) {
         CatalogScreen.playBookmark(this, site, video, bookmark);
+    }
+
+    /**
+     * 换站的唯一交接入口：「换站观看」与自动换源都在 {@link #openListing} 之前调这里，记下来源侧
+     * 看到的是第几集；目标页绑定时按目标站自己的线路与集号重新落位
+     * （{@link SiteSwitchHandover}）。
+     *
+     * <p>为什么来源侧的集要从几处找：换站有三种来路，手上有的东西不一样 ——「换站观看」手上是这
+     * 一页的书签；播放器里换站手上是在播的那一集；自动换源（默认站线路全坏）手上什么都没有，只有
+     * 这部片在观看历史里的记录。传进来的书签优先，其次传进来的在播剧集，最后才是同名记录，顺序
+     * 就是"离用户当前画面最近"。
+     *
+     * <p>一件容易踩的事：这里只记「第 N 集」，不记下标、不记线路名、也不预写
+     * {@code Screen.selection}。两站集数不同（虎斑 2 集、天堂 14 集），下标跨站没有意义；线路名
+     * 跨站更没有意义 —— 按线路名沿用上一站，就是"换站后选集状态对不上"的老路。
+     */
+    void prepareSiteHandover(
+            Cms.Site target,
+            Cms.Video targetListing,
+            Cms.Video fromVideo,
+            Cms.Line fromLine,
+            Cms.Episode fromEpisode,
+            WatchHistory.Entry fromBookmark) {
+        Cms.Video source = fromVideo != null ? fromVideo : targetListing;
+        WatchHistory.Entry anchor = fromBookmark;
+        if (anchor == null && fromEpisode == null) anchor = titleBookmark(source);
+        siteHandover.remember(
+                SiteSwitchHandover.of(
+                        target, targetListing, source, fromLine, fromEpisode, anchor));
+    }
+
+    /**
+     * 这部片在观看历史里最近的一条记录（跨站）：没有本站书签时，它就是"用户看到第几集"的依据。
+     *
+     * <p>顺序按「在播 > 跨站续播带进来的书签 > 观看历史里最新的同名记录」；片名对不上的一律不要，
+     * 免得把另一部片的集号搬到这部片上（{@link SiteSwitchHandover#sameTitle} 与历史续播同口径）。
+     */
+    private WatchHistory.Entry titleBookmark(Cms.Video video) {
+        if (video == null) return null;
+        String title = video.title;
+        if (title == null || title.trim().isEmpty()) return null;
+        if (playingBookmark != null && SiteSwitchHandover.sameTitle(playingBookmark.title, title)) {
+            return playingBookmark;
+        }
+        if (historyFallbackBookmark != null
+                && SiteSwitchHandover.sameTitle(historyFallbackBookmark.title, title)) {
+            return historyFallbackBookmark;
+        }
+        for (WatchHistory.Entry entry : watchHistory()) {
+            if (entry == null || entry.title == null) continue;
+            if (SiteSwitchHandover.sameTitle(entry.title, title)) return entry;
+        }
+        return null;
     }
 
     void historyPage() {
