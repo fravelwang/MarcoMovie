@@ -1170,6 +1170,7 @@ public final class MainActivity extends Activity {
         QuarkQrLogin.useFilesDir(getFilesDir());
         BaiduLogin.useFilesDir(getFilesDir());
         AliLogin.useFilesDir(getFilesDir());
+        UcLogin.useFilesDir(getFilesDir());
         if (isTvDevice()) {
             getWindow().getDecorView().setSystemUiVisibility(5894);
         } else {

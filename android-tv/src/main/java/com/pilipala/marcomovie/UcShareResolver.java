@@ -11,6 +11,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -38,9 +39,14 @@ import java.util.regex.Pattern;
  * 「不是 UC」，再被插件那句笼统话盖过去。也不要求站名或线路名带「UC」：四段形状本身足够区分
  * （夸克是五段），多一层名字判据只会在「UC原画13」这种线路名上误判。
  *
- * <p>线程：{@link #resolve(String, String, String)} 会打网络（单请求 8 秒超时，最多两次请求），
- * 必须在后台线程调用。它同步执行、永不抛，失败返回 null，原因放在 {@link #lastFailureReason()}，
- * 与 {@link QuarkShareResolver} 同一套口径。
+ * <p>账号兜底（2026-11-26 加）：游客接口被限流时会回 401/403，这时如果本机有 UC 凭据
+ * （{@code files/netdisk/uc.json}，见 {@link UcLogin}），就按 Flutter 端 {@code _resolveUcAccount}
+ * 那套再换一次直链：{@code config} 刷新短效 Cookie → 带账号 Cookie 请求 {@code file/download}。
+ * 游客流程本身一字未改，账号路只是它的接续分支。
+ *
+ * <p>线程：{@link #resolve(String, String, String)} 会打网络（单请求 8 秒超时，游客路最多两次请求，
+ * 走账号兜底再多两次），必须在后台线程调用。它同步执行、永不抛，失败返回 null，原因放在
+ * {@link #lastFailureReason()}，与 {@link QuarkShareResolver} 同一套口径。
  */
 final class UcShareResolver {
 
@@ -67,6 +73,17 @@ final class UcShareResolver {
             "https://pc-api.uc.cn/1/clouddrive/file/download"
                     + "?entry=ft&fr=pc&pr=UCBrowser&uc_param_str=&__dt=&__t=";
 
+    /**
+     * 账号路的第一步：让服务端刷新短效 Cookie（{@code __pus}/{@code __puus} 会从 Set-Cookie 回带）。
+     * 与 Flutter 端 {@code _resolveUcAccount} 同一个地址、同一串 query。
+     *
+     * <p>动词：任务卡写的是 POST，但参考实现实际发的是 GET——Flutter 的 {@code _json} 只在带
+     * body/form 时才用 POST，config 那次没有 body，所以是 GET。这里按参考实现先发 GET；若服务端
+     * 明确回「方法/路由不对」（404/405/501），再补一次 POST，免得两种口径哪一种落空都白跑。
+     */
+    private static final String CONFIG_URL =
+            "https://pc-api.uc.cn/1/clouddrive/config?pr=UCBrowser&fr=pc";
+
     private static final int CONNECT_TIMEOUT_MS = 8000;
     private static final int READ_TIMEOUT_MS = 8000;
     private static final int MAX_BODY_BYTES = 1 << 20;
@@ -77,14 +94,23 @@ final class UcShareResolver {
      */
     private static final Pattern PUGS_COOKIE = Pattern.compile("(?:^|[;,\\s])__pugs=([^;,\\s]+)");
 
+    /** 账号 Cookie：{@code __pus} 是身份、{@code __puus} 是短效会话，config 会把它们轮换回来。 */
+    private static final Pattern PUS_COOKIE = Pattern.compile("(?:^|[;,\\s])__pus=([^;,\\s]+)");
+
+    private static final Pattern PUUS_COOKIE = Pattern.compile("(?:^|[;,\\s])__puus=([^;,\\s]+)");
+
     /** 分享已取消 / 已过期（与 Flutter 端 {@code _checkUc} 同一组码）。 */
     private static final String SHARE_GONE = "UC 分享失效（链接被取消或已过期），请换一条线路";
 
     /** 提取码缺失或错误。 */
     private static final String NEED_PASSWORD = "UC 分享需要提取码，这条线路播不了，请换一条线路";
 
-    /** 接口要账号（没有免登录直链）。本次不做账号链路，只把话说清楚。 */
-    private static final String LOGIN_REQUIRED = "这条 UC 分享需要登录账号才能播放，UC 登录还没做（顶部「网盘」里 UC 暂时只能用插件旧入口）";
+    /** 接口要账号，而本机没有 UC 凭据（游客路走不通时的原话）。 */
+    private static final String LOGIN_REQUIRED =
+            "这条 UC 分享需要登录账号才能播放（顶部「网盘」→ UC，粘贴含 __pus 的 Cookie）";
+
+    /** 有凭据但服务端不认（过期 / 被撤销 / 账号切换）：让 Boss 重新粘贴。 */
+    private static final String LOGIN_EXPIRED = "UC 登录已失效，请在网盘中心重新粘贴 Cookie";
 
     /** 接口没有直链，但也不是明确的失效码。 */
     private static final String NO_DIRECT_URL = "UC 分享没有返回直链，请换一条线路";
@@ -121,37 +147,42 @@ final class UcShareResolver {
                         + " fid="
                         + ident.fid);
         try {
-            Response answer = call(DOWNLOAD_URL, downloadBody(ident));
-            String refusal = refusalFor(answer);
-            if (!refusal.isEmpty()) {
-                lastRefusalReason = refusal;
-                AppLog.w(TAG, "refused: " + refusal);
-                return null;
+            Response answer = call(DOWNLOAD_URL, downloadBody(ident), "");
+            String guestRefusal = refusalFor(answer);
+            if (guestRefusal.isEmpty()) {
+                String url = downloadUrl(parseObjectOrNull(answer.body));
+                if (url.isEmpty()) {
+                    guestRefusal = NO_DIRECT_URL;
+                    AppLog.w(TAG, "refused: answer carried no download_url");
+                } else {
+                    // 直链是带签名的凭据，日志里只留主机名。
+                    AppLog.w(
+                            TAG,
+                            "download_url host="
+                                    + hostOf(url)
+                                    + " cookie="
+                                    + (answer.guestCookie.isEmpty() ? "no" : "yes"));
+                    if (answer.guestCookie.isEmpty()) {
+                        AppLog.w(
+                                TAG,
+                                "no __pugs cookie in the answer, the direct link will probably 403");
+                    }
+                    String guestCookie =
+                            answer.guestCookie.isEmpty() ? "" : "__pugs=" + answer.guestCookie;
+                    // 直链 + Cookie 的组合先自己验一次：这里失败的话，播放器只会黑屏后弹一句笼统话。
+                    String probe = probeRefusal(url, guestCookie);
+                    if (probe.isEmpty()) return episode(lineName, url, guestCookie);
+                    guestRefusal = probe;
+                    AppLog.w(TAG, "refused by the direct link: " + probe);
+                }
+            } else {
+                AppLog.w(TAG, "guest refused: " + guestRefusal);
             }
-            String url = downloadUrl(parseObjectOrNull(answer.body));
-            if (url.isEmpty()) {
-                lastRefusalReason = NO_DIRECT_URL;
-                AppLog.w(TAG, "refused: answer carried no download_url");
-                return null;
-            }
-            // 直链是带签名的凭据，日志里只留主机名。
-            AppLog.w(
-                    TAG,
-                    "download_url host="
-                            + hostOf(url)
-                            + " cookie="
-                            + (answer.guestCookie.isEmpty() ? "no" : "yes"));
-            if (answer.guestCookie.isEmpty()) {
-                AppLog.w(TAG, "no __pugs cookie in the answer, the direct link will probably 403");
-            }
-            // 直链 + Cookie 的组合先自己验一次：这里失败的话，播放器只会黑屏后弹一句笼统话。
-            String probe = probeRefusal(url, answer.guestCookie);
-            if (!probe.isEmpty()) {
-                lastRefusalReason = probe;
-                AppLog.w(TAG, "refused by the direct link: " + probe);
-                return null;
-            }
-            return episode(lineName, url, answer.guestCookie);
+            // 游客路走不通、且这原因正是「要账号」：本机有凭据就用账号 Cookie 再换一次。
+            // 其余原因（分享失效 / 要提取码 / 网络问题）不重试：换账号也救不回来。
+            if (needsAccount(guestRefusal)) return resolveWithAccount(ident, lineName);
+            lastRefusalReason = guestRefusal;
+            return null;
         } catch (IOException error) {
             lastRefusalReason = "UC 分享访问失败（" + describe(error) + "）";
             AppLog.w(TAG, "resolve failed: " + lastRefusalReason);
@@ -160,6 +191,140 @@ final class UcShareResolver {
             AppLog.w(TAG, "resolve failed unexpectedly", error);
         }
         return null;
+    }
+
+    /** 这条失败原因是不是「要账号」（游客接口 401/403，或直链带游客 Cookie 被 401/403）。 */
+    private static boolean needsAccount(String refusal) {
+        return LOGIN_REQUIRED.equals(refusal);
+    }
+
+    /**
+     * 账号兜底：照 Flutter 端 {@code _resolveUcAccount} 移植。先 {@code config} 刷新短效 Cookie，
+     * 再带账号 Cookie 请求同一条 {@code file/download}，拿到直链后用账号 Cookie（不是 {@code __pugs}）
+     * 作剧集头。
+     *
+     * <p>Cookie 口径按参考实现：第一次请求只带一个账号键——{@code __pus} 存在就丢掉 {@code __puus}
+     * （两者同带会被服务端判冲突）；config 的 Set-Cookie 里轮换出来的新值随后面的 download 用。
+     *
+     * <p>失败原因分两类：401/403 是「登录已失效」（让 Boss 重新粘贴），分享类码仍是「分享失效」。
+     *
+     * @return 成功返回剧集；失败返回 null 并写好 {@link #lastRefusalReason}
+     */
+    private static Cms.Episode resolveWithAccount(Ident ident, String lineName) {
+        UcLogin.Credential credential = UcLogin.loadSaved();
+        Map<String, String> cookies = UcLogin.apiCookies(credential);
+        if (cookies.isEmpty()) {
+            lastRefusalReason = LOGIN_REQUIRED;
+            AppLog.w(TAG, "refused: guest path needs an account, no uc.json credential");
+            return null;
+        }
+        if (cookies.containsKey("__pus")) cookies.remove("__puus");
+        AppLog.w(TAG, "account fallback: config, keys=" + cookies.keySet());
+        try {
+            Response config = call(CONFIG_URL, null, cookieHeader(cookies));
+            if (config.http == 404 || config.http == 405 || config.http == 501) {
+                // 参考实现用 GET；万一服务端只收 POST（任务卡的口径），补一次（空 JSON 体）。
+                AppLog.w(TAG, "config GET answered " + config.http + ", retrying as POST");
+                config = call(CONFIG_URL, "{}", cookieHeader(cookies));
+            }
+            // 服务端可能在这里轮换 __pus/__puus，新值给后面的 download 用。
+            cookies.putAll(config.sessionCookies);
+            String refusal = configRefusal(config);
+            if (!refusal.isEmpty()) {
+                lastRefusalReason = refusal;
+                AppLog.w(TAG, "account config refused: " + refusal);
+                return null;
+            }
+            AppLog.w(TAG, "account config ok, keys=" + cookies.keySet());
+            Response answer = call(DOWNLOAD_URL, downloadBody(ident), cookieHeader(cookies));
+            cookies.putAll(answer.sessionCookies);
+            refusal = accountRefusalFor(answer);
+            if (!refusal.isEmpty()) {
+                lastRefusalReason = refusal;
+                AppLog.w(TAG, "account download refused: " + refusal);
+                return null;
+            }
+            String url = downloadUrl(parseObjectOrNull(answer.body));
+            if (url.isEmpty()) {
+                lastRefusalReason = NO_DIRECT_URL;
+                AppLog.w(TAG, "refused: account answer carried no download_url");
+                return null;
+            }
+            String cookie = cookieHeader(cookies);
+            if (cookie.isEmpty()) {
+                lastRefusalReason = LOGIN_EXPIRED;
+                AppLog.w(TAG, "refused: account answer left no usable cookie");
+                return null;
+            }
+            AppLog.w(TAG, "account download_url host=" + hostOf(url));
+            String probe = probeRefusal(url, cookie);
+            if (!probe.isEmpty()) {
+                lastRefusalReason = accountRefusalFor(probe);
+                AppLog.w(TAG, "refused by the account direct link: " + lastRefusalReason);
+                return null;
+            }
+            return episode(lineName, url, cookie);
+        } catch (IOException error) {
+            lastRefusalReason = "UC 账号访问失败（" + describe(error) + "）";
+            AppLog.w(TAG, "account resolve failed: " + lastRefusalReason);
+        } catch (RuntimeException error) {
+            lastRefusalReason = "UC 账号访问失败（解析异常）";
+            AppLog.w(TAG, "account resolve failed unexpectedly", error);
+        }
+        return null;
+    }
+
+    /** 账号路把 401/403 翻成「登录已失效」；其余原因沿用游客路那套话。 */
+    private static String accountRefusalFor(Response answer) {
+        return accountRefusalFor(refusalFor(answer));
+    }
+
+    /** 同上的字符串版（直链探测只回一句话）。 */
+    private static String accountRefusalFor(String refusal) {
+        return LOGIN_REQUIRED.equals(refusal) ? LOGIN_EXPIRED : refusal;
+    }
+
+    /**
+     * config 的判据比 download 松：它只负责刷新短效 Cookie，HTTP 2xx 就算过；正文里带
+     * {@code code}/{@code status} 时才要求 code 0 / status 200（缺字段不算失败——参考实现也是
+     * 「不带这两个键就不判」）。
+     */
+    private static String configRefusal(Response answer) {
+        if (answer.http == 401 || answer.http == 403) return LOGIN_EXPIRED;
+        if (answer.http < 200 || answer.http >= 300) {
+            return "UC 账号访问失败（HTTP " + answer.http + "）";
+        }
+        JsonObject body = parseObjectOrNull(answer.body);
+        if (body == null) return "";
+        int status = optInt(body, "status", 200);
+        int code = optInt(body, "code", 0);
+        if (status == 200 && code == 0) return "";
+        if (code == 41006 || code == 41010 || code == 41011 || code == 41012 || status == 404) {
+            return SHARE_GONE;
+        }
+        if (code == 41008 || code == 41009) return NEED_PASSWORD;
+        String message = optString(body, "message");
+        return LOGIN_EXPIRED
+                + (message.isEmpty() ? "" : "（" + message + "）")
+                + "（code="
+                + code
+                + "，status="
+                + status
+                + "）";
+    }
+
+    /** {@code 名=值; 名=值}；空 map 返回 ""（那就干脆不发 Cookie 头）。 */
+    private static String cookieHeader(Map<String, String> cookies) {
+        if (cookies == null || cookies.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, String> entry : cookies.entrySet()) {
+            String name = text(entry.getKey()).trim();
+            String value = text(entry.getValue()).trim();
+            if (name.isEmpty() || value.isEmpty()) continue;
+            if (sb.length() > 0) sb.append("; ");
+            sb.append(name).append('=').append(value);
+        }
+        return sb.toString();
     }
 
     /**
@@ -241,17 +406,24 @@ final class UcShareResolver {
     }
 
     /**
-     * 一次请求的结果：状态码 + 正文 + 响应里下发的 {@code __pugs} 值（没有则为空）。
+     * 一次请求的结果：状态码 + 正文 + 响应里下发的 {@code __pugs} 值（没有则为空）+ 响应里轮换出来的
+     * 账号 Cookie（{@code __pus}/{@code __puus}，没有则为空 map）。
      */
     private static final class Response {
         final int http;
         final String body;
         final String guestCookie;
+        final Map<String, String> sessionCookies;
 
-        Response(int http, String body, String guestCookie) {
+        Response(
+                int http,
+                String body,
+                String guestCookie,
+                Map<String, String> sessionCookies) {
             this.http = http;
             this.body = body;
             this.guestCookie = guestCookie;
+            this.sessionCookies = sessionCookies;
         }
     }
 
@@ -300,12 +472,13 @@ final class UcShareResolver {
     }
 
     /**
-     * 用 Range 取直链头 1 KB，验证「直链 + __pugs」真的能出数据；能出就返回 ""。
+     * 用 Range 取直链头 1 KB，验证「直链 + Cookie」真的能出数据；能出就返回 ""。
      *
-     * <p>只把确定性的拒绝算成失败（401/403 视为需要账号、404/410 视为分享失效）。网络抖动、5xx、
+     * <p>{@code cookieHeader} 是整行 Cookie（游客路是 {@code __pugs=…}，账号路是 {@code __pus=…}）。
+     * 只把确定性的拒绝算成失败（401/403 视为需要账号、404/410 视为分享失效）。网络抖动、5xx、
      * 意外跳转一律放行：播放器还会自己发一次请求，没必要在解析阶段替它下结论。
      */
-    private static String probeRefusal(String url, String guestCookie) {
+    private static String probeRefusal(String url, String cookieHeader) {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URL(url).openConnection();
@@ -316,8 +489,8 @@ final class UcShareResolver {
             conn.setRequestProperty("User-Agent", UA);
             conn.setRequestProperty("Referer", REFERER);
             conn.setRequestProperty("Range", "bytes=0-1023");
-            if (!guestCookie.isEmpty()) {
-                conn.setRequestProperty("Cookie", "__pugs=" + guestCookie);
+            if (!text(cookieHeader).isEmpty()) {
+                conn.setRequestProperty("Cookie", cookieHeader);
             }
             int http = conn.getResponseCode();
             AppLog.w(TAG, "probe http=" + http + " type=" + text(conn.getContentType()));
@@ -336,15 +509,18 @@ final class UcShareResolver {
      * 造可播的剧集。口径与 {@link QuarkShareResolver} 的 {@code episode(...)} 一致：非 HLS 用
      * {@code _forceMpv} 交给 MPV，HLS 标成 netdisk 的 HLS 让它走直连（带 Cookie）；两者都
      * {@code _noCache}，因为签名直链很短命，媒体缓存会把它写坏。
+     *
+     * <p>{@code cookieHeader} 是整行 Cookie：游客路传 {@code __pugs=…}，账号路传 {@code __pus=…}；
+     * UA / Referer 两条路不变（任务卡第 3 节第 2 条）。
      */
-    private static Cms.Episode episode(String lineName, String url, String guestCookie) {
+    private static Cms.Episode episode(String lineName, String url, String cookieHeader) {
         Cms.Episode episode = new Cms.Episode();
         String name = text(lineName).trim();
         if (name.isEmpty()) name = "UC网盘";
         episode.name = name;
         episode.url = url;
-        if (!guestCookie.isEmpty()) {
-            episode.headers.put("Cookie", "__pugs=" + guestCookie);
+        if (!text(cookieHeader).isEmpty()) {
+            episode.headers.put("Cookie", cookieHeader);
         }
         episode.headers.put("User-Agent", UA);
         episode.headers.put("Referer", REFERER);
@@ -382,34 +558,44 @@ final class UcShareResolver {
     // ---------------------------------------------------------------- HTTP plumbing
 
     /**
-     * 一个 JSON POST。不跟随跳转、不加 {@code Accept-Encoding}（正文按 UTF-8 解，不解 gzip）。
-     * 非 2xx 也把正文读回来，由 {@link #refusalFor(Response)} 统一翻译。
+     * 一个 JSON 请求。{@code jsonBody} 为 null 时发 GET（config 就是这条），否则发 POST。
+     * 不跟随跳转、不加 {@code Accept-Encoding}（正文按 UTF-8 解，不解 gzip）。非 2xx 也把正文读回来，
+     * 由 {@link #refusalFor(Response)} 统一翻译。
+     *
+     * @param cookieHeader 要发的 Cookie 头；空串就不发这一行
      */
-    private static Response call(String url, String jsonBody) throws IOException {
+    private static Response call(String url, String jsonBody, String cookieHeader)
+            throws IOException {
+        boolean post = jsonBody != null;
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URL(url).openConnection();
             conn.setInstanceFollowRedirects(false);
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
             conn.setReadTimeout(READ_TIMEOUT_MS);
-            conn.setRequestMethod("POST");
+            conn.setRequestMethod(post ? "POST" : "GET");
             conn.setRequestProperty("User-Agent", UA);
             conn.setRequestProperty("Accept", ACCEPT);
             conn.setRequestProperty("Referer", REFERER);
-            byte[] payload = jsonBody.getBytes(StandardCharsets.UTF_8);
-            conn.setRequestProperty("Content-Type", "application/json");
-            conn.setDoOutput(true);
-            conn.setFixedLengthStreamingMode(payload.length);
-            OutputStream out = conn.getOutputStream();
-            try {
-                out.write(payload);
-                out.flush();
-            } finally {
-                closeQuietly(out);
+            if (!text(cookieHeader).isEmpty()) {
+                conn.setRequestProperty("Cookie", cookieHeader);
+            }
+            if (post) {
+                byte[] payload = jsonBody.getBytes(StandardCharsets.UTF_8);
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setDoOutput(true);
+                conn.setFixedLengthStreamingMode(payload.length);
+                OutputStream out = conn.getOutputStream();
+                try {
+                    out.write(payload);
+                    out.flush();
+                } finally {
+                    closeQuietly(out);
+                }
             }
             int http = conn.getResponseCode();
             String body = readAll(http >= 400 ? conn.getErrorStream() : conn.getInputStream());
-            return new Response(http, body, pugsCookie(conn));
+            return new Response(http, body, pugsCookie(conn), sessionCookies(conn));
         } finally {
             if (conn != null) conn.disconnect();
         }
@@ -417,6 +603,21 @@ final class UcShareResolver {
 
     /** 从 Set-Cookie 里挑出 {@code __pugs} 的值；响应没给就返回 ""。 */
     private static String pugsCookie(HttpURLConnection conn) {
+        return setCookieValue(conn, PUGS_COOKIE);
+    }
+
+    /** 响应里轮换出来的账号 Cookie（{@code __pus}/{@code __puus}）；没给就是空 map。 */
+    private static Map<String, String> sessionCookies(HttpURLConnection conn) {
+        Map<String, String> out = new LinkedHashMap<>();
+        String pus = setCookieValue(conn, PUS_COOKIE);
+        if (!pus.isEmpty()) out.put("__pus", pus);
+        String puus = setCookieValue(conn, PUUS_COOKIE);
+        if (!puus.isEmpty()) out.put("__puus", puus);
+        return out;
+    }
+
+    /** 按给定形态从所有 Set-Cookie 头里取第一个命中的值；没有返回 ""。 */
+    private static String setCookieValue(HttpURLConnection conn, Pattern pattern) {
         Map<String, List<String>> fields = conn.getHeaderFields();
         if (fields == null) return "";
         for (Map.Entry<String, List<String>> field : fields.entrySet()) {
@@ -425,7 +626,7 @@ final class UcShareResolver {
             List<String> values = field.getValue();
             if (values == null) continue;
             for (String value : values) {
-                Matcher matcher = PUGS_COOKIE.matcher(text(value));
+                Matcher matcher = pattern.matcher(text(value));
                 if (matcher.find()) return matcher.group(1);
             }
         }

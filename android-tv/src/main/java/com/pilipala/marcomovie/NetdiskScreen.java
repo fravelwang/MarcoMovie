@@ -81,15 +81,17 @@ final class NetdiskScreen {
         strip.setPadding(0, a.dp(4), 0, a.dp(4));
         String[][] drives = {
             {QuarkQrLogin.PROVIDER, "夸克"},
-            {"uc", "UC"},
-            {"baidu", "百度"},
-            {"ali", "阿里"},
+            {UcLogin.PROVIDER, "UC"},
+            {BaiduLogin.PROVIDER, "百度"},
+            {AliLogin.PROVIDER, "阿里"},
         };
         for (String[] drive : drives) {
             boolean current = drive[0].equals(driveKey);
-            // 三家登录态都是本机凭据文件说了算；UC 还没有原生登录，只显示盘名。
+            // 四家登录态都是本机凭据文件说了算（UC 2026-11-26 起也有了自己的 uc.json）。
             boolean logged =
                     (QuarkQrLogin.PROVIDER.equals(drive[0]) && QuarkQrLogin.loadSaved() != null)
+                            || (UcLogin.PROVIDER.equals(drive[0])
+                                    && UcLogin.loadSaved() != null)
                             || (BaiduLogin.PROVIDER.equals(drive[0])
                                     && BaiduLogin.loadSaved() != null)
                             || (AliLogin.PROVIDER.equals(drive[0])
@@ -97,6 +99,7 @@ final class NetdiskScreen {
             final String key = drive[0];
             boolean nativeLogin =
                     QuarkQrLogin.PROVIDER.equals(key)
+                            || UcLogin.PROVIDER.equals(key)
                             || BaiduLogin.PROVIDER.equals(key)
                             || AliLogin.PROVIDER.equals(key);
             String label = drive[1] + (nativeLogin ? (logged ? " · 已登录" : " · 未登录") : "");
@@ -115,6 +118,11 @@ final class NetdiskScreen {
     }
 
     private void onDrivePill(String key) {
+        if (UcLogin.PROVIDER.equals(key)) {
+            // UC 本次也只做「登录 + 分享线路」：pill 的入口是粘贴 Cookie（游客接口被限流时的兜底）。
+            UcLogin.showPasteDialog(a, this::reloadSelf);
+            return;
+        }
         if (BaiduLogin.PROVIDER.equals(key)) {
             // 百度本次只做「登录 + 分享线路」：浏览不在范围内，pill 的入口是粘贴 Cookie。
             BaiduLogin.showPasteDialog(a, this::reloadSelf);
@@ -126,8 +134,8 @@ final class NetdiskScreen {
             return;
         }
         if (!QuarkQrLogin.PROVIDER.equals(key)) {
-            // 现在只剩 UC 走到这里：阿里与百度各有自己的粘贴入口。
-            a.toast("UC 的原生浏览还没做，暂时只能用「更多 → 插件配置中心」里的旧登录");
+            // 剩下的都是没接过的盘：没有登录入口也没有原生浏览。
+            a.toast("这个网盘还没有原生登录，暂时只能用「更多 → 插件配置中心」里的旧登录");
             return;
         }
         if (QuarkQrLogin.loadSaved() == null) {
@@ -246,8 +254,19 @@ final class NetdiskScreen {
                                     + "）。这次只做登录与分享线路：播放走详情页的「阿里分享」线路，原生浏览还没做。");
             return;
         }
+        if (UcLogin.PROVIDER.equals(driveKey)) {
+            // UC 的原生浏览不在本次范围：这里只把登录状态与去哪播说清楚，不摆一个死格子。
+            UcLogin.Credential saved = UcLogin.loadSaved();
+            status.setText(
+                    saved == null
+                            ? "UC 网盘还没登录：点上面的「UC」pill 粘贴 Cookie。这次只做登录与分享线路，原生浏览还没做。"
+                            : "UC 网盘已登录（"
+                                    + UcLogin.describe(saved)
+                                    + "）。这次只做登录与分享线路：播放走详情页的「UC」线路，游客接口被限流时自动改用账号 Cookie；原生浏览还没做。");
+            return;
+        }
         if (!QuarkQrLogin.PROVIDER.equals(driveKey)) {
-            status.setText("这个网盘还没有原生浏览（下一步做 UC）");
+            status.setText("这个网盘还没有原生浏览");
             return;
         }
         QuarkQrLogin.Credential credential = QuarkQrLogin.loadSaved();
