@@ -27,8 +27,8 @@ import java.util.concurrent.Executors;
  * previous drive's rows behind. Every 牌面 logs in the same way: 扫码为主 — {@link NetdiskWebLogin}
  * opens that drive's own web login page, the phone App scans the QR on the TV, and the credential is
  * captured from the WebView and saved. 手工粘贴 is kept as the 兜底 (Boss 2026-11-26: 不要手工粘
- * Cookie/token). 阿里 / UC / 115 keep their account credential for their share resolvers; their
- * browsers are still out of scope; 115 目前只存凭据。
+ * Cookie/token). 阿里 / 115 keep their account credential for their share resolvers; their browsers
+ * are still out of scope; 115 目前只存凭据。
  */
 final class NetdiskScreen {
 
@@ -342,14 +342,14 @@ final class NetdiskScreen {
             return;
         }
         if (UcLogin.PROVIDER.equals(driveKey)) {
-            // UC 的原生浏览不在本次范围：这里只把登录状态与去哪播说清楚，不摆一个死格子。
             UcLogin.Credential saved = UcLogin.loadSaved();
-            status.setText(
-                    saved == null
-                            ? "UC 网盘还没登录：点上面已选中的「UC」牌面，再选「扫码登录」，用手机 UC 扫码。这次只做登录与分享线路，原生浏览还没做。"
-                            : "UC 网盘已登录（"
-                                    + UcLogin.describe(saved)
-                                    + "）。这次只做登录与分享线路：播放走详情页的「UC」线路，游客接口被限流时自动改用账号 Cookie；原生浏览还没做。");
+            if (saved == null) {
+                status.setText(
+                        "UC 网盘还没登录：点上面已选中的「UC」牌面，再选「扫码登录」，用手机 UC 扫码。"
+                                + "登录之后就能在这里浏览自己的文件、直接点视频播放。");
+                return;
+            }
+            listAsync(new UcDriveClient(saved), mine);
             return;
         }
         if (NetdiskWebLogin.PROVIDER_115.equals(driveKey)) {
@@ -437,6 +437,13 @@ final class NetdiskScreen {
         gridHost.addView(wrap, new LinearLayout.LayoutParams(-1, -2));
     }
 
+    /** A file the player can open: the drive's own hint, or a video container extension. */
+    private static boolean isPlayable(NetdiskEntry entry) {
+        return entry != null
+                && !entry.dir
+                && (entry.videoHint || NetdiskEntry.isVideoName(entry.name));
+    }
+
     private void renderGrid(NetdiskDrive drive, List<NetdiskEntry> rows, String error) {
         gridHost.removeAllViews();
         if (error != null) {
@@ -452,7 +459,7 @@ final class NetdiskScreen {
         List<NetdiskEntry> others = new ArrayList<>();
         for (NetdiskEntry row : rows) {
             if (row.dir) folders.add(row);
-            else if (NetdiskEntry.isVideoName(row.name)) videos.add(row);
+            else if (isPlayable(row)) videos.add(row);
             else others.add(row);
         }
         status.setText(
@@ -479,7 +486,7 @@ final class NetdiskScreen {
                 gridHost.addView(row, rlp);
             }
             NetdiskEntry entry = all.get(i);
-            boolean playable = !entry.dir && NetdiskEntry.isVideoName(entry.name);
+            boolean playable = isPlayable(entry);
             View card = buildCard(drive, entry, playable, cardW);
             if (first == null) first = card;
             LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, -2, 1f);

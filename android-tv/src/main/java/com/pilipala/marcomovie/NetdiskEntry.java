@@ -21,12 +21,23 @@ final class NetdiskEntry {
     final String name;
     final boolean dir;
     final long size;
+    /**
+     * The service itself says this row is a video ({@code format_type} / {@code category}). UC files
+     * may have no extension at all, so the name alone is not enough there; 夸克/百度 leave it false
+     * and the suffix check decides.
+     */
+    final boolean videoHint;
 
     NetdiskEntry(String fid, String name, boolean dir, long size) {
+        this(fid, name, dir, size, false);
+    }
+
+    NetdiskEntry(String fid, String name, boolean dir, long size, boolean videoHint) {
         this.fid = fid == null ? "" : fid;
         this.name = name == null ? "" : name;
         this.dir = dir;
         this.size = size;
+        this.videoHint = videoHint && !dir;
     }
 
     /** True for the container formats the player can open; extension match, case-insensitive. */

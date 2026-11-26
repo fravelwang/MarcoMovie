@@ -69,7 +69,7 @@ final class UcShareResolver {
     private static final String ACCEPT = "application/json";
 
     /** 免登录换直链的唯一入口；query 是实测那串，空的 {@code __dt}/{@code __t} 也照发。 */
-    private static final String DOWNLOAD_URL =
+    static final String DOWNLOAD_URL =
             "https://pc-api.uc.cn/1/clouddrive/file/download"
                     + "?entry=ft&fr=pc&pr=UCBrowser&uc_param_str=&__dt=&__t=";
 
@@ -81,7 +81,7 @@ final class UcShareResolver {
      * body/form 时才用 POST，config 那次没有 body，所以是 GET。这里按参考实现先发 GET；若服务端
      * 明确回「方法/路由不对」（404/405/501），再补一次 POST，免得两种口径哪一种落空都白跑。
      */
-    private static final String CONFIG_URL =
+    static final String CONFIG_URL =
             "https://pc-api.uc.cn/1/clouddrive/config?pr=UCBrowser&fr=pc";
 
     private static final int CONNECT_TIMEOUT_MS = 8000;
@@ -314,7 +314,7 @@ final class UcShareResolver {
     }
 
     /** {@code 名=值; 名=值}；空 map 返回 ""（那就干脆不发 Cookie 头）。 */
-    private static String cookieHeader(Map<String, String> cookies) {
+    static String cookieHeader(Map<String, String> cookies) {
         if (cookies == null || cookies.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
         for (Map.Entry<String, String> entry : cookies.entrySet()) {
@@ -409,7 +409,7 @@ final class UcShareResolver {
      * 一次请求的结果：状态码 + 正文 + 响应里下发的 {@code __pugs} 值（没有则为空）+ 响应里轮换出来的
      * 账号 Cookie（{@code __pus}/{@code __puus}，没有则为空 map）。
      */
-    private static final class Response {
+    static final class Response {
         final int http;
         final String body;
         final String guestCookie;
@@ -456,7 +456,7 @@ final class UcShareResolver {
     }
 
     /** {@code data[0].download_url}；有的部署给 {@code data.download_url}，两种都认。 */
-    private static String downloadUrl(JsonObject body) {
+    static String downloadUrl(JsonObject body) {
         JsonElement data = body == null ? null : body.get("data");
         if (data == null || data.isJsonNull()) return "";
         if (data.isJsonArray()) {
@@ -566,7 +566,7 @@ final class UcShareResolver {
      *
      * @param cookieHeader 要发的 Cookie 头；空串就不发这一行
      */
-    private static Response call(String url, String jsonBody, String cookieHeader)
+    static Response call(String url, String jsonBody, String cookieHeader)
             throws IOException {
         boolean post = jsonBody != null;
         HttpURLConnection conn = null;
