@@ -553,6 +553,9 @@ final class BaiduShareResolver {
         ensureSaveDir(credential, vars.bdstoken);
         // 3) 播前清理：这个目录只放本应用转存的临时副本，整个清空（与夸克清 MarcoPlayer 同一套口径）。
         int cleaned = clearSaveDir(credential, vars.bdstoken);
+        // 3b) 删除是异步的（async=2）：等目录真的空了再转存，否则 transfer 会回 errno 4，并把**正在
+        // 被删的那份**当成「已转存」复用，filemetas 拿到的 dlink 随后 404（2026-11-27 实测）。
+        if (cleaned > 0) waitSaveDirEmpty(credential, vars.bdstoken);
         // 4) 转存本集，拿 to_fs_id。
         TransferResult copy = transfer(credential, vars.bdstoken, ident);
         if (!copy.ok()) {
@@ -752,6 +755,74 @@ final class BaiduShareResolver {
         return out;
     }
 
+    /** 播前清理之后最多等这么久：{@value #CLEAN_WAIT_TRIES} 次 × {@value #CLEAN_WAIT_MS} ms。 */
+    private static final int CLEAN_WAIT_TRIES = 4;
+
+    private static final long CLEAN_WAIT_MS = 500L;
+
+    /** 第一次 transfer 回「已转存」但那份不存在时，等 300 ms 再转一次（删除可能刚好落定）。 */
+    private static final long DUP_RETRY_DELAY_MS = 300L;
+
+    /**
+     * 等 {@link #SAVE_DIR} 真的空：{@code api/filemanager?opera=delete&async=2} 只保证删除**已受理**，
+     * 返回 {@code errno 0} 时文件可能还在（2026-11-27 实测），此时转存会撞上「已转存」并把正在删的
+     * 副本当现成的用。最多 {@value #CLEAN_WAIT_TRIES} 次、每次 {@value #CLEAN_WAIT_MS} ms；超时照常
+     * 转存，只把结果写进日志。
+     *
+     * @return true 表示轮询到目录已无文件
+     */
+    private static boolean waitSaveDirEmpty(BaiduLogin.Credential credential, String bdstoken) {
+        for (int tries = 1; tries <= CLEAN_WAIT_TRIES; tries++) {
+            DirListing listing = listDir(credential, bdstoken, SAVE_DIR);
+            if (listing.ok() && !hasFileRows(listing)) {
+                AppLog.w(TAG, "clean wait ok tries=" + tries);
+                return true;
+            }
+            if (tries < CLEAN_WAIT_TRIES) sleepQuietly(CLEAN_WAIT_MS);
+        }
+        AppLog.w(TAG, "clean wait timed out tries=" + CLEAN_WAIT_TRIES);
+        return false;
+    }
+
+    /** 目录列举里还有没有**文件**（子目录不算）。 */
+    private static boolean hasFileRows(DirListing listing) {
+        if (listing == null) return false;
+        for (JsonObject row : listing.entries) {
+            if (NetdiskShareHttp.optInt(row, "isdir", 0) == 0) return true;
+        }
+        return false;
+    }
+
+    /**
+     * {@code fs_id} 现在还在不在 {@link #SAVE_DIR} 里；在就返回那一行（用来复用，也顺手拿路径）。
+     *
+     * <p>列目录失败按「不在」处理：宁可多转存一次，也不把一份可能正在被删的副本交给 filemetas。
+     */
+    private static JsonObject fileInSaveDir(
+            BaiduLogin.Credential credential, String bdstoken, String fsId) {
+        String wanted = text(fsId).trim();
+        if (wanted.isEmpty()) return null;
+        DirListing listing = listDir(credential, bdstoken, SAVE_DIR);
+        if (!listing.ok()) {
+            AppLog.w(TAG, "dup check skipped: list failed " + listing.error);
+            return null;
+        }
+        for (JsonObject row : listing.entries) {
+            if (NetdiskShareHttp.optInt(row, "isdir", 0) != 0) continue;
+            if (wanted.equals(NetdiskShareHttp.optString(row, "fs_id").trim())) return row;
+        }
+        return null;
+    }
+
+    private static void sleepQuietly(long ms) {
+        if (ms <= 0) return;
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     /**
      * 播前清理：把 {@link #SAVE_DIR} 里的文件全删掉（{@code POST /api/filemanager?opera=delete&async=2}，
      * 表单 {@code filelist=["/MarcoMovie/x.mp4", …]}，父会话已在盒子上实测 {@code errno 0}）。
@@ -813,6 +884,8 @@ final class BaiduShareResolver {
     /** 一次转存的结果：成功时 {@code toFsId} 非空、{@code path} 是它在盘里的路径。 */
     private static final class TransferResult {
         String toFsId = "";
+        /** errno 4 时百度说「已经有一份」的 fs_id；只有验活通过才会升成 {@link #toFsId}。 */
+        String duplicateFsId = "";
         String path = "";
         String error = "";
         String show = "";
@@ -839,6 +912,60 @@ final class BaiduShareResolver {
      * 列一次目录，按时间取最新的那个文件（刚转存进来的就是它）。
      */
     private static TransferResult transfer(
+            BaiduLogin.Credential credential, String bdstoken, Ident ident) {
+        TransferResult first = transferOnce(credential, bdstoken, ident);
+        if (first.errno != ERRNO_ALREADY_SAVED) return first;
+        // 「已转存」不一定是好事：上一轮的删除可能还没落定，duplicated.list[0].fs_id 指的就是那份正在
+        // 被删的副本（随后 filemetas 的 dlink 404）。先确认它还在，不在就重试一次 transfer。
+        JsonObject aliveRow = fileInSaveDir(credential, bdstoken, first.duplicateFsId);
+        if (aliveRow != null) {
+            AppLog.w(
+                    TAG,
+                    "dup fs_id="
+                            + first.duplicateFsId
+                            + " alive=yes retry=no");
+            first.toFsId = first.duplicateFsId;
+            first.path = pathOf(aliveRow);
+            first.error = "";
+            AppLog.w(
+                    TAG,
+                    "transfer says already saved, reuse fs_id="
+                            + first.toFsId
+                            + " path="
+                            + first.path);
+            return first;
+        }
+        AppLog.w(
+                TAG,
+                "dup fs_id=" + first.duplicateFsId + " alive=no retry=yes");
+        sleepQuietly(DUP_RETRY_DELAY_MS);
+        TransferResult retry = transferOnce(credential, bdstoken, ident);
+        if (retry.errno == ERRNO_ALREADY_SAVED) {
+            JsonObject retryRow =
+                    fileInSaveDir(credential, bdstoken, retry.duplicateFsId);
+            boolean alive = retryRow != null;
+            AppLog.w(
+                    TAG,
+                    "dup retry fs_id="
+                            + retry.duplicateFsId
+                            + " alive="
+                            + (alive ? "yes" : "no")
+                            + " reuse="
+                            + (alive ? "yes" : "no"));
+            if (alive) {
+                retry.toFsId = retry.duplicateFsId;
+                retry.path = pathOf(retryRow);
+                retry.error = "";
+            }
+        }
+        return retry;
+    }
+
+    /**
+     * 一次 transfer 请求。{@code errno 4}（已转存）只把百度回的 {@code duplicated.list[].fs_id} 记进
+     * {@link TransferResult#duplicateFsId}，是否复用它由 {@link #transfer} 验活后决定。
+     */
+    private static TransferResult transferOnce(
             BaiduLogin.Credential credential, String bdstoken, Ident ident) {
         TransferResult out = new TransferResult();
         String url =
@@ -893,12 +1020,10 @@ final class BaiduShareResolver {
         out.show = baiduMessage(body);
         if (out.errno == ERRNO_ALREADY_SAVED) {
             // 目录里已经有同一份（上一次没清干净，或两个解析撞在一起）。百度把现成的 fs_id 放在
-            // duplicated.list[] 里：这不是失败，直接用那一份，别再转一次。
-            out.toFsId = duplicatedFsId(body);
-            if (!out.toFsId.isEmpty()) {
-                AppLog.w(TAG, "transfer says already saved, reuse fs_id=" + out.toFsId);
-                return out;
-            }
+            // duplicated.list[] 里，但它可能正在被异步删除（2026-11-27 实测）：这里只记下来，
+            // 由 transfer() 列目录验活后再决定复用还是重转。
+            out.duplicateFsId = duplicatedFsId(body);
+            return out;
         }
         if (out.errno != 0) return out;
         out.toFsId = transferFsId(body);
