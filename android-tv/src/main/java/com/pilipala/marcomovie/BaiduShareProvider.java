@@ -34,7 +34,10 @@ import java.util.regex.Pattern;
  *       {@code walk dir=… rows=… videos=…}；
  *   <li>id 是六段 {@code ++} 分隔：{@code bd ++ share_id ++ uk ++ fs_id ++ encode(sekey) ++
  *       encode(surl|sign|timestamp)}，播放侧由 {@link BaiduShareResolver} 拿它换直链；第 6 段是网页
- *       下载接口要的分享页凭据（{@link BaiduShareResolver.ShareTicket}），取不到时留空。
+ *       下载接口要的分享页凭据（{@link BaiduShareResolver.ShareTicket}）。这份凭据先按 HTTP 从分享页里
+ *       解析；百度对没有 JS 的 HTTP 客户端只回壳页面（没有 {@code yunData}），所以 HTTP 拿不到时再用
+ *       应用自己的 WebView（真浏览器）跑一遍页面取一次（{@link WebPageProbe}）。两条路都取不到签名时
+ *       第 6 段只带 {@code surl}（{@code surl||}），播放时还能再开一次分享页现取。
  * </ol>
  *
  * <p>造出来的 id 一律先过 {@link BaiduShareResolver#looksLikeShareId(String)}（与播放侧同一套判据）：
@@ -141,6 +144,18 @@ final class BaiduShareProvider implements NetdiskShareProvider {
             BaiduShareResolver.ShareTicket retry =
                     BaiduShareResolver.sharePageTicket(again, shareId);
             if (retry.hasSignature()) ticket = retry;
+        }
+        // 两条 HTTP 都没拿到签名时，借应用自己的 WebView 当一回真浏览器：百度对没有 JS 的 HTTP
+        // 客户端只回 3512 字节的壳页面（没有 yunData），页面跑起来之后 window.yunData 才有
+        // sign/timestamp。Cookie 用访客罐（BAIDUID + 验过提取码的 BDCLND），不带账号凭据。
+        if (!ticket.hasSignature()) {
+            BaiduShareResolver.ShareTicket probed =
+                    BaiduShareResolver.webViewTicket(shareId, jar.header());
+            if (probed != null && probed.hasSignature()) {
+                ticket = probed;
+            } else {
+                AppLog.w(TAG, "provider=baidu share " + shortId + " webview ticket sign=no");
+            }
         }
         AppLog.w(
                 TAG,

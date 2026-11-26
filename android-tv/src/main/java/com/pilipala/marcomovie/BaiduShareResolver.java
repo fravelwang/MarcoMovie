@@ -34,6 +34,8 @@ import java.util.Map;
  *       {@code https://pan.baidu.com/} → {@code list[0].dlink}。{@code sign} / {@code timestamp}
  *       来自分享页的 {@code window.yunData} / {@code locals.mset}：解析分享时抓到的那份随 id 第 6 段
  *       带过来（{@link #sharePageTicket}），失效或没带就再开一次分享页（带 {@code BDCLND}）现取；
+ *       HTTP 拿不到签名时再用应用自己的 WebView（真浏览器）把页面跑一遍取 {@code window.yunData}
+ *       —— 百度对没有 JS 的 HTTP 客户端只回壳页面（见 {@link WebPageProbe}）；
  *   <li><b>旧接口（兜底）</b>：{@code GET https://pan.baidu.com/share/list?shareid=…&uk=…&fid=…
  *       &sekey=…&origin=dlna&devuid=<DEVICE>&clienttype=1&channel=<CHANNEL>&version=<VERSION>&time=…
  *       &rand=…}，签名 {@code rand = sha1( hexSha1(BDUSS) + uid + RAND_KEY + time + DEVICE +
@@ -64,7 +66,8 @@ import java.util.Map;
  *
  * <p>第 [5] 段是网页接口用的 {@code surl}（分享页短 id，用来重开分享页刷新 sign）、{@code sign} 与
  * {@code timestamp}。老的五段 id（升级前解析出来的、历史记录里存着的）仍然认，只是没有第 [5] 段，
- * 走不了网页接口 —— 那时只剩兜底那条，失败原因里会写明。
+ * 走不了网页接口 —— 那时只剩兜底那条，失败原因里会写明。第 [5] 段也可以只带 {@code surl}
+ * （{@code surl||}）：解析分享时没取到签名，播放时还能靠它再开一次分享页（WebView）。
  *
  * <p>线程：{@link #resolve(String, String, String)} 会打两三次网络（单请求 8 秒超时），必须在后台线程
  * 调用。同步执行、永不抛，失败返回 null，原因放 {@link #lastFailureReason()}，与
@@ -118,6 +121,34 @@ final class BaiduShareResolver {
 
     /** 分享已取消 / 已过期 / 被删（与 Flutter 端 {@code _checkBaidu} 同一组 errno）。 */
     private static final String SHARE_GONE = "百度分享解析失败：分享已失效（链接被取消或已过期），请换一条线路";
+
+    /**
+     * 分享页在应用自己的 WebView（真浏览器）里也没给出 {@code yunData} 时的失败注脚：HTTP 与 WebView 两条
+     * 路都没拿到 {@code sign}/{@code timestamp} 时拼进失败原因，让用户知道这一页可能要求验证。
+     */
+    private static final String WEBVIEW_NO_YUN_DATA = "WebView 也没拿到 yunData（分享页可能要求验证）";
+
+    /**
+     * 在分享页里取 {@code sign}/{@code timestamp} 的表达式：优先 {@code window.yunData}，其次
+     * {@code locals.mset}（页面里另一种写法）。只回 {@code sign}/{@code timestamp} 两个字段（整份
+     * {@code yunData} 带着文件列表，几十上百 KB，没必要全塞过 JS 桥）；一处都取不到时回空串，
+     * 让 {@link WebPageProbe} 触发那次 1.5 秒重试。
+     */
+    static final String SHARE_PAGE_JS =
+            "(function(){try{"
+                    + "function pick(v){if(v==null)return null;"
+                    + "if(typeof v==='string'){try{v=JSON.parse(v);}catch(e){return null;}}"
+                    + "if(typeof v!=='object')return null;"
+                    + "if(v.sign==null&&v.timestamp==null)return null;"
+                    + "var o={};if(v.sign!=null)o.sign=String(v.sign);"
+                    + "if(v.timestamp!=null)o.timestamp=String(v.timestamp);"
+                    + "return JSON.stringify(o);}"
+                    + "var r=pick(window.yunData);if(r)return r;"
+                    + "var l=window.locals;if(l){"
+                    + "r=pick(l.mset)||pick(l._mset);if(r)return r;"
+                    + "try{if(typeof l.get==='function'){r=pick(l.get('mset'));if(r)return r;}}catch(e){}"
+                    + "}"
+                    + "return '';}catch(e){return '';}})()";
 
     /**
      * 现场（2026-11-26）{@code /share/list} 回的 errno。登录态是好的（uid 接口当时回了
@@ -205,6 +236,8 @@ final class BaiduShareResolver {
         String error = "";
         /** 百度自己那句话：{@code show_msg}，没有就 {@code errmsg}；日志与提示都用它定案。 */
         String show = "";
+        /** 附在失败原因末尾的补充（例如「WebView 也没拿到 yunData」）；正常为空。 */
+        String hint = "";
         int http;
         int errno;
 
@@ -222,17 +255,23 @@ final class BaiduShareResolver {
          * 说明（网络 / 形状），其次 HTTP 状态，再其次是百度的 errno 与它自己那句话。
          */
         String describe() {
-            if (!error.isEmpty()) return error;
-            if (http >= 400) return "返回 HTTP " + http;
-            if (errno != 0) {
+            String reason;
+            if (!error.isEmpty()) {
+                reason = error;
+            } else if (http >= 400) {
+                reason = "返回 HTTP " + http;
+            } else if (errno != 0) {
                 String said = text(show).trim();
                 StringBuilder sb = new StringBuilder("返回错误（errno=").append(errno);
                 if (!said.isEmpty()) sb.append("，").append(said);
                 sb.append("）");
                 if (isAuthErrno(errno)) sb.append("，可能登录已失效，可在网盘中心重新粘贴 Cookie");
-                return sb.toString();
+                reason = sb.toString();
+            } else {
+                reason = "没有返回播放地址（errno=0）";
             }
-            return "没有返回播放地址（errno=0）";
+            if (!hint.isEmpty()) reason += "，" + hint;
+            return reason;
         }
     }
 
@@ -286,13 +325,19 @@ final class BaiduShareResolver {
 
     /**
      * 网页端 sharedownload：先用 id 里带的 {@code sign}/{@code timestamp} 打一次（解析分享时抓的，
-     * 通常还在有效期内）；失败（常见是 sign 过期或没带）再带着 {@code BDCLND} 开一次分享页现取，
-     * 取到不一样的就再打一次。最多两次 POST + 一次 GET。
+     * 通常还在有效期内）；失败（常见是 sign 过期或没带）再取一份新的 —— 先按 HTTP 重开分享页（快，
+     * 但百度对没有 JS 的客户端只回壳页面），HTTP 取不到签名时再用应用自己的 WebView（真浏览器）把页面
+     * 跑一遍取 {@code window.yunData}；新 sign 与已经打过的不同才再打一次。
+     *
+     * <p>两条取签名的路都没给出可用签名时，失败原因里补一句「WebView 也没拿到 yunData（分享页可能要求
+     * 验证）」（见 {@link Attempt#hint}），不让上层只看到一句笼统的「缺少 sign」。
      */
     private static Attempt webAttempt(BaiduLogin.Credential credential, Ident ident) {
         ShareTicket stored = ident.ticket;
         Attempt last = null;
+        List<String> tried = new ArrayList<>();
         if (stored.hasSignature()) {
+            tried.add(stored.sign);
             last = sharedownload(credential, ident, stored);
             if (last.ok()) return last;
             AppLog.w(
@@ -304,12 +349,15 @@ final class BaiduShareResolver {
                             + "）");
         }
         if (!stored.surl.isEmpty()) {
-            ShareTicket fresh = sharePageTicket(ident);
-            boolean changed =
-                    fresh != null && fresh.hasSignature() && !fresh.sign.equals(stored.sign);
-            if (changed) {
+            // 现取一份：先走 HTTP（快）。HTTP 拿到签名就按它打 —— 那已经是百度的明确答案，不为一次
+            // 确定的失败再多等 WebView 的十几秒；HTTP 拿不到签名才借 WebView 当一回真浏览器
+            // （百度对没有 JS 的 HTTP 客户端只回壳页面，页面跑起来 window.yunData 才有 sign/timestamp）。
+            ShareTicket http = sharePageTicket(ident);
+            boolean httpSigned = http != null && http.hasSignature();
+            if (httpSigned && !tried.contains(http.sign)) {
+                tried.add(http.sign);
                 AppLog.w(TAG, "retry sharedownload with fresh sign from share page");
-                last = sharedownload(credential, ident, fresh);
+                last = sharedownload(credential, ident, http);
                 if (last.ok()) return last;
                 AppLog.w(
                         TAG,
@@ -318,6 +366,43 @@ final class BaiduShareResolver {
                                 + "（errno="
                                 + last.errno
                                 + "）");
+            }
+            if (!httpSigned) {
+                ShareTicket webview = webViewTicket(ident);
+                if (webview == null || !webview.hasSignature()) {
+                    AppLog.w(
+                            TAG,
+                            "webview ticket unusable for share="
+                                    + ident.shareId
+                                    + "（"
+                                    + WEBVIEW_NO_YUN_DATA
+                                    + "）");
+                    if (last == null) {
+                        last = new Attempt();
+                        last.error =
+                                "缺少 sign/timestamp（分享页与 id 里都没取到；"
+                                        + WEBVIEW_NO_YUN_DATA
+                                        + "）";
+                    } else {
+                        last.hint = WEBVIEW_NO_YUN_DATA;
+                    }
+                    return last;
+                }
+                if (tried.contains(webview.sign)) {
+                    AppLog.w(TAG, "webview sign already tried, skip sharedownload");
+                } else {
+                    tried.add(webview.sign);
+                    AppLog.w(TAG, "retry sharedownload with fresh sign from webview");
+                    last = sharedownload(credential, ident, webview);
+                    if (last.ok()) return last;
+                    AppLog.w(
+                            TAG,
+                            "sharedownload with webview sign failed: "
+                                    + last.describe()
+                                    + "（errno="
+                                    + last.errno
+                                    + "）");
+                }
             }
         }
         if (last == null) {
@@ -416,6 +501,90 @@ final class BaiduShareResolver {
     }
 
     /**
+     * 用应用自己的 WebView（真浏览器）重开一次分享页取 {@code sign}/{@code timestamp}：百度对没有 JS 的
+     * HTTP 客户端只回 3512 字节的壳页面（没有 {@code yunData}），页面在 WebView 里跑起来之后才有。
+     *
+     * <p>Cookie 只带 {@code BDCLND}（提取码验过的那份，与 {@link #sharePageTicket(Ident)} 的 HTTP 版同一
+     * 口径）；不带账号 Cookie —— 取签名是页面自己的事，不需要登录态。
+     *
+     * @return 探测到的 ticket（可能没有签名）；分享页开不起来 / 页面里没有 {@code yunData} 时返回 null
+     */
+    private static ShareTicket webViewTicket(Ident ident) {
+        String surl = ident.ticket.surl;
+        if (surl.isEmpty()) return null;
+        // 带上账号 Cookie：只给 BDCLND 时百度把 WebView 当访客，分享页回的是"需要验证"的壳页面；
+        // 有登录态才跟浏览器一致（Boss 的账号就是网页扫码登的）。
+        StringBuilder cookie = new StringBuilder();
+        BaiduLogin.Credential credential = BaiduLogin.loadSaved();
+        if (credential != null && !text(credential.cookie).trim().isEmpty()) {
+            cookie.append(text(credential.cookie).trim());
+        }
+        if (!ident.sekey.isEmpty()) {
+            if (cookie.length() > 0) cookie.append("; ");
+            cookie.append("BDCLND=").append(ident.sekey);
+        }
+        return webViewTicket(surl, cookie.toString());
+    }
+
+    /**
+     * 同上，但由调用方给 {@code surl} 与 Cookie 头（解析分享那边是访客 Cookie 罐，播放这边是 {@code
+     * BDCLND}）。
+     *
+     * <p>{@code surl} 这里是**分享页 URL 里那个 id**（含前导 {@code 1}），因为它用来拼 {@code /s/<id>}；
+     * 与列表接口的 {@code shorturl} 差一个前导 {@code 1}，两者别混。
+     */
+    static ShareTicket webViewTicket(String surl, String cookieHeader) {
+        String id = text(surl).trim();
+        if (id.isEmpty()) return null;
+        String url = "https://pan.baidu.com/s/" + encodePart(id);
+        long started = System.currentTimeMillis();
+        String raw = WebPageProbe.evaluate(url, cookieHeader, SHARE_PAGE_JS);
+        if (raw == null) {
+            AppLog.w(
+                    TAG,
+                    "webview probe failed share="
+                            + id
+                            + " cost_ms="
+                            + (System.currentTimeMillis() - started));
+            return null;
+        }
+        ShareTicket ticket = yunDataTicket(raw, id);
+        AppLog.w(
+                TAG,
+                "webview probe share="
+                        + id
+                        + " cost_ms="
+                        + (System.currentTimeMillis() - started));
+        return ticket;
+    }
+
+    /**
+     * 从 WebView 取回来的 {@code yunData}（{@link #SHARE_PAGE_JS} 的返回值，JSON 文本）里取 {@code sign} /
+     * {@code timestamp}。取不到就是空 ticket。
+     *
+     * <p>日志固定一行、便于上机对账：{@code webview ticket sign=<yes/no> len=<返回长度> ts=<timestamp>}；
+     * {@code sign} 只报有没有，不落明文。
+     */
+    static ShareTicket yunDataTicket(String json, String surl) {
+        String raw = text(json).trim();
+        int start = raw.indexOf('{');
+        int end = raw.lastIndexOf('}');
+        String block = start >= 0 && end > start ? raw.substring(start, end + 1) : "";
+        String sign = block.isEmpty() ? "" : fieldValue(block, "sign");
+        String timestamp = block.isEmpty() ? "" : fieldValue(block, "timestamp");
+        ShareTicket ticket = new ShareTicket(surl, sign, timestamp);
+        AppLog.w(
+                TAG,
+                "webview ticket sign="
+                        + (ticket.hasSignature() ? "yes" : "no")
+                        + " len="
+                        + raw.length()
+                        + " ts="
+                        + (ticket.timestamp.isEmpty() ? "no" : ticket.timestamp));
+        return ticket;
+    }
+
+    /**
      * 带签名取一次直链：{@code GET /share/list?shareid&uk&fid&sekey&origin=dlna&devuid&…&time&rand}。
      *
      * <p>不抛异常：网络失败记进 {@link Attempt#error}，百度说 errno 就记 errno 与它自己那句话，由调用方
@@ -489,10 +658,15 @@ final class BaiduShareResolver {
      *
      * <p>为什么放进 id：{@code /api/sharedownload} 要的就是这几项，而播放时手上只有 episode id；解析
      * 分享（列目录）那一刻页面正开着，顺手取下来最省一次网络。{@code sign} 会过期，所以播放时失败还会
-     * 带着 {@code BDCLND} 再开一次分享页现取（{@link #sharePageTicket(Ident)}）。
+     * 带着 {@code BDCLND} 再开一次分享页现取（{@link #sharePageTicket(Ident)}）；HTTP 拿不到时再用
+     * WebView 现取（{@link #webViewTicket(Ident)}）。
+     *
+     * <p>只有 {@code surl} 也算一份凭据（{@code sign}/{@code timestamp} 为空）：解析分享时两条取签名的
+     * 路都失败的话，播放时还能带着 {@code surl} 再试一次 WebView —— 否则连「去哪一页取」都不知道。
      *
      * <p>id 第 6 段放的是 {@code surl|sign|timestamp} 再百分号编码一次：{@code sign} 里可能有
-     * {@code +} / {@code /} / {@code =}，不编码就会撞上 {@code ++} 分隔符。
+     * {@code +} / {@code /} / {@code =}，不编码就会撞上 {@code ++} 分隔符；没有签名时是
+     * {@code surl||}。
      */
     static final class ShareTicket {
         final String surl;
@@ -509,9 +683,10 @@ final class BaiduShareResolver {
             return !sign.isEmpty() && !timestamp.isEmpty();
         }
 
-        /** id 第 6 段的明文形态（调用方再 {@link #encodePart} 一次）；拿不到 sign 时是空串。 */
+        /** id 第 6 段的明文形态（调用方再 {@link #encodePart} 一次）；没有 {@code surl} 时是空串。 */
         String encode() {
-            return hasSignature() ? surl + "|" + sign + "|" + timestamp : "";
+            if (surl.isEmpty()) return "";
+            return hasSignature() ? surl + "|" + sign + "|" + timestamp : surl + "||";
         }
 
         /** 解开第 6 段；形状不对返回 null（老 id 没有这一段，调用方按「没有网页凭据」处理）。 */
@@ -523,7 +698,10 @@ final class BaiduShareResolver {
             String surl = parts[0].trim();
             String sign = parts[1].trim();
             String timestamp = parts[2].trim();
-            if (!isSurl(surl) || !isSafeSign(sign) || !isDigits(timestamp, 1, 20)) return null;
+            if (!isSurl(surl)) return null;
+            // 只有 surl：解析分享时没取到签名，播放时还要靠它再开一次分享页（WebView）。
+            if (sign.isEmpty() && timestamp.isEmpty()) return new ShareTicket(surl, "", "");
+            if (!isSafeSign(sign) || !isDigits(timestamp, 1, 20)) return null;
             return new ShareTicket(surl, sign, timestamp);
         }
     }
