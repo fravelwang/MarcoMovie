@@ -20,50 +20,60 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * 百度网盘分享的原生解析：把「五段 bd id」换成可播直链。
+ * 百度网盘分享的原生解析：把「六段 bd id」换成可播直链。
  *
  * <p>背景：详情页的下载区把百度分享本身当线路给出来，插件换不出直链（它没有账号凭据），只会回
- * 一句笼统的失败话。这里用**账号 Cookie + 官方签名**把同一份分享换成直链。协议照仓库里已经能跑的
- * Flutter 实现 {@code flutter/lib/core/cloud_share.dart}（{@code _baiduFiles} / {@code
- * _resolveBaidu}，约 370–650 行）移植，**没有自己发明参数**：
+ * 一句笼统的失败话。这里用**账号 Cookie + 网页端那条成熟路径**把同一份分享换成直链，**没有自己
+ * 发明签名**：
  *
  * <ol>
- *   <li>取 {@code uid}：三个入口按顺序试 —— {@code GET https://pan.baidu.com/api/gettemplatevariable
- *       ?clienttype=0&app_id=250528&web=1&fields=["uk"]} → {@code GET https://pan.baidu.com/rest/2.0
- *       /xpan/nas?method=uinfo&…} → {@code GET https://mbd.baidu.com/userx/v1/info/get?appname=
- *       baiduboxapp&fields=[…]}；都带账号 Cookie，UA 用 {@code netdisk;…} 串。盒子（Android 11）上
- *       实测 {@code mbd.baidu.com} 连不上（8 秒超时），所以它只做兜底，pan 域下的两个入口优先；
- *   <li>算签名：{@code rand = sha1( hexSha1(BDUSS) + uid + RAND_KEY + time + DEVICE + RAND_TAIL )}，
- *       全部是实测常量（见下面的常量注释）；
- *   <li>取直链：{@code GET https://pan.baidu.com/share/list?shareid=…&uk=…&fid=…&sekey=…
- *       &origin=dlna&devuid=<DEVICE>&clienttype=1&channel=<CHANNEL>&version=<VERSION>&time=…&rand=…}
- *       ，Cookie 带账号 Cookie 与 {@code BDCLND=<sekey>}，UA 用媒体串 → {@code list[0].dlink}。
+ *   <li><b>网页接口（主路）</b>：{@code POST https://pan.baidu.com/api/sharedownload?sign=…&
+ *       timestamp=…&channel=chunlei&web=1&app_id=250528&clienttype=0}，表单
+ *       {@code encrypt=0&product=share&uk=…&primaryid=…&fid_list=[…]&extra={"sekey":"…"}}，Cookie
+ *       带账号凭据与 {@code BDCLND=<sekey>}，UA 用 {@code netdisk;…} 串，Referer
+ *       {@code https://pan.baidu.com/} → {@code list[0].dlink}。{@code sign} / {@code timestamp}
+ *       来自分享页的 {@code window.yunData} / {@code locals.mset}：解析分享时抓到的那份随 id 第 6 段
+ *       带过来（{@link #sharePageTicket}），失效或没带就再开一次分享页（带 {@code BDCLND}）现取；
+ *   <li><b>旧接口（兜底）</b>：{@code GET https://pan.baidu.com/share/list?shareid=…&uk=…&fid=…
+ *       &sekey=…&origin=dlna&devuid=<DEVICE>&clienttype=1&channel=<CHANNEL>&version=<VERSION>&time=…
+ *       &rand=…}，签名 {@code rand = sha1( hexSha1(BDUSS) + uid + RAND_KEY + time + DEVICE +
+ *       RAND_TAIL )}。2026-11-26 现场它回 {@code errno=8001 need verify}（账号是网页扫码登录的，
+ *       手机客户端形态的签名对不上，被风控），只在网页接口失败之后才走；
+ *   <li><b>兜底要的 uid</b>：三个入口按顺序试 —— {@code GET https://pan.baidu.com/api/
+ *       gettemplatevariable?clienttype=0&app_id=250528&web=1&fields=["uk"]} → {@code GET https://
+ *       pan.baidu.com/rest/2.0/xpan/nas?method=uinfo&…} → {@code GET https://mbd.baidu.com/userx/v1/
+ *       info/get?appname=baiduboxapp&fields=[…]}；都带账号 Cookie，UA 用 {@code netdisk;…} 串。盒子
+ *       （Android 11）上实测 {@code mbd.baidu.com} 连不上（8 秒超时），所以它只做兜底。
  * </ol>
  *
- * <p>id 形状（五段 {@code ++} 分隔，第一段固定 {@code bd}；与 UC 的四段、夸克的五段都不同形）：
+ * <p>两条都失败时，失败原因里把**两条路各自的 errno 与百度原话**一起写出来（{@link #combinedReason}）。
+ *
+ * <p>id 形状（六段 {@code ++} 分隔，第一段固定 {@code bd}；与 UC 的四段、夸克的五段都不同形）：
  * <pre>
  *   [0] 固定 "bd"
  *   [1] share_id   列表接口回的数字分享 id（不是 URL 里那个带前导 1 的短 id）
  *   [2] uk         分享所有者的 uk
  *   [3] fs_id      分享内文件 id
  *   [4] sekey      提取码验证换来的 randsk，**百分号编码过**（保证段里不出现 + 和 %），可为空
+ *   [5] 网页凭据   百分号编码过的 {@code surl|sign|timestamp}（{@link ShareTicket}），可为空
  * </pre>
  * 第 [4] 段必须编码：raw {@code randsk} 是 URL 编码过的 base64，可能含 {@code +}，直接拼进 id 会
  * 撞上 {@code ++} 分隔符。这里约定「id 里放 encode 后的值」，播放时先解一次还原 raw，再按 Flutter
  * 的 {@code _decodeSekeyForQuery} 口径解第二次得到请求参数 —— 这条链路与 Flutter 端发出的
  * {@code sekey} 字节一致（见 {@link #shareListUrl}）。
  *
- * <p>线程：{@link #resolve(String, String, String)} 会打两次网络（单请求 8 秒超时），必须在后台线程
+ * <p>第 [5] 段是网页接口用的 {@code surl}（分享页短 id，用来重开分享页刷新 sign）、{@code sign} 与
+ * {@code timestamp}。老的五段 id（升级前解析出来的、历史记录里存着的）仍然认，只是没有第 [5] 段，
+ * 走不了网页接口 —— 那时只剩兜底那条，失败原因里会写明。
+ *
+ * <p>线程：{@link #resolve(String, String, String)} 会打两三次网络（单请求 8 秒超时），必须在后台线程
  * 调用。同步执行、永不抛，失败返回 null，原因放 {@link #lastFailureReason()}，与
  * {@link UcShareResolver} 同一套口径。
  *
- * <p>**8001 的定案方式**（2026-11-26 Boss 现场：百度分享线路回 errno=8001，登录态是好的，uid 接口
- * 已回 {@code uid ok}）：一次解析会在 tag {@code BaiduShare} 里打出 —— 签名用的 uid（打码）与它来自
- * 哪个入口、{@code bdclnd=yes/no}、本机时钟与服务端的偏差、**完整请求地址（{@code sekey} 与
- * {@code rand} 打码）**、**百度响应体原文（{@code dlink} 打码，保留 {@code show_msg}/{@code errmsg}）**。
- * 同时做两件便宜的事：签名里的 {@code time} 用服务端 {@code Date} 校正（盒子时钟常偏，能过 TLS 却过
- * 不了签名）；真回 8001 就用 {@code mbd.baidu.com} 的 uid（Flutter 端签名用的就是它）再签一次，并把
- * 两次的 uid 是否同值记成 {@code uid_match=yes/no}。仍失败就把 errno 与百度自己那句话原样报给用户。
+ * <p>**一次解析的日志**（tag {@code BaiduShare}）：网页接口打了什么（{@code sign} 只记长度、{@code
+ * sekey} 打码）、百度响应体原文（{@code dlink} / {@code sign} 打码，保留 {@code show_msg} /
+ * {@code errmsg}）、拿到 dlink 时打一行 {@code sharedownload ok dlink host=…}；失败时把两条路各自的
+ * 原因合起来报给用户。
  */
 final class BaiduShareResolver {
 
@@ -109,9 +119,6 @@ final class BaiduShareResolver {
     /** 分享已取消 / 已过期 / 被删（与 Flutter 端 {@code _checkBaidu} 同一组 errno）。 */
     private static final String SHARE_GONE = "百度分享解析失败：分享已失效（链接被取消或已过期），请换一条线路";
 
-    /** 接口没给 dlink，但也不是明确的失效码。 */
-    private static final String NO_DIRECT_URL = "百度分享解析失败：百度网盘没有返回播放地址，请换一条线路";
-
     /**
      * 现场（2026-11-26）{@code /share/list} 回的 errno。登录态是好的（uid 接口当时回了
      * {@code uid ok}），所以先按「签名/参数不对」处理：换 {@code mbd.baidu.com} 那个 uid（Flutter 端
@@ -133,7 +140,7 @@ final class BaiduShareResolver {
      *
      * @param siteKey 站点 api/key，只用于日志（判据是 id 形状，不看站名）
      * @param lineName 玩家选的线路名，例如 {@code 百度分享}；用作剧集名
-     * @param rawEpisodeId 插件拿到的 episode url，五段 {@code ++} 分隔、第一段 {@code bd}
+     * @param rawEpisodeId 插件拿到的 episode url，五段或六段 {@code ++} 分隔、第一段 {@code bd}
      */
     static Cms.Episode resolve(String siteKey, String lineName, String rawEpisodeId) {
         lastRefusalReason = "";
@@ -156,48 +163,29 @@ final class BaiduShareResolver {
                         + " uk="
                         + ident.uk
                         + " fid="
-                        + ident.fsId);
+                        + ident.fsId
+                        + " web_ticket="
+                        + (ident.ticket.hasSignature() ? "yes" : "no")
+                        + " surl="
+                        + (ident.ticket.surl.isEmpty() ? "no" : "yes"));
         try {
-            UidResult account = uid(credential);
-            if (account.uid.isEmpty()) {
-                lastRefusalReason = account.reason;
-                AppLog.w(TAG, "refused: " + lastRefusalReason);
-                return null;
-            }
+            // 主路：网页端 sharedownload（账号 Cookie 是网页扫码登录的，这条路不吃客户端签名）。
+            Attempt web = webAttempt(credential, ident);
+            if (web.ok()) return web.episode(lineName);
+            AppLog.w(TAG, "web path failed: " + web.describe() + "（errno=" + web.errno + "）");
+            // 兜底：原来那条手机客户端形态的 share/list?origin=dlna，原样保留。
+            Attempt legacy = legacyAttempt(credential, ident);
+            if (legacy.ok()) return legacy.episode(lineName);
+            lastRefusalReason = combinedReason(web, legacy);
             AppLog.w(
                     TAG,
-                    "sign uid="
-                            + maskId(account.uid)
-                            + " src="
-                            + account.source
-                            + " bdclnd="
-                            + (ident.sekey.isEmpty() ? "no" : "yes")
-                            + " clock_skew_ms="
-                            + account.skewMs);
-            Attempt first = attempt(credential, ident, account.uid, account.skewMs);
-            if (first.ok()) return first.episode(lineName);
-            // 8001：先换个 uid 再签一次（pan 域两个入口给的是 uk，Flutter 端签名用的是 mbd 的 uid）。
-            // 只在 8001 上多做这一次网络，别的失败码照旧一条就报，不拖慢失败提示。
-            if (first.errno == ERRNO_SIGNATURE_REJECTED) {
-                UidResult alt = uidFromMbd(credential);
-                if (alt.uid.isEmpty()) {
-                    AppLog.w(TAG, "mbd uid unavailable: " + alt.reason);
-                } else {
-                    AppLog.w(
-                            TAG,
-                            "uid_match="
-                                    + (alt.uid.equals(account.uid) ? "yes" : "no")
-                                    + " retry with mbd uid "
-                                    + maskId(alt.uid));
-                    if (!alt.uid.equals(account.uid)) {
-                        Attempt second = attempt(credential, ident, alt.uid, alt.skewMs);
-                        if (second.ok()) return second.episode(lineName);
-                        first = second;
-                    }
-                }
-            }
-            lastRefusalReason = first.reason();
-            AppLog.w(TAG, "refused: " + lastRefusalReason + "（errno=" + first.errno + "）");
+                    "refused: "
+                            + lastRefusalReason
+                            + "（web errno="
+                            + web.errno
+                            + "，dlna errno="
+                            + legacy.errno
+                            + "）");
             return null;
         } catch (RuntimeException error) {
             lastRefusalReason = "百度分享解析失败：百度网盘访问失败（解析异常），请换一条线路";
@@ -207,8 +195,9 @@ final class BaiduShareResolver {
     }
 
     /**
-     * 一次「带签名取直链」的完整结果。成功时 {@code dlink} 非空；失败时留着 HTTP 状态、errno 与百度
-     * 自己那句话（{@code show_msg} / {@code errmsg}），由 {@link #reason()} 拼成一句人话。
+     * 一次「取直链」的完整结果。成功时 {@code dlink} 非空；失败时留着 HTTP 状态、errno 与百度
+     * 自己那句话（{@code show_msg} / {@code errmsg}），由 {@link #describe()} 拼成一段原因，
+     * 再由 {@link #combinedReason} 把两条路合起来报给用户。
      */
     private static final class Attempt {
         String dlink = "";
@@ -228,14 +217,201 @@ final class BaiduShareResolver {
             return BaiduShareResolver.episode(lineName, dlink, cookie);
         }
 
-        /** 失败原因：优先百度自己那句话，其次按 errno 翻译，最后才是网络/形状问题。 */
-        String reason() {
+        /**
+         * 这一路失败的原因片段（不带「百度分享解析失败」前缀、不带路名，由调用方拼）：优先自己记的错误
+         * 说明（网络 / 形状），其次 HTTP 状态，再其次是百度的 errno 与它自己那句话。
+         */
+        String describe() {
             if (!error.isEmpty()) return error;
-            if (http >= 400) {
-                return "百度分享解析失败：百度网盘返回 HTTP " + http + "，请换一条线路";
+            if (http >= 400) return "返回 HTTP " + http;
+            if (errno != 0) {
+                String said = text(show).trim();
+                StringBuilder sb = new StringBuilder("返回错误（errno=").append(errno);
+                if (!said.isEmpty()) sb.append("，").append(said);
+                sb.append("）");
+                if (isAuthErrno(errno)) sb.append("，可能登录已失效，可在网盘中心重新粘贴 Cookie");
+                return sb.toString();
             }
-            if (errno != 0) return refusalText(errno, show);
-            return NO_DIRECT_URL;
+            return "没有返回播放地址（errno=0）";
+        }
+    }
+
+    /**
+     * 兜底那条：先取账号 uid（网页接口不需要它，所以只在兜底时才打这几个网络），再按手机客户端形态
+     * 签名取直链。8001 时照旧换 {@code mbd.baidu.com} 的 uid 再签一次。
+     */
+    private static Attempt legacyAttempt(BaiduLogin.Credential credential, Ident ident) {
+        UidResult account = uid(credential);
+        if (account.uid.isEmpty()) {
+            Attempt out = new Attempt();
+            out.error = "取不到账号 uid（" + account.reason + "）";
+            return out;
+        }
+        AppLog.w(
+                TAG,
+                "sign uid="
+                        + maskId(account.uid)
+                        + " src="
+                        + account.source
+                        + " bdclnd="
+                        + (ident.sekey.isEmpty() ? "no" : "yes")
+                        + " clock_skew_ms="
+                        + account.skewMs);
+        Attempt first = attempt(credential, ident, account.uid, account.skewMs);
+        if (first.ok()) return first;
+        // 8001：先换个 uid 再签一次（pan 域两个入口给的是 uk，Flutter 端签名用的是 mbd 的 uid）。
+        // 只在 8001 上多做这一次网络，别的失败码照旧一条就报，不拖慢失败提示。
+        if (first.errno == ERRNO_SIGNATURE_REJECTED) {
+            UidResult alt = uidFromMbd(credential);
+            if (alt.uid.isEmpty()) {
+                AppLog.w(TAG, "mbd uid unavailable: " + alt.reason);
+            } else {
+                AppLog.w(
+                        TAG,
+                        "uid_match="
+                                + (alt.uid.equals(account.uid) ? "yes" : "no")
+                                + " retry with mbd uid "
+                                + maskId(alt.uid));
+                if (!alt.uid.equals(account.uid)) {
+                    Attempt second = attempt(credential, ident, alt.uid, alt.skewMs);
+                    if (second.ok()) return second;
+                    first = second;
+                }
+            }
+        }
+        return first;
+    }
+
+    // -------------------------------------------------------------- 网页接口（主路）
+
+    /**
+     * 网页端 sharedownload：先用 id 里带的 {@code sign}/{@code timestamp} 打一次（解析分享时抓的，
+     * 通常还在有效期内）；失败（常见是 sign 过期或没带）再带着 {@code BDCLND} 开一次分享页现取，
+     * 取到不一样的就再打一次。最多两次 POST + 一次 GET。
+     */
+    private static Attempt webAttempt(BaiduLogin.Credential credential, Ident ident) {
+        ShareTicket stored = ident.ticket;
+        Attempt last = null;
+        if (stored.hasSignature()) {
+            last = sharedownload(credential, ident, stored);
+            if (last.ok()) return last;
+            AppLog.w(
+                    TAG,
+                    "sharedownload with id ticket failed: "
+                            + last.describe()
+                            + "（errno="
+                            + last.errno
+                            + "）");
+        }
+        if (!stored.surl.isEmpty()) {
+            ShareTicket fresh = sharePageTicket(ident);
+            boolean changed =
+                    fresh != null && fresh.hasSignature() && !fresh.sign.equals(stored.sign);
+            if (changed) {
+                AppLog.w(TAG, "retry sharedownload with fresh sign from share page");
+                last = sharedownload(credential, ident, fresh);
+                if (last.ok()) return last;
+                AppLog.w(
+                        TAG,
+                        "sharedownload with fresh sign failed: "
+                                + last.describe()
+                                + "（errno="
+                                + last.errno
+                                + "）");
+            }
+        }
+        if (last == null) {
+            last = new Attempt();
+            last.error = "缺少 sign/timestamp（分享页与 id 里都没取到）";
+        }
+        return last;
+    }
+
+    /**
+     * 打一次 {@code POST /api/sharedownload}。不抛异常：网络失败、errno、没有 dlink 都记进
+     * {@link Attempt}，由调用方决定要不要换一份 sign 再打。
+     */
+    private static Attempt sharedownload(
+            BaiduLogin.Credential credential, Ident ident, ShareTicket ticket) {
+        Attempt out = new Attempt();
+        String url = sharedownloadUrl(ticket.sign, ticket.timestamp);
+        String form = sharedownloadForm(ident.uk, ident.shareId, ident.fsId, ident.sekey);
+        out.cookie = accountCookie(credential, ident.sekey);
+        AppLog.w(
+                TAG,
+                "sharedownload request sign=***("
+                        + ticket.sign.length()
+                        + ") timestamp="
+                        + ticket.timestamp
+                        + " share="
+                        + ident.shareId
+                        + " uk="
+                        + maskId(ident.uk)
+                        + " fid="
+                        + ident.fsId
+                        + " sekey="
+                        + (ident.sekey.isEmpty() ? "no" : "yes"));
+        Response answer;
+        try {
+            answer =
+                    fetch(
+                            "POST",
+                            url,
+                            form,
+                            "application/x-www-form-urlencoded",
+                            UA_MEDIA,
+                            REFERER,
+                            out.cookie);
+        } catch (IOException error) {
+            out.error = "访问失败（" + NetdiskShareHttp.describe(error) + "）";
+            AppLog.w(TAG, "sharedownload failed: " + NetdiskShareHttp.describe(error));
+            return out;
+        }
+        out.http = answer.http;
+        // 响应体原样（截断 + dlink/sign 打码）：errno 与 show_msg 全靠它。
+        AppLog.w(
+                TAG, "sharedownload answer http=" + answer.http + " body=" + maskBody(answer.body));
+        JsonObject body = NetdiskShareHttp.parseObjectOrNull(answer.body);
+        if (body == null) {
+            out.error = "没有返回可用数据（HTTP " + answer.http + "）";
+            return out;
+        }
+        out.errno = NetdiskShareHttp.optInt(body, "errno", 0);
+        out.show = baiduMessage(body);
+        if (out.errno != 0) return out;
+        out.dlink = mediaUrl(dlinkOf(body, ident.fsId));
+        if (out.dlink.isEmpty()) {
+            out.error = "errno=0 但没有给出 dlink";
+            return out;
+        }
+        AppLog.w(TAG, "sharedownload ok dlink host=" + hostOf(out.dlink));
+        return out;
+    }
+
+    /**
+     * 带着 {@code BDCLND} 重开一次分享页，取新的 {@code sign}/{@code timestamp}。失败返回 null（只记
+     * 日志）：{@link #webAttempt} 会把 id 里那份当最后一次机会。
+     */
+    private static ShareTicket sharePageTicket(Ident ident) {
+        String surl = ident.ticket.surl;
+        if (surl.isEmpty()) return null;
+        Jar jar = new Jar();
+        if (!ident.sekey.isEmpty()) jar.put("BDCLND", ident.sekey);
+        String url = "https://pan.baidu.com/s/" + encodePart(surl);
+        try {
+            Response answer =
+                    request("GET", url, null, null, UA_SHARE, REFERER, jar, MAX_REDIRECTS);
+            ShareTicket ticket = sharePageTicket(answer.body, surl);
+            AppLog.w(
+                    TAG,
+                    "share page http="
+                            + answer.http
+                            + " sign="
+                            + (ticket.hasSignature() ? "yes" : "no"));
+            return ticket;
+        } catch (IOException error) {
+            AppLog.w(TAG, "share page failed: " + NetdiskShareHttp.describe(error));
+            return null;
         }
     }
 
@@ -289,7 +465,7 @@ final class BaiduShareResolver {
     }
 
     /**
-     * 这个 episode id 是不是百度分享坐标（五段、第一段 {@code bd}、中间三段数字）。只读判据、不动
+     * 这个 episode id 是不是百度分享坐标（五或六段、第一段 {@code bd}、中间三段数字）。只读判据、不动
      * 网络，供调用方在失败分支里选「读哪家的原因」用。
      */
     static boolean looksLikeShareId(String rawEpisodeId) {
@@ -305,55 +481,231 @@ final class BaiduShareResolver {
         return reason == null ? "" : reason;
     }
 
+    // ------------------------------------------------------- 分享页凭据（网页接口）
+
+    /**
+     * 分享页里与网页下载接口有关的三样东西：{@code surl}（分享页短 id）、{@code sign}、
+     * {@code timestamp}。
+     *
+     * <p>为什么放进 id：{@code /api/sharedownload} 要的就是这几项，而播放时手上只有 episode id；解析
+     * 分享（列目录）那一刻页面正开着，顺手取下来最省一次网络。{@code sign} 会过期，所以播放时失败还会
+     * 带着 {@code BDCLND} 再开一次分享页现取（{@link #sharePageTicket(Ident)}）。
+     *
+     * <p>id 第 6 段放的是 {@code surl|sign|timestamp} 再百分号编码一次：{@code sign} 里可能有
+     * {@code +} / {@code /} / {@code =}，不编码就会撞上 {@code ++} 分隔符。
+     */
+    static final class ShareTicket {
+        final String surl;
+        final String sign;
+        final String timestamp;
+
+        ShareTicket(String surl, String sign, String timestamp) {
+            this.surl = text(surl).trim();
+            this.sign = text(sign).trim();
+            this.timestamp = text(timestamp).trim();
+        }
+
+        boolean hasSignature() {
+            return !sign.isEmpty() && !timestamp.isEmpty();
+        }
+
+        /** id 第 6 段的明文形态（调用方再 {@link #encodePart} 一次）；拿不到 sign 时是空串。 */
+        String encode() {
+            return hasSignature() ? surl + "|" + sign + "|" + timestamp : "";
+        }
+
+        /** 解开第 6 段；形状不对返回 null（老 id 没有这一段，调用方按「没有网页凭据」处理）。 */
+        static ShareTicket decode(String raw) {
+            String value = text(raw).trim();
+            if (value.isEmpty()) return null;
+            String[] parts = value.split("\\|", 3);
+            if (parts.length != 3) return null;
+            String surl = parts[0].trim();
+            String sign = parts[1].trim();
+            String timestamp = parts[2].trim();
+            if (!isSurl(surl) || !isSafeSign(sign) || !isDigits(timestamp, 1, 20)) return null;
+            return new ShareTicket(surl, sign, timestamp);
+        }
+    }
+
+    /**
+     * 从分享页 HTML 里取 {@code sign} / {@code timestamp}（顺带把 {@code share_id} / {@code uk} 记成
+     * 日志便于对账）。页面里两种形态都认：{@code window.yunData = {...}} 与
+     * {@code locals.mset({...})}。
+     *
+     * @param surl 分享页短 id（原样带进 ticket，以后重开这一页要用）
+     */
+    static ShareTicket sharePageTicket(String html, String surl) {
+        String page = text(html);
+        String block = objectBlock(page, "window.yunData");
+        if (block.isEmpty()) block = objectBlock(page, "locals.mset");
+        if (block.isEmpty()) {
+            AppLog.w(TAG, "share page has no yunData/locals.mset, len=" + page.length());
+            return new ShareTicket(surl, "", "");
+        }
+        String sign = fieldValue(block, "sign");
+        String timestamp = fieldValue(block, "timestamp");
+        String shareId = fieldValue(block, "shareid");
+        if (shareId.isEmpty()) shareId = fieldValue(block, "share_id");
+        String uk = fieldValue(block, "uk");
+        AppLog.w(
+                TAG,
+                "share page fields sign="
+                        + (sign.isEmpty() ? "no" : "yes(" + sign.length() + ")")
+                        + " timestamp="
+                        + (timestamp.isEmpty() ? "no" : timestamp)
+                        + " share_id="
+                        + (shareId.isEmpty() ? "no" : "yes")
+                        + " uk="
+                        + (uk.isEmpty() ? "no" : "yes"));
+        return new ShareTicket(surl, sign, timestamp);
+    }
+
+    /**
+     * 找 {@code marker} 后面那个对象字面量并原样切出来。{@code window.yunData = {...}} 与
+     * {@code locals.mset({...})} 两种写法都能过：marker 与 <code>{</code> 之间只允许 {@code =} /
+     * {@code (} 与空白（隔着几十个字符还找不到就不认，免得命中别处的同名片段）。
+     */
+    private static String objectBlock(String html, String marker) {
+        int at = html.indexOf(marker);
+        if (at < 0) return "";
+        int from = at + marker.length();
+        int brace = html.indexOf('{', from);
+        if (brace < 0 || brace - from > 64) return "";
+        String gap = html.substring(from, brace).trim();
+        if (!gap.isEmpty() && !"=".equals(gap) && !"(".equals(gap)) return "";
+        return balancedObject(html, brace);
+    }
+
+    /** 从 {@code start} 那个左花括号起做括号配对（跳过字符串里的括号与转义），返回整段或 ""。 */
+    private static String balancedObject(String html, int start) {
+        int depth = 0;
+        char quote = 0;
+        for (int i = start; i < html.length(); i++) {
+            char c = html.charAt(i);
+            if (quote != 0) {
+                if (c == '\\') {
+                    i++;
+                } else if (c == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) return html.substring(start, i + 1);
+            }
+        }
+        return "";
+    }
+
+    /**
+     * 从一个 JS 对象字面量里取标量字段：键的双引号与单引号写法都认；值可以是带引号的字符串（两种引号
+     * 都认，按需反转义），也可以是不带引号的数字/布尔。找不到返回 ""。
+     */
+    private static String fieldValue(String block, String name) {
+        if (block.isEmpty() || name.isEmpty()) return "";
+        for (char quote : new char[] {'"', '\''}) {
+            String needle = quote + name + quote;
+            int at = block.indexOf(needle);
+            if (at < 0) continue;
+            int i = at + needle.length();
+            while (i < block.length() && Character.isWhitespace(block.charAt(i))) i++;
+            if (i >= block.length()) continue;
+            char sep = block.charAt(i);
+            if (sep != ':' && sep != '=') continue;
+            i++;
+            while (i < block.length() && Character.isWhitespace(block.charAt(i))) i++;
+            if (i >= block.length()) return "";
+            char first = block.charAt(i);
+            if (first == '"' || first == '\'') {
+                StringBuilder sb = new StringBuilder();
+                for (i = i + 1; i < block.length(); i++) {
+                    char c = block.charAt(i);
+                    if (c == '\\' && i + 1 < block.length()) {
+                        char next = block.charAt(++i);
+                        if (next == 'n') sb.append('\n');
+                        else if (next == 't') sb.append('\t');
+                        else sb.append(next);
+                        continue;
+                    }
+                    if (c == first) return sb.toString().trim();
+                    sb.append(c);
+                }
+                return "";
+            }
+            int start = i;
+            while (i < block.length()) {
+                char c = block.charAt(i);
+                if (c == ',' || c == '}' || Character.isWhitespace(c)) break;
+                i++;
+            }
+            return block.substring(start, i).trim();
+        }
+        return "";
+    }
+
     // ------------------------------------------------------------------ id 形状
 
-    /** 五段 {@code ++} 分享坐标。{@code sekey} 是 id 里的编码形态（百分号编码过）。 */
+    /** 五 / 六段 {@code ++} 分享坐标。{@code sekey}、{@code ticket} 都已按 id 编码还原。 */
     private static final class Ident {
         final String shareId;
         final String uk;
         final String fsId;
         final String sekey;
+        /** 第 6 段（网页凭据）；老 id 没有这一段时是空 ticket。 */
+        final ShareTicket ticket;
 
-        Ident(String shareId, String uk, String fsId, String sekey) {
+        Ident(String shareId, String uk, String fsId, String sekey, ShareTicket ticket) {
             this.shareId = shareId;
             this.uk = uk;
             this.fsId = fsId;
             this.sekey = sekey;
+            this.ticket = ticket == null ? new ShareTicket("", "", "") : ticket;
         }
     }
 
     /**
-     * @return null 当且仅当不是五段、第一段不是 {@code bd}、或某一段形状与量级对不上
+     * @return null 当且仅当不是五段或六段、第一段不是 {@code bd}、或某一段形状与量级对不上
      */
     private static Ident parseIdent(String raw) {
         String value = text(raw).trim();
         if (value.isEmpty()) return null;
-        // limit=5：末段（sekey）里就算出现 "++" 也整段收在第 5 段，不会被切成六段。
-        String[] segments = value.split("\\+\\+", 5);
-        if (segments.length != 5) return null;
+        // limit=6：末段（网页凭据）里就算出现 "++" 也整段收在第 6 段，不会被切碎。
+        String[] segments = value.split("\\+\\+", 6);
+        if (segments.length != 5 && segments.length != 6) return null;
         if (!"bd".equals(segments[0])) return null;
         boolean shaped =
                 isDigits(segments[1], 1, 32)
                         && isDigits(segments[2], 1, 32)
                         && isDigits(segments[3], 1, 32)
-                        && isSafeIdPart(segments[4]);
+                        && isSafeIdPart(segments[4])
+                        && (segments.length == 5 || isSafeIdPart(segments[5]));
         if (!shaped) {
-            // 形状不对：记长度就够定位，不记明文（后三段是分享凭据）。
+            // 形状不对：记长度就够定位，不记明文（后几段是分享凭据）。
             AppLog.w(
                     TAG,
-                    "skip: five segments but shapes do not look like a baidu share id, len="
+                    "skip: "
+                            + segments.length
+                            + " segments but shapes do not look like a baidu share id, len="
                             + segments[1].length()
                             + "/"
                             + segments[2].length()
                             + "/"
                             + segments[3].length()
                             + "/"
-                            + segments[4].length());
+                            + segments[4].length()
+                            + (segments.length == 6 ? "/" + segments[5].length() : ""));
             return null;
         }
         // 第 5 段在 id 里是编码形态；这里先还原成 raw randsk（可能与 Flutter 端的 session 值一致）。
-        return new Ident(
-                segments[1], segments[2], segments[3], percentDecode(segments[4]));
+        ShareTicket ticket =
+                segments.length == 6 ? ShareTicket.decode(percentDecode(segments[5])) : null;
+        return new Ident(segments[1], segments[2], segments[3], percentDecode(segments[4]), ticket);
     }
 
     /**
@@ -411,7 +763,66 @@ final class BaiduShareResolver {
         return true;
     }
 
-    // ------------------------------------------------------------------ 百度接口
+    /** 分享页短 id：字母数字与 {@code -} / {@code _}，4–80 位（与 provider 的判据同一套）。 */
+    private static boolean isSurl(String value) {
+        if (value == null) return false;
+        if (value.length() < 4 || value.length() > 80) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            boolean alnum = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+            if (!alnum && c != '-' && c != '_') return false;
+        }
+        return true;
+    }
+
+    /** 网页下载接口的 {@code sign}：不透明串，可打印 ASCII、不含分隔符 {@code |}、4–1024 位。 */
+    private static boolean isSafeSign(String value) {
+        if (value == null) return false;
+        if (value.length() < 4 || value.length() > 1024) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c <= 0x20 || c == 0x7f || c == '|') return false;
+        }
+        return true;
+    }
+
+    // -------------------------------------------------- 百度接口（主路：网页 sharedownload）
+
+    /**
+     * 网页下载接口的地址（包内可见的纯函数，桌面上可以直接核对 query 字节）。参数全部来自分享页
+     * {@code yunData}，这里一个都不自己造。
+     */
+    static String sharedownloadUrl(String sign, String timestamp) {
+        StringBuilder url = new StringBuilder("https://pan.baidu.com/api/sharedownload");
+        url.append("?sign=").append(encodePart(text(sign).trim()));
+        url.append("&timestamp=").append(encodePart(text(timestamp).trim()));
+        url.append("&channel=chunlei&web=1&app_id=250528&clienttype=0");
+        return url.toString();
+    }
+
+    /**
+     * 网页下载接口的表单（包内可见的纯函数）。{@code extra.sekey} 用**解过一次码**的 randsk：这是
+     * 服务端实际拿去校验的值（query 里的 {@code sekey} 也是这个口径，见 {@link #shareListUrl}）。
+     */
+    static String sharedownloadForm(String uk, String shareId, String fsId, String rawSekey) {
+        String extra = "{\"sekey\":\"" + jsonEscape(percentDecode(rawSekey)) + "\"}";
+        StringBuilder form = new StringBuilder();
+        form.append("encrypt=0&product=share");
+        form.append("&uk=").append(encodePart(uk));
+        form.append("&primaryid=").append(encodePart(shareId));
+        form.append("&fid_list=").append(encodePart("[" + text(fsId).trim() + "]"));
+        form.append("&extra=").append(encodePart(extra));
+        return form.toString();
+    }
+
+    /** JSON 字符串里的两个必须转义的字符（sekey 是 base64，正常不会中，转义只是兜底）。 */
+    private static String jsonEscape(String value) {
+        String text = text(value);
+        if (text.indexOf('\\') < 0 && text.indexOf('"') < 0) return text;
+        return text.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    // -------------------------------------------------- 百度接口（兜底：客户端签名 + dlna）
 
     /**
      * 取直链的请求地址（包内可见的纯函数，桌面上可以直接核对 query 字节）。
@@ -464,7 +875,8 @@ final class BaiduShareResolver {
                     + "&client=&clientfrom=&lang=zh-cn&tpl=&ttt=";
 
     /**
-     * 取账号 uid（签名要的是**账号** uid；与分享坐标里的 uk 不同也无所谓，签名口径不变）。
+     * 取账号 uid（**兜底**那条客户端签名要的是账号 uid；网页接口不需要它，所以只在兜底时才走这里）。
+     * 与分享坐标里的 uk 不同也无所谓，签名口径不变。
      *
      * <p>三入口按顺序试：{@code pan.baidu.com/api/gettemplatevariable} →
      * {@code pan.baidu.com/rest/2.0/xpan/nas?method=uinfo} → {@code mbd.baidu.com/userx/v1/info/get}。
@@ -703,22 +1115,26 @@ final class BaiduShareResolver {
     }
 
     /**
-     * errno 翻译。能播返回 ""；错误码口径与 Flutter 端 {@code _checkBaidu} 一致：
-     * -7 / -9 / -21 / -144 / -145 是分享失效，别的把 errno 与百度自己那句话一起报出来（不猜含义）。
-     *
-     * <p>文案统一以「百度分享解析失败」开头：这一路失败发生在取直链时，不是播放器取流失败，用户
-     * 需要能分清是哪一段出的问题。
+     * 两条都失败时给用户看的那句话：把网页接口与兜底各自的原因一起写出来（各含 errno 与百度原话），
+     * 一眼能分清风控、登录失效还是分享没了。分享失效码优先（那时 errno 的翻译比链路描述有用）。
      */
-    private static String refusalText(int errno, String baiduMessage) {
-        if (errno == 0) return "";
-        if (errno == -7 || errno == -9 || errno == -21 || errno == -144 || errno == -145) {
-            return SHARE_GONE;
-        }
-        String said = text(baiduMessage).trim();
-        StringBuilder sb = new StringBuilder("百度分享解析失败：百度网盘返回错误（errno=").append(errno);
-        if (!said.isEmpty()) sb.append("，").append(said);
-        sb.append("），可能登录已失效，请在网盘中心重新粘贴 Cookie");
-        return sb.toString();
+    private static String combinedReason(Attempt web, Attempt legacy) {
+        if (isShareGoneErrno(web.errno) || isShareGoneErrno(legacy.errno)) return SHARE_GONE;
+        return "百度分享解析失败：网页接口"
+                + web.describe()
+                + "；旧接口（dlna）"
+                + legacy.describe()
+                + "，请换一条线路";
+    }
+
+    /** 分享已取消 / 已过期 / 被删的 errno（与 Flutter 端 {@code _checkBaidu} 同一组）。 */
+    private static boolean isShareGoneErrno(int errno) {
+        return errno == -7 || errno == -9 || errno == -21 || errno == -144 || errno == -145;
+    }
+
+    /** 常见「登录态不对」的 errno：-6 未登录、110 登录态失效；这两种多给一句重新登录的提示。 */
+    private static boolean isAuthErrno(int errno) {
+        return errno == -6 || errno == 110;
     }
 
     /** 百度响应里它自己那句人话：{@code show_msg} 优先，其次 {@code errmsg}；都没有返回 ""。 */
@@ -758,10 +1174,14 @@ final class BaiduShareResolver {
                 + value.substring(end);
     }
 
-    /** 响应体打码：{@code dlink} 是签名直链，换成 {@code ***}；其余原样（截断到 400 字）。 */
+    /**
+     * 响应体打码：{@code dlink} 是签名直链、{@code sign} 是网页下载接口的签名，两个都换成
+     * {@code ***}；其余原样（截断到 400 字）。
+     */
     private static String maskBody(String body) {
         String value = text(body).replace('\n', ' ').replace('\r', ' ');
         value = value.replaceAll("\"dlink\"\\s*:\\s*\"[^\"]*\"", "\"dlink\":\"***\"");
+        value = value.replaceAll("\"sign\"\\s*:\\s*\"[^\"]*\"", "\"sign\":\"***\"");
         return value.length() > 400 ? value.substring(0, 400) + "…" : value;
     }
 

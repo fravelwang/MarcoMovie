@@ -16,7 +16,7 @@ import java.util.List;
  *       {@link QuarkShareResolver}；
  *   <li>{@link UcShareProvider}（{@code uc}）：免登录，造四段 id，播放侧见
  *       {@link UcShareResolver}；
- *   <li>{@link BaiduShareProvider}（{@code baidu}）：列目录免登录（访问者 Cookie + 提取码），造五段
+ *   <li>{@link BaiduShareProvider}（{@code baidu}）：列目录免登录（访问者 Cookie + 提取码），造六段
  *       {@code bd} id；播放直链要账号 Cookie，见 {@link BaiduShareResolver}；
  *   <li>{@link AliShareProvider}（{@code ali}）：列目录只要匿名 {@code share_token}，造四段
  *       {@code al} id；播放直链要账号（转存后换直链），见 {@link AliShareResolver}。

@@ -15,7 +15,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * 百度分享 → 线路：匿名打开分享页、验提取码、按层遍历目录、按文件造五段 {@code bd} id。
+ * 百度分享 → 线路：匿名打开分享页、验提取码、按层遍历目录、按文件造六段 {@code bd} id（末段是网页下载接口的分享页凭据）。
  *
  * <p>协议照 Flutter 端已经在跑的 {@code _baiduFiles}（{@code flutter/lib/core/cloud_share.dart}）
  * 移植，**免登录**——公开分享列目录不需要账号，只有播放直链才要（那是
@@ -32,8 +32,9 @@ import java.util.regex.Pattern;
  *       每层最多 {@link #MAX_PAGES} 页 × {@link #PAGE_SIZE} 条，一条分享最多 {@link #MAX_FILES} 个文件，
  *       只收视频，按「目录 + 文件名」的自然序排好（界面上仍只显示文件名），每层打一行
  *       {@code walk dir=… rows=… videos=…}；
- *   <li>id 是五段 {@code ++} 分隔：{@code bd ++ share_id ++ uk ++ fs_id ++ encode(sekey)}，播放侧由
- *       {@link BaiduShareResolver} 拿它换直链。
+ *   <li>id 是六段 {@code ++} 分隔：{@code bd ++ share_id ++ uk ++ fs_id ++ encode(sekey) ++
+ *       encode(surl|sign|timestamp)}，播放侧由 {@link BaiduShareResolver} 拿它换直链；第 6 段是网页
+ *       下载接口要的分享页凭据（{@link BaiduShareResolver.ShareTicket}），取不到时留空。
  * </ol>
  *
  * <p>造出来的 id 一律先过 {@link BaiduShareResolver#looksLikeShareId(String)}（与播放侧同一套判据）：
@@ -118,7 +119,7 @@ final class BaiduShareProvider implements NetdiskShareProvider {
     // ------------------------------------------------------------------ 百度分享接口
 
     /**
-     * 一条分享里的视频（已排序、已造好五段 id）。全程匿名：只有访问者 Cookie，不带账号凭据。
+     * 一条分享里的视频（已排序、已造好六段 id）。全程匿名：只有访问者 Cookie，不带账号凭据。
      *
      * <p>遍历口径（三家 provider 统一，2026-11-26 定）：根目录 + 最多 {@link #MAX_DEPTH} 层子目录，
      * 每层最多 {@link #MAX_PAGES} 页 × {@link #PAGE_SIZE} 条，一条分享最多 {@link #MAX_FILES} 个文件，
@@ -128,8 +129,27 @@ final class BaiduShareProvider implements NetdiskShareProvider {
     private static List<FilePlan> files(String shareId, String passcode) throws IOException {
         String shortId = shortId(shareId);
         BaiduShareResolver.Jar jar = new BaiduShareResolver.Jar();
-        openSharePage(shareId, passcode, jar);
+        String html = openSharePage(shareId, passcode, jar);
         String sekey = passcode.isEmpty() ? jar.get("BDCLND") : verify(shortId, passcode, jar);
+        // 网页下载接口要的 sign/timestamp：解析分享时页面正开着，顺手取下来随 id 带进播放侧。
+        // 两种情形要再开一次分享页：首屏常常是提取码页（页里没有 yunData）；有提取码时，验码之后
+        // 页面才是浏览器里「点下载」那一刻的样子（sign 与当时的状态配同一份最稳）。再开时带着刚
+        // 换到的 BDCLND，取不到就沿用首屏那份。
+        BaiduShareResolver.ShareTicket ticket = BaiduShareResolver.sharePageTicket(html, shareId);
+        if (!ticket.hasSignature() || !passcode.isEmpty()) {
+            String again = openSharePage(shareId, "", jar);
+            BaiduShareResolver.ShareTicket retry =
+                    BaiduShareResolver.sharePageTicket(again, shareId);
+            if (retry.hasSignature()) ticket = retry;
+        }
+        AppLog.w(
+                TAG,
+                "provider=baidu share "
+                        + shortId
+                        + " web_ticket="
+                        + (ticket.hasSignature() ? "yes" : "no")
+                        + " surl="
+                        + shareId);
         Walk walk = new Walk();
         List<Dir> dirs = new ArrayList<>();
         String uk = "";
@@ -160,7 +180,7 @@ final class BaiduShareProvider implements NetdiskShareProvider {
             }
             lastFingerprint = fingerprint;
             rootRows += rows.size();
-            collect(rows, walk, dirs, apiShareId, uk, sekey, "", 1);
+            collect(rows, walk, dirs, apiShareId, uk, sekey, ticket, "", 1);
         }
         AppLog.w(
                 TAG,
@@ -202,6 +222,7 @@ final class BaiduShareProvider implements NetdiskShareProvider {
                         apiShareId,
                         uk,
                         sekey,
+                        ticket,
                         stripLeadingSlash(dir.path),
                         dir.depth + 1);
             }
@@ -227,9 +248,13 @@ final class BaiduShareProvider implements NetdiskShareProvider {
         return out;
     }
 
-    /** 打开分享页（只为拿访问者 Cookie）；跳转自己跟，跳转只许留在 {@code pan.baidu.com}。 */
-    private static void openSharePage(String shareId, String passcode, BaiduShareResolver.Jar jar)
-            throws IOException {
+    /**
+     * 打开分享页：拿访问者 Cookie，并把正文交回去（里面可能有 {@code window.yunData} /
+     * {@code locals.mset} 的 {@code sign}/{@code timestamp}）。跳转自己跟，跳转只许留在
+     * {@code pan.baidu.com}。
+     */
+    private static String openSharePage(
+            String shareId, String passcode, BaiduShareResolver.Jar jar) throws IOException {
         String url =
                 BASE
                         + "/s/"
@@ -237,15 +262,17 @@ final class BaiduShareProvider implements NetdiskShareProvider {
                         + (passcode.isEmpty()
                                 ? ""
                                 : "?pwd=" + BaiduShareResolver.encodePart(passcode));
-        BaiduShareResolver.request(
-                "GET",
-                url,
-                null,
-                null,
-                BaiduShareResolver.UA_SHARE,
-                BaiduShareResolver.REFERER,
-                jar,
-                5);
+        BaiduShareResolver.Response answer =
+                BaiduShareResolver.request(
+                        "GET",
+                        url,
+                        null,
+                        null,
+                        BaiduShareResolver.UA_SHARE,
+                        BaiduShareResolver.REFERER,
+                        jar,
+                        5);
+        return NetdiskShareHttp.text(answer == null ? null : answer.body);
     }
 
     /** 验提取码换 {@code randsk}（即 sekey）；失败抛 IOException，只由上层记日志。 */
@@ -374,7 +401,8 @@ final class BaiduShareProvider implements NetdiskShareProvider {
 
     /**
      * 收一层目录：目录记进 {@code dirs}（没有 path 的跳过，没 path 就列不了；超过 {@link #MAX_DEPTH}
-     * 层的不再入队），文件按判据收下并造 id。{@code sortPath} 是这一层在排序键里的目录名（不带前导
+     * 层的不再入队），文件按判据收下并造 id（第 6 段是网页下载接口的分享页凭据，见 {@link
+     * BaiduShareResolver.ShareTicket}）。{@code sortPath} 是这一层在排序键里的目录名（不带前导
      * {@code /}，根目录为空串）。造出来的 id 还要过播放侧的形状判据，过不了就丢（日志只记各段长度，
      * 不记明文凭据）。
      */
@@ -385,6 +413,7 @@ final class BaiduShareProvider implements NetdiskShareProvider {
             String shareId,
             String uk,
             String sekey,
+            BaiduShareResolver.ShareTicket ticket,
             String sortPath,
             int childDepth) {
         if (rows == null) return;
@@ -412,7 +441,9 @@ final class BaiduShareProvider implements NetdiskShareProvider {
                             + "++"
                             + fsId
                             + "++"
-                            + BaiduShareResolver.encodePart(sekey);
+                            + BaiduShareResolver.encodePart(sekey)
+                            + "++"
+                            + BaiduShareResolver.encodePart(ticket.encode());
             if (!BaiduShareResolver.looksLikeShareId(id)) {
                 AppLog.w(
                         TAG,
@@ -550,7 +581,7 @@ final class BaiduShareProvider implements NetdiskShareProvider {
         }
     }
 
-    /** 造好五段 id 的一集。{@code sortKey} 带目录，{@code name} 只给界面。 */
+    /** 造好六段 id 的一集。{@code sortKey} 带目录，{@code name} 只给界面。 */
     private static final class FilePlan {
         final String name;
         final String id;
