@@ -58,8 +58,9 @@ final class BaiduDriveClient implements NetdiskDrive {
     }
 
     @Override
-    public List<NetdiskEntry> list(String dir) throws IOException {
+    public Page listPage(String dir, String cursor) throws IOException {
         String path = normalizeDir(dir);
+        int page = pageOf(cursor);
         String bdstoken = BaiduShareResolver.ownBdstoken(credential);
         if (bdstoken.isEmpty()) {
             throw new IOException("百度网盘登录已失效（取不到 bdstoken），请重新扫码登录");
@@ -68,7 +69,9 @@ final class BaiduDriveClient implements NetdiskDrive {
                 LIST_BASE
                         + "?dir="
                         + NetdiskShareHttp.encodeQuery(path)
-                        + "&order=time&desc=1&showempty=0&web=1&page=1&num="
+                        + "&order=time&desc=1&showempty=0&web=1&page="
+                        + page
+                        + "&num="
                         + LIST_PAGE_SIZE
                         + "&channel=chunlei&app_id=250528&clienttype=0&bdstoken="
                         + NetdiskShareHttp.encodeQuery(bdstoken);
@@ -101,11 +104,13 @@ final class BaiduDriveClient implements NetdiskDrive {
             throw new IOException("百度网盘列目录失败：errno=" + errno + (said.isEmpty() ? "" : "，" + said));
         }
         List<NetdiskEntry> out = new ArrayList<>();
+        int listed = 0;
         JsonElement list = body.get("list");
         if (list != null && list.isJsonArray()) {
             for (JsonElement item : list.getAsJsonArray()) {
                 if (item == null || !item.isJsonObject()) continue;
                 JsonObject row = item.getAsJsonObject();
+                listed++;
                 String name = NetdiskShareHttp.optString(row, "server_filename").trim();
                 if (name.isEmpty()) continue;
                 boolean isDir = NetdiskShareHttp.optInt(row, "isdir", 0) != 0;
@@ -125,15 +130,30 @@ final class BaiduDriveClient implements NetdiskDrive {
                                 NetdiskShareHttp.optLong(row, "size", 0L)));
             }
         }
+        // /api/list carries no total (measured 2026-11-27), so a full page is the only "maybe more"
+        // signal there is; the next page answering empty is the real end and must not be an error.
+        int total = NetdiskShareHttp.optInt(body, "total", -1);
+        boolean more =
+                listed > 0
+                        && (total >= 0
+                                ? (long) page * LIST_PAGE_SIZE < total
+                                : listed >= LIST_PAGE_SIZE);
+        String next = more ? String.valueOf(page + 1) : null;
         AppLog.w(
                 TAG,
-                "list ok dir="
+                "page ok dir="
                         + path
+                        + " page="
+                        + page
                         + " n="
                         + out.size()
+                        + " listed="
+                        + listed
                         + " total="
-                        + NetdiskShareHttp.optInt(body, "total", -1));
-        return out;
+                        + total
+                        + " next="
+                        + (next == null ? "-" : next));
+        return new Page(out, next, total);
     }
 
     /**
@@ -160,6 +180,18 @@ final class BaiduDriveClient implements NetdiskDrive {
         String path = NetdiskShareHttp.text(dir).trim();
         if (path.isEmpty()) return ROOT;
         return path.startsWith("/") ? path : "/" + path;
+    }
+
+    /** 游标就是页码；空/null 是第 1 页，坏游标退回第 1 页（宁可重取也不跳页）。 */
+    private static int pageOf(String cursor) {
+        String text = NetdiskShareHttp.text(cursor).trim();
+        if (text.isEmpty()) return 1;
+        try {
+            int page = Integer.parseInt(text);
+            return page < 1 ? 1 : page;
+        } catch (NumberFormatException ignored) {
+            return 1;
+        }
     }
 
     /** 百度那句给人看的话：{@code show_msg} 优先，其次 {@code errmsg}。 */

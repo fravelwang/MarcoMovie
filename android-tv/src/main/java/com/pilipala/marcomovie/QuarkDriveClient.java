@@ -48,7 +48,7 @@ final class QuarkDriveClient implements NetdiskDrive {
     private static final int READ_TIMEOUT_MS = 8000;
     private static final int MAX_BODY_BYTES = 1 << 20;
 
-    /** {@code list} fetches one page only; see {@link #list(String)}. */
+    /** {@code listPage} fetches one page at a time; see {@link #listPage(String, String)}. */
     private static final int LIST_PAGE_SIZE = 40;
     /** {@code search} fetches one page only; see {@link #search(String)}. */
     private static final int SEARCH_PAGE_SIZE = 20;
@@ -123,30 +123,66 @@ final class QuarkDriveClient implements NetdiskDrive {
     }
 
     /**
-     * Lists one directory. A null or empty {@code dirFid} means the root ({@code "0"}).
+     * Lists one page of a directory. A null or empty {@code dirFid} means the root ({@code "0"});
+     * a null/empty {@code cursor} means page 1.
      *
-     * <p>Pagination note: only the first page is requested ({@code _page=1}, {@code _size=40}).
-     * When the directory holds more entries, whatever fit in that page is returned and the rest is
-     * dropped; {@link #lastTotal()} still reports the server-side {@code metadata._total} so the UI
-     * can say "showing the first 40".
+     * <p>Pagination follows the service's own {@code metadata._total}: the browser keeps the cursor
+     * of {@link NetdiskDrive.Page#next} to ask for the following page, so the first screen never
+     * waits for page 2. {@link #lastTotal()} still reports the total of the last list/search call.
      */
     @Override
-    public List<NetdiskEntry> list(String dirFid) throws IOException {
+    public Page listPage(String dirFid, String cursor) throws IOException {
         String fid = dirFid == null || dirFid.trim().isEmpty() ? "0" : dirFid.trim();
+        int page = pageOf(cursor);
         String url =
                 BASE
                         + "/file/sort?pr=ucpro&fr=pc&pdir_fid="
                         + QuarkQrLogin.encodeQuery(fid)
-                        + "&_page=1&_size="
+                        + "&_page="
+                        + page
+                        + "&_size="
                         + LIST_PAGE_SIZE
                         + "&_fetch_total=1&_sort="
                         + SORT;
-        return parseEntries(call("GET", url, null));
+        List<NetdiskEntry> rows = parseEntries(call("GET", url, null));
+        int total = lastTotal;
+        // 夸克 reports metadata._total, so "more" is exact instead of "the page was full".
+        boolean more =
+                !rows.isEmpty()
+                        && (total >= 0
+                                ? (long) page * LIST_PAGE_SIZE < total
+                                : rows.size() >= LIST_PAGE_SIZE);
+        String next = more ? String.valueOf(page + 1) : null;
+        AppLog.w(
+                "QuarkDrive",
+                "page ok dir="
+                        + fid
+                        + " page="
+                        + page
+                        + " n="
+                        + rows.size()
+                        + " total="
+                        + total
+                        + " next="
+                        + (next == null ? "-" : next));
+        return new Page(rows, next, total);
+    }
+
+    /** 游标就是页码；空/null 是第 1 页，坏游标退回第 1 页（宁可重取也不跳页）。 */
+    private static int pageOf(String cursor) {
+        String text = cursor == null ? "" : cursor.trim();
+        if (text.isEmpty()) return 1;
+        try {
+            int page = Integer.parseInt(text);
+            return page < 1 ? 1 : page;
+        } catch (NumberFormatException ignored) {
+            return 1;
+        }
     }
 
     /**
      * Searches the whole drive by keyword (file name). Same envelope and same page-size limitation
-     * as {@link #list(String)}: one page of {@value #SEARCH_PAGE_SIZE} hits is returned, and
+     * as {@link #listPage(String, String)}: one page of {@value #SEARCH_PAGE_SIZE} hits is returned, and
      * {@link #lastTotal()} reports {@code metadata._total}.
      */
     List<NetdiskEntry> search(String keyword) throws IOException {

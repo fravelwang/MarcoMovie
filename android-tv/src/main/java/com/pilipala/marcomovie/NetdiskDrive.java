@@ -1,6 +1,7 @@
 package com.pilipala.marcomovie;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -38,14 +39,53 @@ interface NetdiskDrive {
         }
     }
 
+    /**
+     * One page of a directory, plus the cursor that asks for the next one.
+     *
+     * <p>Drives that report a server-side total fill {@link #total}; 百度 does not (measured
+     * 2026-11-27: {@code /api/list} answers {@code errno/guid_info/list/request_id/guid} and no
+     * count), so a caller must treat {@code total == -1} as "unknown" and rely on {@link #next}.
+     */
+    final class Page {
+        final List<NetdiskEntry> rows;
+        /** Cursor for the next page; null/empty when this listing ends here. */
+        final String next;
+        /** Entries the drive says the whole directory holds, or -1 when it does not say. */
+        final int total;
+
+        Page(List<NetdiskEntry> rows, String next, int total) {
+            this.rows = rows == null ? new ArrayList<NetdiskEntry>() : rows;
+            this.next = next == null || next.isEmpty() ? null : next;
+            this.total = total;
+        }
+
+        boolean hasMore() {
+            return next != null;
+        }
+    }
+
     /** Name used in the 网盘 pill and the player's site title, e.g. 「夸克」「百度」. */
     String label();
 
     /** The dir id this drive calls its root; {@link #list(String)} accepts it verbatim. */
     String rootDir();
 
-    /** Lists one directory; pass {@link #rootDir()} for the top level. */
-    List<NetdiskEntry> list(String dir) throws IOException;
+    /**
+     * First page only, the shape every caller that never pages wants (分享线, historically the
+     * browser too). Kept as a default method so the paging rule lives in exactly one place.
+     */
+    default List<NetdiskEntry> list(String dir) throws IOException {
+        return listPage(dir, null).rows;
+    }
+
+    /**
+     * One page of a directory.
+     *
+     * @param cursor null/empty for the first page, otherwise the {@link Page#next} of the previous
+     *     page. Opaque to callers: each drive decides what it encodes.
+     * @throws IOException when this page fails; pages already handed out stay valid
+     */
+    Page listPage(String dir, String cursor) throws IOException;
 
     /**
      * Resolves one playable file into a URL the player can open.

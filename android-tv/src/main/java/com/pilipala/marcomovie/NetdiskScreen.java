@@ -47,6 +47,25 @@ final class NetdiskScreen {
     private TextView status;
     private int generation;
 
+    /** Rows loaded so far across pages; the grid always renders this whole list. */
+    private List<NetdiskEntry> entries = new ArrayList<>();
+    /** One card view per index of {@link #entries}, in render order, for moving focus on append. */
+    private List<View> cardViews = new ArrayList<>();
+    private NetdiskDrive drive;
+    /** Opaque cursor of the next page, or null when the directory ends here. */
+    private String nextCursor;
+    /** Server-reported entry count of this directory, -1 when the drive does not say (百度). */
+    private int totalHint = -1;
+    private int pageNo;
+    private int cols;
+    private int cardW;
+    private boolean pageLoading;
+    /** Message of a failed page after the first; the rows before it stay on screen. */
+    private String pageError;
+    private LinearLayout footerRow;
+    private TextView footerText;
+    private Button footerButton;
+
     NetdiskScreen(MainActivity a) {
         this(a, QuarkQrLogin.PROVIDER, "0", "");
     }
@@ -77,6 +96,8 @@ final class NetdiskScreen {
         gridHost.setClipChildren(false);
         gridHost.setClipToPadding(false);
         a.body.addView(gridHost, new LinearLayout.LayoutParams(-1, -2));
+        initFooter();
+        a.body.addView(footerRow, new LinearLayout.LayoutParams(-1, -2));
         load();
     }
 
@@ -387,26 +408,48 @@ final class NetdiskScreen {
         listAsync(new QuarkDriveClient(credential.cookie), mine);
     }
 
-    /** Lists one directory off the UI thread and hands the rows (or the error) to the grid. */
+    /**
+     * Lists the first page off the UI thread and hands it (or the error) to the grid.
+     *
+     * <p>Paging rides on the same worker: page 2 is requested only after the user asks for it, so
+     * the first screen never waits for it and a failed later page cannot touch the rows already on
+     * screen ({@link #loadMore()}).
+     */
     private void listAsync(final NetdiskDrive drive, final int mine) {
+        this.drive = drive;
+        resetPaging();
         status.setText("正在读取…");
         WORKER.execute(
                 () -> {
-                    List<NetdiskEntry> rows = null;
+                    NetdiskDrive.Page page = null;
                     String error = null;
                     try {
-                        rows = drive.list(dirFid);
+                        page = drive.listPage(dirFid, null);
                     } catch (Throwable t) {
                         error = t.getMessage() == null ? "读取失败" : t.getMessage();
                     }
-                    final List<NetdiskEntry> done = rows;
+                    final NetdiskDrive.Page done = page;
                     final String err = error;
                     a.ui.post(
                             () -> {
                                 if (generation != mine) return;
-                                renderGrid(drive, done, err);
+                                renderFirstPage(drive, done, err);
                             });
                 });
+    }
+
+    /** Clears the paging state when the page (or the folder) starts over. */
+    private void resetPaging() {
+        entries = new ArrayList<>();
+        cardViews = new ArrayList<>();
+        nextCursor = null;
+        totalHint = -1;
+        pageLoading = false;
+        pageError = null;
+        pageNo = 0;
+        cols = 0;
+        cardW = 0;
+        if (footerRow != null) footerRow.setVisibility(View.GONE);
     }
 
     /**未登录时整页只有一张能按的卡：扫码。配置不进主位。 */
@@ -444,33 +487,69 @@ final class NetdiskScreen {
                 && (entry.videoHint || NetdiskEntry.isVideoName(entry.name));
     }
 
-    private void renderGrid(NetdiskDrive drive, List<NetdiskEntry> rows, String error) {
+    /** First page: reset the grid, or say why there is nothing to show. */
+    private void renderFirstPage(NetdiskDrive drive, NetdiskDrive.Page page, String error) {
         gridHost.removeAllViews();
+        cardViews = new ArrayList<>();
         if (error != null) {
             status.setText(error);
             return;
         }
-        if (rows == null || rows.isEmpty()) {
+        if (page == null || page.rows.isEmpty()) {
             status.setText("这个文件夹是空的");
             return;
         }
+        entries = new ArrayList<>(page.rows);
+        nextCursor = page.next;
+        totalHint = page.total;
+        pageNo = 1;
+        pageError = null;
+        pageLoading = false;
+        AppLog.w(
+                "NetdiskScreen",
+                "page 1 ok dir="
+                        + dirFid
+                        + " n="
+                        + entries.size()
+                        + " total="
+                        + totalHint
+                        + " next="
+                        + (nextCursor == null ? "-" : nextCursor));
+        rebuildGrid(drive, null);
+    }
+
+    /**
+     * Redraws the cards for everything loaded so far and refreshes the footer.
+     *
+     * @param focusTarget the first row of a just-appended page; null on the first render, where
+     *     {@link MainActivity#tvInitialFocus} still decides (exactly as before paging existed)
+     */
+    private void rebuildGrid(NetdiskDrive drive, NetdiskEntry focusTarget) {
+        gridHost.removeAllViews();
+        cardViews = new ArrayList<>();
         List<NetdiskEntry> folders = new ArrayList<>();
         List<NetdiskEntry> videos = new ArrayList<>();
         List<NetdiskEntry> others = new ArrayList<>();
-        for (NetdiskEntry row : rows) {
+        for (NetdiskEntry row : entries) {
             if (row.dir) folders.add(row);
             else if (isPlayable(row)) videos.add(row);
             else others.add(row);
         }
-        status.setText(
-                "文件夹 " + folders.size() + " · 视频 " + videos.size()
-                        + (others.isEmpty() ? "" : " · 其它 " + others.size()));
+        StringBuilder counts =
+                new StringBuilder(
+                        "文件夹 " + folders.size() + " · 视频 " + videos.size());
+        if (!others.isEmpty()) counts.append(" · 其它 ").append(others.size());
+        // A partial listing says so; a complete one keeps the exact line it always had.
+        if (nextCursor != null) counts.append(" · 已加载 ").append(entries.size()).append(" 项");
+        status.setText(counts.toString());
         float density = Math.max(1f, a.getResources().getDisplayMetrics().density);
-        int cols = Math.max(3, Math.min(6, (int) (a.windowWidth() / density / 220)));
+        if (cols <= 0) {
+            cols = Math.max(3, Math.min(6, (int) (a.windowWidth() / density / 220)));
+            int gap = a.dp(16);
+            cardW = Math.max(a.dp(150), (a.windowWidth() - a.dp(96) - gap * (cols - 1)) / cols);
+        }
         int gap = a.dp(16);
-        int cardW = Math.max(a.dp(150), (a.windowWidth() - a.dp(96) - gap * (cols - 1)) / cols);
 
-        View first = null;
         List<NetdiskEntry> all = new ArrayList<>();
         all.addAll(folders);
         all.addAll(videos);
@@ -488,7 +567,7 @@ final class NetdiskScreen {
             NetdiskEntry entry = all.get(i);
             boolean playable = isPlayable(entry);
             View card = buildCard(drive, entry, playable, cardW);
-            if (first == null) first = card;
+            cardViews.add(card);
             LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, -2, 1f);
             if (i % cols < cols - 1) clp.rightMargin = gap;
             row.addView(card, clp);
@@ -499,7 +578,141 @@ final class NetdiskScreen {
                 row.addView(new View(a), new LinearLayout.LayoutParams(0, 1, 1f));
             }
         }
-        if (first != null) a.tvInitialFocus = first;
+        applyFooterState();
+        if (focusTarget != null) {
+            int index = all.indexOf(focusTarget);
+            if (index >= 0 && index < cardViews.size()) {
+                cardViews.get(index).requestFocus();
+            }
+        } else if (pageNo == 1 && !cardViews.isEmpty()) {
+            a.tvInitialFocus = cardViews.get(0);
+        }
+    }
+
+    /**
+     * The footer under the grid: the way to the next page, why it did not load, or the end of the
+     * listing. Its views are built once ({@link #initFooter()}) and only re-labelled afterwards, so
+     * the remote's focus never falls off the button when a page is being fetched.
+     */
+    private void initFooter() {
+        footerRow = a.row();
+        footerRow.setGravity(Gravity.CENTER_VERTICAL);
+        footerRow.setVisibility(View.GONE);
+        footerText = a.text("", 12.5f, TvV17Theme.MUTED);
+        footerText.setSingleLine(true);
+        footerText.setEllipsize(TextUtils.TruncateAt.END);
+        footerText.setPadding(0, a.dp(6), a.dp(16), a.dp(6));
+        footerRow.addView(footerText, new LinearLayout.LayoutParams(0, -2, 1f));
+        footerButton = a.navButton("加载更多", "netdisk-load-more", this::loadMore);
+        footerButton.setTextSize(13f);
+        footerRow.addView(footerButton, new LinearLayout.LayoutParams(a.dp(300), a.dp(40)));
+    }
+
+    /** Re-labels the footer for the current paging state (never clears the rows). */
+    private void applyFooterState() {
+        if (footerRow == null || footerButton == null) return;
+        footerRow.setVisibility(View.VISIBLE);
+        if (pageError != null) {
+            footerText.setText("加载更多失败：" + pageError);
+            footerText.setTextColor(0xffff8a80);
+            footerButton.setText("重试");
+            footerButton.setVisibility(View.VISIBLE);
+            return;
+        }
+        footerText.setTextColor(TvV17Theme.MUTED);
+        if (pageLoading) {
+            footerText.setText("正在加载更多…");
+            footerButton.setText("加载中…");
+            footerButton.setVisibility(View.VISIBLE);
+            return;
+        }
+        if (nextCursor != null) {
+            int remaining = totalHint > 0 ? Math.max(0, totalHint - entries.size()) : -1;
+            footerText.setText(
+                    "已加载 "
+                            + entries.size()
+                            + (totalHint > 0 ? " / " + totalHint : "")
+                            + " 项");
+            footerButton.setText(remaining >= 0 ? "加载更多（还有 " + remaining + " 项）" : "加载更多");
+            footerButton.setVisibility(View.VISIBLE);
+            return;
+        }
+        footerText.setText("已到末尾 · 共 " + entries.size() + " 项");
+        footerButton.setVisibility(View.GONE);
+    }
+
+    /**
+     * Fetches the next page the drive's cursor points at and appends it.
+     *
+     * <p>A failure here only relabels the footer: the rows already on screen stay, and the same
+     * button becomes 重试 ({@link #pageError}).
+     */
+    private void loadMore() {
+        if (drive == null || pageLoading || nextCursor == null) return;
+        final int mine = generation;
+        final String cursor = nextCursor;
+        final NetdiskDrive target = drive;
+        pageLoading = true;
+        pageError = null;
+        applyFooterState();
+        WORKER.execute(
+                () -> {
+                    NetdiskDrive.Page page = null;
+                    String error = null;
+                    try {
+                        page = target.listPage(dirFid, cursor);
+                    } catch (Throwable t) {
+                        error = t.getMessage() == null ? "读取失败" : t.getMessage();
+                    }
+                    final NetdiskDrive.Page done = page;
+                    final String err = error;
+                    a.ui.post(
+                            () -> {
+                                if (generation != mine) return;
+                                onPageLoaded(target, cursor, done, err);
+                            });
+                });
+    }
+
+    /** Runs on the UI thread after a later page (or its error) is known. */
+    private void onPageLoaded(
+            NetdiskDrive drive, String cursor, NetdiskDrive.Page page, String error) {
+        pageLoading = false;
+        if (error != null) {
+            pageError = error;
+            AppLog.w(
+                    "NetdiskScreen",
+                    "page fail dir=" + dirFid + " cursor=" + cursor + " err=" + error);
+            applyFooterState();
+            a.toast("加载更多失败，已保留当前列表");
+            return;
+        }
+        int before = entries.size();
+        if (page != null && !page.rows.isEmpty()) entries.addAll(page.rows);
+        if (page != null && page.total >= 0) totalHint = page.total;
+        nextCursor = page == null ? null : page.next;
+        pageNo++;
+        int added = entries.size() - before;
+        AppLog.w(
+                "NetdiskScreen",
+                "page append dir="
+                        + dirFid
+                        + " cursor="
+                        + cursor
+                        + " page="
+                        + pageNo
+                        + " added="
+                        + added
+                        + " rows="
+                        + entries.size()
+                        + " next="
+                        + (nextCursor == null ? "-" : nextCursor));
+        // A page past the end (百度 has no total to stop on early) is the end, not an error.
+        NetdiskEntry focusTarget = added > 0 ? entries.get(before) : null;
+        rebuildGrid(drive, focusTarget);
+        if (added > 0) return;
+        a.toast("已到末尾");
+        if (!cardViews.isEmpty()) cardViews.get(cardViews.size() - 1).requestFocus();
     }
 
     private View buildCard(

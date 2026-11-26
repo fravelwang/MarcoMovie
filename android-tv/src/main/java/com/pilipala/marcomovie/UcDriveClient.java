@@ -65,9 +65,10 @@ final class UcDriveClient implements NetdiskDrive {
     }
 
     @Override
-    public List<NetdiskEntry> list(String dir) throws IOException {
+    public Page listPage(String dir, String cursor) throws IOException {
         String pdir = NetdiskShareHttp.text(dir).trim();
         if (pdir.isEmpty()) pdir = ROOT;
+        int page = pageOf(cursor);
         String cookie = credential == null ? "" : credential.pus;
         cookie = cookie.isEmpty() ? "" : "__pus=" + cookie;
         if (cookie.isEmpty()) {
@@ -77,7 +78,9 @@ final class UcDriveClient implements NetdiskDrive {
                 LIST_BASE
                         + "?pr=UCBrowser&fr=pc&pdir_fid="
                         + NetdiskShareHttp.encodeQuery(pdir)
-                        + "&_page=1&_size="
+                        + "&_page="
+                        + page
+                        + "&_size="
                         + LIST_PAGE_SIZE
                         + "&_fetch_total=1&_fetch_sub_dirs=0&_sort="
                         + NetdiskShareHttp.encodeQuery("file_type:asc,file_name:asc");
@@ -121,15 +124,23 @@ final class UcDriveClient implements NetdiskDrive {
                                 isVideoRow(row)));
             }
         }
+        int total = total(body);
+        // UC reports the directory total, so "more" is exact instead of "the page was full".
+        boolean more = !out.isEmpty() && (total >= 0 ? (long) page * LIST_PAGE_SIZE < total : out.size() >= LIST_PAGE_SIZE);
+        String next = more ? String.valueOf(page + 1) : null;
         AppLog.w(
                 TAG,
-                "list ok dir="
+                "page ok dir="
                         + pdir
+                        + " page="
+                        + page
                         + " n="
                         + out.size()
                         + " total="
-                        + total(body));
-        return out;
+                        + total
+                        + " next="
+                        + (next == null ? "-" : next));
+        return new Page(out, next, total);
     }
 
     /**
@@ -213,6 +224,18 @@ final class UcDriveClient implements NetdiskDrive {
         return metadata != null && metadata.isJsonObject()
                 ? NetdiskShareHttp.optInt(metadata.getAsJsonObject(), "_total", -1)
                 : -1;
+    }
+
+    /** 游标就是页码；空/null 是第 1 页，坏游标退回第 1 页（宁可重取也不跳页）。 */
+    private static int pageOf(String cursor) {
+        String text = NetdiskShareHttp.text(cursor).trim();
+        if (text.isEmpty()) return 1;
+        try {
+            int page = Integer.parseInt(text);
+            return page < 1 ? 1 : page;
+        } catch (NumberFormatException ignored) {
+            return 1;
+        }
     }
 
     /** One human-readable line for a failed envelope (status/code always included). */
