@@ -929,8 +929,25 @@ final class TvDetailHost {
         EpisodeSelection selection = screen == null ? null : screen.selection;
         Cms.Line shareLine = resolved.lines.get(index);
         if (forceDefault && selection != null && shareLine != null) {
-            selection.select(
-                    shareLine.name, 0, shareLine.episodes == null ? 0 : shareLine.episodes.size());
+            // 分享线默认要被选中的前提是它自己没被标坏：百度这类"要验证"的分享会在播放失败后被
+            // LineHealth 记成线路问题，这里不能再把它设成默认，否则一点播放又是一次失败。
+            String badge = LineHealth.badge(a, site, shareLine);
+            boolean shareUsable = badge.isEmpty() || "可用".equals(badge);
+            if (shareUsable) {
+                selection.select(
+                        shareLine.name,
+                        0,
+                        shareLine.episodes == null ? 0 : shareLine.episodes.size());
+            } else {
+                for (Cms.Line line : resolved.lines) {
+                    if (line == null || line.episodes == null || line.episodes.isEmpty()) continue;
+                    String other = LineHealth.badge(a, site, line);
+                    if (other.isEmpty() || "可用".equals(other)) {
+                        selection.select(line.name, 0, line.episodes.size());
+                        break;
+                    }
+                }
+            }
         }
         int[] sel =
                 initialSelection(
