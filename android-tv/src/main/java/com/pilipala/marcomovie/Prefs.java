@@ -40,6 +40,7 @@ final class Prefs {
     static final String DECODER_MODE = "decoder_mode";
     static final String SOFTWARE_AUDIO = "software_audio";
     static final String PREFER_AAC = "prefer_aac";
+    static final String NETDISK_RANGE_PROXY = "netdisk_range_proxy";
     static final String ASPECT = "aspect";
     static final String BUFFER_SECONDS = "buffer_seconds";
     static final String PLAY_SPEED = "play_speed";
@@ -166,6 +167,7 @@ final class Prefs {
         DECODER_MODE,
         SOFTWARE_AUDIO,
         PREFER_AAC,
+        NETDISK_RANGE_PROXY,
         TUNNELED_PLAYBACK,
         ASPECT,
         BUFFER_SECONDS,
@@ -203,6 +205,7 @@ final class Prefs {
                                     DANMAKU_DEFAULT,
                                     SOFTWARE_AUDIO,
                                     PREFER_AAC,
+                                    NETDISK_RANGE_PROXY,
                                     TUNNELED_PLAYBACK,
                                     EPISODES_DESCENDING,
                                     LIVE_HIGH_QUALITY,

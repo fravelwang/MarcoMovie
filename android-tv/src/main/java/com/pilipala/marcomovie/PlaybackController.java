@@ -1889,7 +1889,9 @@ final class PlaybackController {
                                                     "HLS proxy fallback to direct URL",
                                                     proxyErr);
                                         }
-                                    } else if (netdiskHeaders && !isLiveStream) {
+                                    } else if (netdiskHeaders
+                && !isLiveStream
+                && a.prefs.getBoolean(Prefs.NETDISK_RANGE_PROXY, false)) {
                                         // Signed netdisk direct links (Quark/UC/Baidu/Ali 4K
                                         // remuxes) are read over one upstream connection, which
                                         // stutters on this box. Wrap them in the loopback
