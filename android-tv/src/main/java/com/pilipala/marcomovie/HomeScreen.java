@@ -37,6 +37,14 @@ final class HomeScreen {
     final List<View> curatedDramaCards = new ArrayList<>(), curatedMovieCards = new ArrayList<>();
     TvCuratedHome.Catalog curatedCatalog;
     int curatedHeroIndex;
+    /**
+     * 「墙上正在显示的标题」保护清单, kept here because the screen — not the ledger — knows what is
+     * on screen. Two replace-only batches (the wall's visible cards, the home recommendation
+     * shelves) reported to {@link SourceLedger#protect} as one union: the ledger's set is a
+     * replacement, so two reporters must not overwrite each other's batch.
+     */
+    private final List<String> wallVisibleTitles = new ArrayList<>();
+    private final List<String> curatedVisibleTitles = new ArrayList<>();
     android.widget.HorizontalScrollView categoryScroll;
     CategoryFlow filters;
     InlineFilters inlineFilters;
@@ -948,6 +956,8 @@ final class HomeScreen {
         LibraryModel model = LibraryModel.from(result, filter.mode, a.sourceLedger);
         List<LibraryModel.MergedItem> visible = LibraryQuery.visible(model, filter);
         for (LibraryModel.MergedItem item : visible) videos.add(item.video);
+        // 一轮一次批量上报：这就是本轮墙上可见的那批卡片，账本清理时不许把它们当 LRU 淘汰对象。
+        reportWallTitles(visible);
 
         // The wall owns the flat list; category paging is bypassed while the filter is active.
         state.category = "";
@@ -1225,8 +1235,56 @@ final class HomeScreen {
         }
     }
 
+    /**
+     * 保护清单（合并墙）：把本轮可见的卡片标题整批交给账本。这里只换两张表里的一张再合并上报，
+     * 归一、去重、清理规则都归 {@link SourceLedger}；不读界面、不逐帧重算。
+     */
+    private void reportWallTitles(List<LibraryModel.MergedItem> visible) {
+        wallVisibleTitles.clear();
+        if (visible != null) {
+            for (LibraryModel.MergedItem item : visible) {
+                if (item == null || item.video == null || item.video.title == null) continue;
+                wallVisibleTitles.add(item.video.title);
+            }
+        }
+        reportVisibleTitles();
+    }
+
+    /** 保护清单（首页推荐）：目录里的 hero / 近期热剧 / 热门电影同样在墙上。 */
+    private void reportCuratedTitles(TvCuratedHome.Catalog catalog) {
+        curatedVisibleTitles.clear();
+        if (catalog != null) {
+            appendVisibleTitles(curatedVisibleTitles, catalog.hero);
+            appendVisibleTitles(curatedVisibleTitles, catalog.hotDramas);
+            appendVisibleTitles(curatedVisibleTitles, catalog.hotMovies);
+        }
+        reportVisibleTitles();
+    }
+
+    private static void appendVisibleTitles(List<String> out, List<Cms.Video> videos) {
+        if (videos == null) return;
+        for (Cms.Video video : videos) {
+            if (video == null || video.title == null) continue;
+            out.add(video.title);
+        }
+    }
+
+    /**
+     * 两批合成一次替换式上报。账本的保护集合是"替换"不是"累加"，所以两个渲染路径不能各报各的
+     * （后报的会把先报的整批冲掉）；合并放在体验层，账本只认一个集合。
+     */
+    private void reportVisibleTitles() {
+        if (a == null) return;
+        List<String> batch = new ArrayList<>(wallVisibleTitles.size() + curatedVisibleTitles.size());
+        batch.addAll(wallVisibleTitles);
+        batch.addAll(curatedVisibleTitles);
+        SourceLedger.protect(a, batch);
+    }
+
     private void renderCuratedSection(final TvCuratedHome.Catalog catalog) {
         if (curatedHost == null || catalog == null) return;
+        // 推荐架也是「墙上正在显示的标题」：hero + 近期热剧 + 热门电影，一批报给账本。
+        reportCuratedTitles(catalog);
         curatedHost.removeAllViews();
         curatedHeroBtn = null;
         curatedHeroHeightPx = 0;
@@ -2501,20 +2559,26 @@ final class HomeScreen {
                 () -> {
                     try {
                         timing.dispatched = android.os.SystemClock.elapsedRealtime();
-                        SourceEngine engine = a.engine(site);
-                        timing.engineReady = android.os.SystemClock.elapsedRealtime();
-                        long[] phases = new long[2];
-                        String raw =
-                                SourceGate.measured(
-                                        phases,
-                                        () ->
-                                                engine.category(
-                                                        effectiveCategory, page, remoteFilters));
+                        // Asking the site for a page goes through the gateway now; the same gate
+                        // and the same two phases are measured, just on the far side of the seam.
+                        FongMiGateway gateway = new FongMiGateway(a);
+                        long[] phases = new long[3];
+                        MediaPage fetched =
+                                gateway.category(
+                                        new SiteRef(site.key, site.name),
+                                        effectiveCategory,
+                                        page,
+                                        remoteFilters,
+                                        phases);
+                        timing.engineReady =
+                                phases[0] != 0
+                                        ? phases[0]
+                                        : android.os.SystemClock.elapsedRealtime();
                         timing.returned = android.os.SystemClock.elapsedRealtime();
-                        timing.gateWaitNanos = phases[0];
-                        timing.delegateNanos = phases[1];
+                        timing.gateWaitNanos = phases[1];
+                        timing.delegateNanos = phases[2];
                         RequestScope.checkCurrent();
-                        Cms.Listing list = Cms.listing(raw);
+                        Cms.Listing list = gateway.toListing(fetched);
                         clean(list.videos);
                         int received = list.videos.size();
                         boolean remoteIgnored =
@@ -2558,10 +2622,14 @@ final class HomeScreen {
                                 && resolvedPage < resolvedPageCount
                                 && scanned < 6) {
                             int nextPage = resolvedPage + 1;
-                            String extraRaw =
-                                    engine.category(effectiveCategory, nextPage, remoteFilters);
+                            MediaPage extraPage =
+                                    gateway.category(
+                                            new SiteRef(site.key, site.name),
+                                            effectiveCategory,
+                                            nextPage,
+                                            remoteFilters);
                             RequestScope.checkCurrent();
-                            Cms.Listing extra = Cms.listing(extraRaw);
+                            Cms.Listing extra = gateway.toListing(extraPage);
                             clean(extra.videos);
                             if (extra.videos.isEmpty()) {
                                 resolvedPageCount = resolvedPage;

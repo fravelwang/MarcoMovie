@@ -7,8 +7,10 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -33,13 +35,22 @@ import org.json.JSONObject;
  *
  * <p>Writers (synchronized): a wall round ({@link #absorb} refreshes {@code checkedAt} but not
  * {@code fails}), the search page's merged results ({@link #absorb} with {@code verified}), a
- * detail/match hit ({@link #remember}: {@code checkedAt=now, fails=0}), and a failed open
- * ({@link #markFailed}: {@code fails+1}). Readers: {@link #resolve} for the UI, plus the raw
- * {@link #sourcesOf} the wall model uses to fold known sources into its cards.
+ * detail/match hit ({@link #remember}: {@code checkedAt=now, fails=0}), a real play start
+ * ({@link #rememberPlayed}: {@code lastPlayedSite}, the one field that outranks the netdisk
+ * ordering in {@link #resolve}), and a failed open ({@link #markFailed}: {@code fails+1}).
+ * Readers: {@link #resolve} for the UI, plus the raw {@link #sourcesOf} the wall model uses to fold
+ * known sources into its cards.
  *
  * <p>Persistence: {@code source-ledger-v1.json} in the app files dir, only the minimal fields that
- * open one listing (site key, id, title). Writes are atomic and debounced by the activity; pruning
- * runs only after a load and before a write, never on a render path.
+ * open one listing (site key, id, title) plus each title's {@code lastPlayedSite}. The field is
+ * additive inside version 1: a file written before it existed simply has no such key, and an older
+ * build reading a newer file keeps ignoring an unknown key instead of discarding the whole ledger.
+ * Writes are atomic and debounced by the activity; pruning runs only after a load and before a
+ * write, never on a render path.
+ *
+ * <p>Not persisted: {@link #protect} keeps the titles the screen is showing, so a wall round that
+ * samples hundreds of other titles cannot evict them. It is a hint set, never a ledger field — the
+ * experience layer reports it, the ledger only reads it while choosing eviction victims.
  */
 final class SourceLedger {
 
@@ -54,6 +65,13 @@ final class SourceLedger {
 
     /** Titles kept on disk (LRU by last verification). */
     static final int MAX_TITLES = 600;
+
+    /**
+     * Ceiling for the protected set: the titles the screen is showing may fill at most this share
+     * of {@link #MAX_TITLES}; beyond that they are evicted by the same least-recent rule. Without
+     * it a wall that shows everything would keep the ledger growing without bound.
+     */
+    static final int MAX_PROTECTED_TITLES = MAX_TITLES * 80 / 100;
 
     /** Sources kept per title: the twelve that matter, by playback order then freshness. */
     static final int MAX_SOURCES_PER_TITLE = 12;
@@ -136,6 +154,13 @@ final class SourceLedger {
         final List<Source> sources = new ArrayList<>();
         final Map<String, Source> bySite = new LinkedHashMap<>();
         long updatedAt;
+        /**
+         * Site key this title last really started playing from, or null when it never played here.
+         * {@link #resolve} puts that site first so the next open does not start from a netdisk site
+         * that carries the title with zero episodes. Dropped whenever the site stops being one of
+         * this title's sources, so it can never point at a dead site.
+         */
+        String lastPlayedSite;
 
         Entry(String title) {
             this.title = title;
@@ -154,6 +179,13 @@ final class SourceLedger {
     }
 
     private final Map<String, Entry> entries = new LinkedHashMap<>();
+    /**
+     * Normalized titles the screen is showing right now: the wall's visible cards plus the home
+     * recommendation shelves. Reported by the experience layer through {@link #protect} and only
+     * ever held in memory — it is not a ledger field, is never serialized, and does not touch
+     * {@link #revision}.
+     */
+    private final Set<String> protectedTitles = new HashSet<>();
     /** The exact config site list the stored {@link Cms.Site} references came from. */
     private List<Cms.Site> boundSites;
     private long revision;
@@ -168,6 +200,26 @@ final class SourceLedger {
         put(site, video, true, true, System.currentTimeMillis());
     }
 
+    /**
+     * "This site really played this title": remembered as the title's {@code lastPlayedSite} so the
+     * next {@link #resolve} opens it first. Only a site the ledger already lists for the title can
+     * be recorded — anything else would be a dead reference the next prune would have to clean up,
+     * and a title the ledger has never heard of has no order to change.
+     *
+     * @return true when the stored pointer changed (the caller then schedules the debounced write)
+     */
+    synchronized boolean markPlayed(Cms.Video video, String siteKey) {
+        if (video == null || siteKey == null) return false;
+        String key = siteKey.trim();
+        if (key.isEmpty()) return false;
+        Entry entry = entryFor(video);
+        if (entry == null || !entry.bySite.containsKey(key)) return false;
+        if (key.equals(entry.lastPlayedSite)) return false;
+        entry.lastPlayedSite = key;
+        revision++;
+        return true;
+    }
+
     private void put(
             Cms.Site site, Cms.Video video, boolean checked, boolean resetFails, long now) {
         if (site == null || site.key == null || video == null) return;
@@ -178,8 +230,10 @@ final class SourceLedger {
         Entry entry = entries.get(key);
         if (entry == null) {
             if (entries.size() >= MAX_TITLES) {
-                // A long session must stay bounded before the disk prune runs.
-                entries.remove(entries.keySet().iterator().next());
+                // A long session must stay bounded before the disk prune runs. Same rule as prune
+                // step 3: the titles the screen is showing go last, so a round that samples 600
+                // other titles cannot push the wall's own cards out mid-round.
+                evictForCapacity();
             }
             entry = new Entry(key);
             entries.put(key, entry);
@@ -198,6 +252,50 @@ final class SourceLedger {
         if (resetFails) source.fails = 0;
         entry.updatedAt = now;
         revision++;
+    }
+
+    /**
+     * 「谁在墙上」: replaces the protected set with the titles the screen is showing. The experience
+     * layer reports what it rendered (the wall's visible cards, the home recommendation shelves) in
+     * one batch per render, so nothing here reads a view or a screen state.
+     *
+     * <p>Replacement, not accumulation: a title that left the screen stops being protected at the
+     * next report. Calls are ignored for the ledger's own state (no revision bump), so the debounced
+     * writer never sees a protection-only change.
+     */
+    synchronized void protect(Collection<String> titleKeys) {
+        protectedTitles.clear();
+        if (titleKeys == null || titleKeys.isEmpty()) return;
+        for (String raw : titleKeys) {
+            String key = LibraryAggregator.normalizeTitle(raw);
+            if (!key.isEmpty()) protectedTitles.add(key);
+        }
+    }
+
+    /** Titles currently protected, for the prune log and a box-side check. */
+    synchronized int protectedCount() {
+        return protectedTitles.size();
+    }
+
+    /**
+     * Drops one title so the in-memory ledger stays at {@link #MAX_TITLES} while a round is still
+     * being absorbed. Victim order matches prune step 3: least recently updated first, protected
+     * titles only when every remaining title is protected (the cap then still holds).
+     */
+    private void evictForCapacity() {
+        Entry victim = oldestEntry(true);
+        if (victim == null) victim = oldestEntry(false);
+        if (victim != null) entries.remove(victim.title);
+    }
+
+    /** Oldest entry by {@code updatedAt}, optionally skipping the protected titles. */
+    private Entry oldestEntry(boolean skipProtected) {
+        Entry oldest = null;
+        for (Entry entry : entries.values()) {
+            if (skipProtected && protectedTitles.contains(entry.title)) continue;
+            if (oldest == null || entry.updatedAt < oldest.updatedAt) oldest = entry;
+        }
+        return oldest;
     }
 
     /**
@@ -292,6 +390,7 @@ final class SourceLedger {
                 }
                 source.site = fresh;
             }
+            if (dropDeadPlayedSite(entry)) changed = true;
             if (entry.sources.isEmpty()) {
                 titles.remove();
                 changed = true;
@@ -299,6 +398,18 @@ final class SourceLedger {
         }
         if (changed) revision++;
         return changed;
+    }
+
+    /**
+     * "上次播过的站" cleanup: a {@code lastPlayedSite} whose site is no longer one of this title's
+     * sources (deleted site, package switch, TTL, two failed opens, capacity trim) is dropped here,
+     * so {@link #resolve} never has to skip a pointer at nothing.
+     */
+    private boolean dropDeadPlayedSite(Entry entry) {
+        if (entry == null || entry.lastPlayedSite == null) return false;
+        if (entry.bySite.containsKey(entry.lastPlayedSite)) return false;
+        entry.lastPlayedSite = null;
+        return true;
     }
 
     /**
@@ -341,13 +452,52 @@ final class SourceLedger {
                 changed = true;
             }
         }
-        // 3 标题总量: drop the least recently verified titles first.
+        // 3 标题总量 + 保护清单: drop the least recently verified titles first, but never a title
+        // the screen is showing (reported through protect). Two caps, both required: MAX_TITLES
+        // overall, and MAX_PROTECTED_TITLES for the protected share so "everything is on the wall"
+        // cannot grow the ledger without bound.
+        if (!protectedTitles.isEmpty()) {
+            // A protection report may name titles the ledger never learned (a curated card with no
+            // site yet); only a title that has an entry can be spared from eviction.
+            protectedTitles.retainAll(entries.keySet());
+        }
+        int droppedProtected = 0;
+        if (protectedTitles.size() > MAX_PROTECTED_TITLES) {
+            List<Entry> onScreen = new ArrayList<>();
+            for (Entry entry : entries.values()) {
+                if (protectedTitles.contains(entry.title)) onScreen.add(entry);
+            }
+            onScreen.sort(Comparator.comparingLong(e -> e.updatedAt));
+            int over = protectedTitles.size() - MAX_PROTECTED_TITLES;
+            for (int i = 0; i < over && i < onScreen.size(); i++) {
+                String title = onScreen.get(i).title;
+                if (entries.remove(title) == null) continue;
+                protectedTitles.remove(title);
+                droppedProtected++;
+                changed = true;
+            }
+        }
         if (entries.size() > MAX_TITLES) {
             List<Entry> byAge = new ArrayList<>(entries.values());
             byAge.sort(Comparator.comparingLong(e -> e.updatedAt));
             int drop = entries.size() - MAX_TITLES;
-            for (int i = 0; i < drop; i++) entries.remove(byAge.get(i).title);
-            changed = true;
+            // Pass 0 takes only the titles that are not on screen; pass 1 is the fallback for a
+            // wall that covers everything, so the total cap can never be exceeded either.
+            for (int pass = 0; pass < 2 && drop > 0; pass++) {
+                for (Entry entry : byAge) {
+                    if (drop == 0) break;
+                    if (!entries.containsKey(entry.title)) continue;
+                    boolean onScreen = protectedTitles.contains(entry.title);
+                    if (pass == 0 && onScreen) continue;
+                    entries.remove(entry.title);
+                    if (onScreen) {
+                        protectedTitles.remove(entry.title);
+                        droppedProtected++;
+                    }
+                    drop--;
+                    changed = true;
+                }
+            }
         }
         // 4 单标题来源上限: keep the twelve that matter (cloud drive first, freshest).
         for (Entry entry : entries.values()) {
@@ -356,6 +506,10 @@ final class SourceLedger {
                 trimmed += before - entry.sources.size();
                 changed = true;
             }
+        }
+        // 5 「上次播过的站」: the pointer must not survive the site it names.
+        for (Entry entry : entries.values()) {
+            if (dropDeadPlayedSite(entry)) changed = true;
         }
         if (changed) revision++;
         if (changed) {
@@ -373,7 +527,11 @@ final class SourceLedger {
                             + " failed="
                             + failed
                             + " trimmed="
-                            + trimmed);
+                            + trimmed
+                            + " protected="
+                            + protectedCount()
+                            + " droppedProtected="
+                            + droppedProtected);
         }
         return changed;
     }
@@ -436,6 +594,12 @@ final class SourceLedger {
         return source == null ? null : source.listing;
     }
 
+    /** The site this title last really played from, or null when it never played here. */
+    synchronized String lastPlayedSite(Cms.Video video) {
+        Entry entry = entryFor(video);
+        return entry == null ? null : entry.lastPlayedSite;
+    }
+
     synchronized int titleCount() {
         return entries.size();
     }
@@ -465,6 +629,28 @@ final class SourceLedger {
         if (a == null || site == null || video == null) return;
         a.sourceLedger.verify(site, video);
         a.onLedgerChanged();
+    }
+
+    /**
+     * Report entry point for the experience layer: "these are the titles on screen right now".
+     * Called once per render batch (the wall's visible cards, the home recommendation shelves),
+     * never once per card. The ledger keeps nothing but the set; which titles count as on screen is
+     * the screen's decision, not the ledger's.
+     */
+    static void protect(MainActivity a, Collection<String> titleKeys) {
+        if (a == null || titleKeys == null) return;
+        a.sourceLedger.protect(titleKeys);
+    }
+
+    /**
+     * "从这一站起播了": records the site that really started playing this title, so the next open of
+     * the same title resolves to it first instead of the netdisk default. Called from the
+     * activity's play entry points, which are the last place outside the player state machine that
+     * still knows both the site and the title.
+     */
+    static void rememberPlayed(MainActivity a, Cms.Site site, Cms.Video video) {
+        if (a == null || site == null || video == null) return;
+        if (a.sourceLedger.markPlayed(video, site.key)) a.onLedgerChanged();
     }
 
     /** Records one failed open for that title on that site. */
@@ -506,6 +692,8 @@ final class SourceLedger {
         if (known.isEmpty()) return Sources.EMPTY;
         List<Cms.Site> ordered = HomeScreen.netdiskFirst(a, known);
         if (ordered == null || ordered.isEmpty()) return Sources.EMPTY;
+        // 「记住能播的站」: the site this title last really played from wins over the netdisk order.
+        ordered = lastPlayedFirst(a.sourceLedger.lastPlayedSite(video), ordered);
         Cms.Site primary = ordered.get(0);
         Map<String, Cms.Video> listings = new LinkedHashMap<>();
         for (Cms.Site site : ordered) {
@@ -514,6 +702,34 @@ final class SourceLedger {
             if (listing != null) listings.put(site.key, listing);
         }
         return new Sources(ordered, primary, listings.get(primary.key), listings);
+    }
+
+    /**
+     * Moves the site that last really played this title to the head of {@code ordered}; the rest of
+     * the list keeps the {@link HomeScreen#netdiskFirst} order, so nothing but the primary changes.
+     * A pointer at a site that is no longer one of the title's sources is ignored (and cleaned up by
+     * the next prune), which is why the reorder needs no extra validation here.
+     */
+    private static List<Cms.Site> lastPlayedFirst(String playedSiteKey, List<Cms.Site> ordered) {
+        if (playedSiteKey == null || playedSiteKey.isEmpty()) return ordered;
+        if (ordered == null || ordered.size() < 2) return ordered;
+        Cms.Site head = ordered.get(0);
+        if (head != null && playedSiteKey.equals(head.key)) return ordered;
+        int index = -1;
+        for (int i = 1; i < ordered.size(); i++) {
+            Cms.Site site = ordered.get(i);
+            if (site != null && playedSiteKey.equals(site.key)) {
+                index = i;
+                break;
+            }
+        }
+        if (index < 0) return ordered;
+        List<Cms.Site> reordered = new ArrayList<>(ordered.size());
+        reordered.add(ordered.get(index));
+        for (int i = 0; i < ordered.size(); i++) {
+            if (i != index) reordered.add(ordered.get(i));
+        }
+        return reordered;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -557,6 +773,8 @@ final class SourceLedger {
                 if (key.isEmpty()) continue;
                 Entry entry = new Entry(key);
                 long updatedAt = row.optLong("updatedAt", 0L);
+                // Missing in a ledger written before the field existed: simply "never played".
+                String playedSite = row.optString("lastPlayedSite", "").trim();
                 long newestCheck = 0L;
                 for (int j = 0; j < sources.length(); j++) {
                     JSONObject item = sources.optJSONObject(j);
@@ -581,6 +799,10 @@ final class SourceLedger {
                 }
                 if (!entry.sources.isEmpty()) {
                     entry.updatedAt = Math.max(updatedAt, newestCheck);
+                    // Only a pointer at a loaded source survives; a stale one is not worth keeping.
+                    if (!playedSite.isEmpty() && entry.bySite.containsKey(playedSite)) {
+                        entry.lastPlayedSite = playedSite;
+                    }
                     loaded.put(key, entry);
                 }
             }
@@ -609,14 +831,14 @@ final class SourceLedger {
             prune(configSites, now);
             JSONObject root = toJson(configSites, now);
             // Drop the oldest titles until the file fits the hard cap. A ledger of this size is
-            // pathological (600 titles x 12 sources is a few hundred KB), so this is a safety net.
+            // pathological (600 titles x 12 sources is a few hundred KB), so this is a safety net —
+            // it still spares the on-screen titles while anything else is left to drop.
             while (!entries.isEmpty() && utf8Length(root) > MAX_BYTES) {
-                Entry oldest = null;
-                for (Entry entry : entries.values()) {
-                    if (oldest == null || entry.updatedAt < oldest.updatedAt) oldest = entry;
-                }
+                Entry oldest = oldestEntry(true);
+                if (oldest == null) oldest = oldestEntry(false);
                 if (oldest == null) break;
                 entries.remove(oldest.title);
+                protectedTitles.remove(oldest.title);
                 revision++;
                 root = toJson(configSites, now);
             }
@@ -636,6 +858,9 @@ final class SourceLedger {
                 JSONObject row = new JSONObject();
                 row.put("key", entry.title);
                 row.put("updatedAt", entry.updatedAt);
+                if (entry.lastPlayedSite != null) {
+                    row.put("lastPlayedSite", entry.lastPlayedSite);
+                }
                 JSONArray sources = new JSONArray();
                 for (Source source : entry.sources) {
                     if (source.site == null || source.site.key == null || source.listing == null) {

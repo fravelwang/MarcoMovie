@@ -855,6 +855,10 @@ public final class MainActivity extends Activity {
      * Called from the detail-load failure path: when the failed (site, listing) is a catalog title
      * opened from the ledger, open the catalog matching page instead of the error panel. Returns
      * true when it took over the page.
+     *
+     * <p>Declines (returns false, no page change) when the ledger already knows another source for
+     * this title: that case belongs to the detail page's own probe-and-switch fallback, not to the
+     * matching page's cross-site search.
      */
     boolean openCuratedFallback(Cms.Site site, String listingId) {
         Cms.Video origin = curatedFallbackVideo;
@@ -865,6 +869,18 @@ public final class MainActivity extends Activity {
             return false;
         }
         if (site == null || listingId == null || !key.equals(site.key + ":" + listingId)) {
+            return false;
+        }
+        // The gate for "第一次打开别再等两分钟": when the ledger knows another source for this
+        // title, the detail page's own failure branch probes it
+        // (SourceAutoSwitch.switchIfDefaultHasNoLines) instead of this page's cross-site search.
+        // Declining here is what lets that probe run: this method is reached from the detail-load
+        // error path, before that branch can dispatch anything.
+        if (SourceAutoSwitch.prefersProbeOverCurated(this, origin)) {
+            clearCuratedFallback();
+            AppLog.w(
+                    "MainActivity",
+                    "curated fallback skipped, ledger knows other sources: " + origin.title);
             return false;
         }
         clearCuratedFallback();
@@ -1152,6 +1168,8 @@ public final class MainActivity extends Activity {
         configStore = new ConfigStore(getFilesDir());
         // The native netdisk account layer keeps its verified credentials under files/netdisk/.
         QuarkQrLogin.useFilesDir(getFilesDir());
+        BaiduLogin.useFilesDir(getFilesDir());
+        AliLogin.useFilesDir(getFilesDir());
         if (isTvDevice()) {
             getWindow().getDecorView().setSystemUiVisibility(5894);
         } else {
@@ -3085,6 +3103,11 @@ public final class MainActivity extends Activity {
 
     void resolvePlayer(Cms.Site s, Cms.Video v, Cms.Line line, Cms.Episode ep) {
         rememberSeries(s, v);
+        // 「记住能播的站」: the two play entry points are the last place outside the player state
+        // machine that knows both the site and the title. Every TV detail page's 播放/继续播放 and
+        // every episode pick lands here; a successful play is what makes the next open of the same
+        // title start on this site.
+        SourceLedger.rememberPlayed(this, s, v);
         PlaybackController.resolvePlayer(this, s, v, line, ep);
     }
 
@@ -3094,6 +3117,7 @@ public final class MainActivity extends Activity {
 
     void openPlayer(Cms.Site s, Cms.Video v, Cms.Episode e) {
         rememberSeries(s, v);
+        SourceLedger.rememberPlayed(this, s, v);
         PlaybackController.openPlayer(this, s, v, e);
     }
 

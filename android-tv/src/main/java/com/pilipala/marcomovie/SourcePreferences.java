@@ -201,6 +201,17 @@ final class SourcePreferences {
                 .show();
     }
 
+    /**
+     * "名字里带「网盘」" — a share-style site. It can bind a title without carrying a stream that
+     * plays straight away (resolving a share id needs the netdisk path), so it must not spend a
+     * slice of the curated match budget. The single copy of this naming judgement: the domain layer
+     * ({@link SourcePlan}) only receives the answer, it never guesses site names itself.
+     */
+    static boolean netdiskNamed(Cms.Site site) {
+        String name = site == null || site.name == null ? "" : site.name;
+        return name.contains("网盘");
+    }
+
     static List<Cms.Site> prioritized(MainActivity a, List<Cms.Site> sites) {
         List<String> pinned = order(a);
         List<Cms.Site> ordered = new ArrayList<>();
