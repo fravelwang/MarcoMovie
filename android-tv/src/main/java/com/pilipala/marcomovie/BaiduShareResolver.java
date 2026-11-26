@@ -279,6 +279,57 @@ final class BaiduShareResolver {
      * 兜底那条：先取账号 uid（网页接口不需要它，所以只在兜底时才打这几个网络），再按手机客户端形态
      * 签名取直链。8001 时照旧换 {@code mbd.baidu.com} 的 uid 再签一次。
      */
+
+    /** 从响应的一串 {@code Set-Cookie} 里挑出某个名字的值；没有就是空串。 */
+    static String cookieValue(List<String> setCookies, String name) {
+        if (setCookies == null || setCookies.isEmpty() || name == null) return "";
+        for (String raw : setCookies) {
+            String value = text(raw).trim();
+            if (value.isEmpty()) continue;
+            int eq = value.indexOf('=');
+            if (eq <= 0) continue;
+            String key = value.substring(0, eq).trim();
+            if (!key.equalsIgnoreCase(name)) continue;
+            int end = value.indexOf(';', eq);
+            return (end < 0 ? value.substring(eq + 1) : value.substring(eq + 1, end)).trim();
+        }
+        return "";
+    }
+
+    /**
+     * 用账号 Cookie 重开一次分享页，取响应里的 {@code BDCLND} —— 它就是百度发给下载端的 sekey，
+     * 有时效；过期后 dlna 接口会从"能列目录"变成 need verify。
+     *
+     * @return 新的 sekey；没拿到返回 ""（调用方沿用 id 里那份）
+     */
+    private static String refreshSekey(BaiduLogin.Credential credential, Ident ident) {
+        if (credential == null || ident == null || ident.ticket.surl.isEmpty()) return "";
+        try {
+            String url = "https://pan.baidu.com/s/" + encodePart(ident.ticket.surl);
+            String cookie = credential.cookie;
+            if (!ident.sekey.isEmpty()) cookie = cookie + "; BDCLND=" + ident.sekey;
+            Response answer =
+                    fetch(
+                            "GET",
+                            url,
+                            null,
+                            null,
+                            UA_SHARE,
+                            "https://pan.baidu.com/",
+                            cookie,
+                            CONNECT_TIMEOUT_MS,
+                            READ_TIMEOUT_MS);
+            if (answer == null) return "";
+            return cookieValue(answer.setCookies, "BDCLND");
+        } catch (java.io.IOException error) {
+            AppLog.w(TAG, "sekey refresh failed: " + error.getMessage());
+            return "";
+        } catch (RuntimeException error) {
+            AppLog.w(TAG, "sekey refresh failed", error);
+            return "";
+        }
+    }
+
     private static Attempt legacyAttempt(BaiduLogin.Credential credential, Ident ident) {
         UidResult account = uid(credential);
         if (account.uid.isEmpty()) {
@@ -296,7 +347,17 @@ final class BaiduShareResolver {
                         + (ident.sekey.isEmpty() ? "no" : "yes")
                         + " clock_skew_ms="
                         + account.skewMs);
-        Attempt first = attempt(credential, ident, account.uid, account.skewMs);
+        // sekey（BDCLND）有有效期：过期后同一个接口会从「能列目录」变成 need verify/-9。
+        // 播放前用账号 Cookie 重开一次分享页，拿新的 BDCLND 再签；拿不到就沿用 id 里那份。
+        Ident signed = ident;
+        String freshSekey = refreshSekey(credential, ident);
+        if (!freshSekey.isEmpty() && !freshSekey.equals(ident.sekey)) {
+            signed =
+                    new Ident(
+                            ident.shareId, ident.uk, ident.fsId, freshSekey, ident.ticket);
+            AppLog.w(TAG, "sekey refreshed len=" + freshSekey.length());
+        }
+        Attempt first = attempt(credential, signed, account.uid, account.skewMs);
         if (first.ok()) return first;
         // 8001：先换个 uid 再签一次（pan 域两个入口给的是 uk，Flutter 端签名用的是 mbd 的 uid）。
         // 只在 8001 上多做这一次网络，别的失败码照旧一条就报，不拖慢失败提示。
@@ -312,7 +373,7 @@ final class BaiduShareResolver {
                                 + " retry with mbd uid "
                                 + maskId(alt.uid));
                 if (!alt.uid.equals(account.uid)) {
-                    Attempt second = attempt(credential, ident, alt.uid, alt.skewMs);
+                    Attempt second = attempt(credential, signed, alt.uid, alt.skewMs);
                     if (second.ok()) return second;
                     first = second;
                 }
