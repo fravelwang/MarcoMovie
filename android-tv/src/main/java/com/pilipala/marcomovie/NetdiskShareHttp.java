@@ -182,6 +182,38 @@ final class NetdiskShareHttp {
         }
     }
 
+    // ------------------------------------------------------------------ 遍历小工具
+
+    /** 遍历日志里的目录名：根目录写 {@code /}，别的原样。 */
+    static String walkDir(String path) {
+        String value = text(path).trim();
+        return value.isEmpty() ? "/" : value;
+    }
+
+    /** 拼一层路径（父为空时就是子名）；遍历日志与排序键都用它。 */
+    static String joinPath(String parent, String child) {
+        String base = text(parent).trim();
+        String name = text(child).trim();
+        if (base.isEmpty()) return name;
+        if (name.isEmpty()) return base;
+        return base + "/" + name;
+    }
+
+    /**
+     * 一页的指纹（按 {@code key} 拼起来），用来认出「分页没往前走」的服务端：同一页再来一次就停，
+     * 免得无限翻同一页。空页返回 ""。
+     */
+    static String fingerprint(JsonArray rows, String key) {
+        if (rows == null || rows.size() == 0) return "";
+        StringBuilder sb = new StringBuilder();
+        for (JsonElement item : rows) {
+            if (item == null || !item.isJsonObject()) continue;
+            if (sb.length() > 0) sb.append('|');
+            sb.append(optString(item.getAsJsonObject(), text(key)));
+        }
+        return sb.toString();
+    }
+
     // ------------------------------------------------------------------ 文件名自然序
 
     /**

@@ -28,8 +28,11 @@ import java.util.Map;
  * _resolveBaidu}，约 370–650 行）移植，**没有自己发明参数**：
  *
  * <ol>
- *   <li>取 {@code uid}：{@code GET https://mbd.baidu.com/userx/v1/info/get?appname=baiduboxapp
- *       &fields=["bg_image","member","uid","avatar","avatar_member"]}，账号 Cookie，媒体 UA；
+ *   <li>取 {@code uid}：三个入口按顺序试 —— {@code GET https://pan.baidu.com/api/gettemplatevariable
+ *       ?clienttype=0&app_id=250528&web=1&fields=["uk"]} → {@code GET https://pan.baidu.com/rest/2.0
+ *       /xpan/nas?method=uinfo&…} → {@code GET https://mbd.baidu.com/userx/v1/info/get?appname=
+ *       baiduboxapp&fields=[…]}；都带账号 Cookie，UA 用 {@code netdisk;…} 串。盒子（Android 11）上
+ *       实测 {@code mbd.baidu.com} 连不上（8 秒超时），所以它只做兜底，pan 域下的两个入口优先；
  *   <li>算签名：{@code rand = sha1( hexSha1(BDUSS) + uid + RAND_KEY + time + DEVICE + RAND_TAIL )}，
  *       全部是实测常量（见下面的常量注释）；
  *   <li>取直链：{@code GET https://pan.baidu.com/share/list?shareid=…&uk=…&fid=…&sekey=…
@@ -53,6 +56,14 @@ import java.util.Map;
  * <p>线程：{@link #resolve(String, String, String)} 会打两次网络（单请求 8 秒超时），必须在后台线程
  * 调用。同步执行、永不抛，失败返回 null，原因放 {@link #lastFailureReason()}，与
  * {@link UcShareResolver} 同一套口径。
+ *
+ * <p>**8001 的定案方式**（2026-11-26 Boss 现场：百度分享线路回 errno=8001，登录态是好的，uid 接口
+ * 已回 {@code uid ok}）：一次解析会在 tag {@code BaiduShare} 里打出 —— 签名用的 uid（打码）与它来自
+ * 哪个入口、{@code bdclnd=yes/no}、本机时钟与服务端的偏差、**完整请求地址（{@code sekey} 与
+ * {@code rand} 打码）**、**百度响应体原文（{@code dlink} 打码，保留 {@code show_msg}/{@code errmsg}）**。
+ * 同时做两件便宜的事：签名里的 {@code time} 用服务端 {@code Date} 校正（盒子时钟常偏，能过 TLS 却过
+ * 不了签名）；真回 8001 就用 {@code mbd.baidu.com} 的 uid（Flutter 端签名用的就是它）再签一次，并把
+ * 两次的 uid 是否同值记成 {@code uid_match=yes/no}。仍失败就把 errno 与百度自己那句话原样报给用户。
  */
 final class BaiduShareResolver {
 
@@ -85,19 +96,29 @@ final class BaiduShareResolver {
 
     private static final int CONNECT_TIMEOUT_MS = 8000;
     private static final int READ_TIMEOUT_MS = 10000;
+    /**
+     * 8001 之后补问 {@code mbd.baidu.com} 那次的超时。盒子上这个域有时候 8 秒才超时，而这一刻用户
+     * 已经等了一次失败：给 4 秒，问到就多一个 uid 可比，问不到就按原来的原因报。
+     */
+    private static final int MBD_PROBE_TIMEOUT_MS = 4000;
     private static final int MAX_BODY_BYTES = 1 << 20;
 
     /** 需要登录：本地没有 BDUSS。本次不做扫码，只把话说清楚。 */
     private static final String LOGIN_REQUIRED = "需要登录百度网盘才能播放这条分享（顶部「网盘」→ 百度，粘贴含 BDUSS 的 Cookie）";
 
-    /** 有 BDUSS 但取不到 uid（账号侧不认这份 Cookie）。 */
-    private static final String LOGIN_EXPIRED = "百度网盘登录已失效，请在网盘中心重新粘贴 Cookie";
-
     /** 分享已取消 / 已过期 / 被删（与 Flutter 端 {@code _checkBaidu} 同一组 errno）。 */
-    private static final String SHARE_GONE = "百度分享已失效（链接被取消或已过期），请换一条线路";
+    private static final String SHARE_GONE = "百度分享解析失败：分享已失效（链接被取消或已过期），请换一条线路";
 
     /** 接口没给 dlink，但也不是明确的失效码。 */
-    private static final String NO_DIRECT_URL = "百度网盘没有返回播放地址，请换一条线路";
+    private static final String NO_DIRECT_URL = "百度分享解析失败：百度网盘没有返回播放地址，请换一条线路";
+
+    /**
+     * 现场（2026-11-26）{@code /share/list} 回的 errno。登录态是好的（uid 接口当时回了
+     * {@code uid ok}），所以先按「签名/参数不对」处理：换 {@code mbd.baidu.com} 那个 uid（Flutter 端
+     * 就是拿它签的）再签一次；仍失败就把百度自己那句话（{@code show_msg} / {@code errmsg}）连同 errno
+     * 一起报出来，一次上机就能定案。
+     */
+    private static final int ERRNO_SIGNATURE_REJECTED = 8001;
 
     /** 上一次解析拒绝播放的原因，成功或没轮到它时为空（与 UC 那边同款，UI 线程读）。 */
     private static volatile String lastRefusalReason = "";
@@ -137,62 +158,134 @@ final class BaiduShareResolver {
                         + " fid="
                         + ident.fsId);
         try {
-            String uid = uid(credential);
-            if (uid.isEmpty()) {
-                lastRefusalReason = LOGIN_EXPIRED;
-                AppLog.w(TAG, "refused: account answered without uid");
+            UidResult account = uid(credential);
+            if (account.uid.isEmpty()) {
+                lastRefusalReason = account.reason;
+                AppLog.w(TAG, "refused: " + lastRefusalReason);
                 return null;
             }
-            String time = String.valueOf(System.currentTimeMillis());
-            String rand =
-                    sha1Hex(
-                            sha1Hex(credential.bduss)
-                                    + uid
-                                    + RAND_KEY
-                                    + time
-                                    + DEVICE
-                                    + RAND_TAIL);
-            String cookie = accountCookie(credential, ident.sekey);
-            Response answer =
-                    fetch(
-                            "GET",
-                            shareListUrl(
-                                    ident.shareId, ident.uk, ident.fsId, ident.sekey, time, rand),
-                            null,
-                            null,
-                            UA_MEDIA,
-                            REFERER,
-                            cookie);
-            JsonObject body = NetdiskShareHttp.parseObjectOrNull(answer.body);
-            if (body == null) {
-                lastRefusalReason =
-                        "百度网盘没有返回可用数据（HTTP " + answer.http + "），请换一条线路";
-                AppLog.w(TAG, "refused: answer is not JSON, http=" + answer.http);
-                return null;
+            AppLog.w(
+                    TAG,
+                    "sign uid="
+                            + maskId(account.uid)
+                            + " src="
+                            + account.source
+                            + " bdclnd="
+                            + (ident.sekey.isEmpty() ? "no" : "yes")
+                            + " clock_skew_ms="
+                            + account.skewMs);
+            Attempt first = attempt(credential, ident, account.uid, account.skewMs);
+            if (first.ok()) return first.episode(lineName);
+            // 8001：先换个 uid 再签一次（pan 域两个入口给的是 uk，Flutter 端签名用的是 mbd 的 uid）。
+            // 只在 8001 上多做这一次网络，别的失败码照旧一条就报，不拖慢失败提示。
+            if (first.errno == ERRNO_SIGNATURE_REJECTED) {
+                UidResult alt = uidFromMbd(credential);
+                if (alt.uid.isEmpty()) {
+                    AppLog.w(TAG, "mbd uid unavailable: " + alt.reason);
+                } else {
+                    AppLog.w(
+                            TAG,
+                            "uid_match="
+                                    + (alt.uid.equals(account.uid) ? "yes" : "no")
+                                    + " retry with mbd uid "
+                                    + maskId(alt.uid));
+                    if (!alt.uid.equals(account.uid)) {
+                        Attempt second = attempt(credential, ident, alt.uid, alt.skewMs);
+                        if (second.ok()) return second.episode(lineName);
+                        first = second;
+                    }
+                }
             }
-            String refusal = refusalFor(body);
-            if (!refusal.isEmpty()) {
-                lastRefusalReason = refusal;
-                AppLog.w(TAG, "refused: " + refusal);
-                return null;
-            }
-            String dlink = mediaUrl(dlinkOf(body, ident.fsId));
-            if (dlink.isEmpty()) {
-                lastRefusalReason = NO_DIRECT_URL;
-                AppLog.w(TAG, "refused: answer carried no usable dlink");
-                return null;
-            }
-            // 直链是带签名的凭据，日志里只留主机名。
-            AppLog.w(TAG, "dlink host=" + hostOf(dlink));
-            return episode(lineName, dlink, cookie);
-        } catch (IOException error) {
-            lastRefusalReason = "百度网盘访问失败（" + NetdiskShareHttp.describe(error) + "）";
-            AppLog.w(TAG, "resolve failed: " + lastRefusalReason);
+            lastRefusalReason = first.reason();
+            AppLog.w(TAG, "refused: " + lastRefusalReason + "（errno=" + first.errno + "）");
+            return null;
         } catch (RuntimeException error) {
-            lastRefusalReason = "百度网盘访问失败（解析异常）";
+            lastRefusalReason = "百度分享解析失败：百度网盘访问失败（解析异常），请换一条线路";
             AppLog.w(TAG, "resolve failed unexpectedly", error);
         }
         return null;
+    }
+
+    /**
+     * 一次「带签名取直链」的完整结果。成功时 {@code dlink} 非空；失败时留着 HTTP 状态、errno 与百度
+     * 自己那句话（{@code show_msg} / {@code errmsg}），由 {@link #reason()} 拼成一句人话。
+     */
+    private static final class Attempt {
+        String dlink = "";
+        String cookie = "";
+        String error = "";
+        /** 百度自己那句话：{@code show_msg}，没有就 {@code errmsg}；日志与提示都用它定案。 */
+        String show = "";
+        int http;
+        int errno;
+
+        boolean ok() {
+            return !dlink.isEmpty();
+        }
+
+        Cms.Episode episode(String lineName) {
+            AppLog.w(TAG, "dlink host=" + hostOf(dlink));
+            return BaiduShareResolver.episode(lineName, dlink, cookie);
+        }
+
+        /** 失败原因：优先百度自己那句话，其次按 errno 翻译，最后才是网络/形状问题。 */
+        String reason() {
+            if (!error.isEmpty()) return error;
+            if (http >= 400) {
+                return "百度分享解析失败：百度网盘返回 HTTP " + http + "，请换一条线路";
+            }
+            if (errno != 0) return refusalText(errno, show);
+            return NO_DIRECT_URL;
+        }
+    }
+
+    /**
+     * 带签名取一次直链：{@code GET /share/list?shareid&uk&fid&sekey&origin=dlna&devuid&…&time&rand}。
+     *
+     * <p>不抛异常：网络失败记进 {@link Attempt#error}，百度说 errno 就记 errno 与它自己那句话，由调用方
+     * 决定要不要换个 uid 再签一次。请求地址与响应体各打一行日志（{@code sekey} / {@code rand} /
+     * {@code dlink} 打码，其余参数与百度原话照原样），一次上机就能定案。
+     *
+     * @param uid 用来签名的**账号** uid（不是分享所有者的 uk）
+     * @param skewMs 本机时钟与服务端的偏差（毫秒）；签名里的 {@code time} 用校正后的值
+     */
+    private static Attempt attempt(
+            BaiduLogin.Credential credential, Ident ident, String uid, long skewMs) {
+        Attempt out = new Attempt();
+        // 签名里的 time 取「服务端此刻」：盒子/电视的时钟偏几分钟，rand 就会被判过期。
+        String time = String.valueOf(System.currentTimeMillis() + skewMs);
+        String rand =
+                sha1Hex(sha1Hex(credential.bduss) + uid + RAND_KEY + time + DEVICE + RAND_TAIL);
+        String url = shareListUrl(ident.shareId, ident.uk, ident.fsId, ident.sekey, time, rand);
+        out.cookie = accountCookie(credential, ident.sekey);
+        AppLog.w(TAG, "list request " + maskUrl(url));
+        Response answer;
+        try {
+            answer = fetch("GET", url, null, null, UA_MEDIA, REFERER, out.cookie);
+        } catch (IOException error) {
+            out.error =
+                    "百度分享解析失败：百度网盘访问失败（"
+                            + NetdiskShareHttp.describe(error)
+                            + "），请换一条线路";
+            AppLog.w(TAG, "list failed: " + NetdiskShareHttp.describe(error));
+            return out;
+        }
+        out.http = answer.http;
+        // 响应体原样（截断 + dlink 打码）：errno 之外的那句 show_msg/errmsg 全靠它。
+        AppLog.w(TAG, "list answer http=" + answer.http + " body=" + maskBody(answer.body));
+        JsonObject body = NetdiskShareHttp.parseObjectOrNull(answer.body);
+        if (body == null) {
+            out.error =
+                    "百度分享解析失败：百度网盘没有返回可用数据（HTTP "
+                            + answer.http
+                            + "），请换一条线路";
+            return out;
+        }
+        out.errno = NetdiskShareHttp.optInt(body, "errno", 0);
+        out.show = baiduMessage(body);
+        if (out.errno != 0) return out;
+        out.dlink = mediaUrl(dlinkOf(body, ident.fsId));
+        return out;
     }
 
     /**
@@ -353,55 +446,323 @@ final class BaiduShareResolver {
         return base.isEmpty() ? "BDCLND=" + raw : base + "; BDCLND=" + raw;
     }
 
-    /** {@code GET /userx/v1/info/get} → {@code data.fields.uid}；拿不到返回 ""。 */
-    private static String uid(BaiduLogin.Credential credential) throws IOException {
-        String fields = "[\"bg_image\",\"member\",\"uid\",\"avatar\",\"avatar_member\"]";
-        String url =
-                "https://mbd.baidu.com/userx/v1/info/get?appname=baiduboxapp"
-                        + "&fields="
-                        + encodePart(fields)
-                        + "&client=&clientfrom=&lang=zh-cn&tpl=&ttt=";
-        Response answer =
-                fetch(
-                        "GET",
-                        url,
-                        null,
-                        null,
-                        UA_MEDIA_NO_TAIL,
-                        "",
-                        NetdiskShareHttp.text(credential.cookie).trim());
-        JsonObject body = NetdiskShareHttp.parseObjectOrNull(answer.body);
-        if (body == null) {
-            AppLog.w(TAG, "uid answer is not JSON, http=" + answer.http);
-            return "";
+    /** 取 uid 的第一入口（盒子上实测能通）：{@code pan.baidu.com/api/gettemplatevariable}。 */
+    private static final String UID_TEMPLATE_URL =
+            "https://pan.baidu.com/api/gettemplatevariable?clienttype=0&app_id=250528&web=1&fields=";
+
+    /** 第二入口：{@code pan.baidu.com/rest/2.0/xpan/nas?method=uinfo}。 */
+    private static final String UID_UINFO_URL =
+            "https://pan.baidu.com/rest/2.0/xpan/nas?method=uinfo&clienttype=0&app_id=250528&web=1";
+
+    /** 最后兜底：{@code mbd.baidu.com/userx/v1/info/get}（盒子上连不上，只当兜底）。 */
+    private static final String UID_MBD_URL =
+            "https://mbd.baidu.com/userx/v1/info/get?appname=baiduboxapp&fields=";
+
+    /** mbd 那个入口要的字段串（实测值，一个字节都别动）。 */
+    private static final String UID_MBD_FIELDS =
+            "[\"bg_image\",\"member\",\"uid\",\"avatar\",\"avatar_member\"]"
+                    + "&client=&clientfrom=&lang=zh-cn&tpl=&ttt=";
+
+    /**
+     * 取账号 uid（签名要的是**账号** uid；与分享坐标里的 uk 不同也无所谓，签名口径不变）。
+     *
+     * <p>三入口按顺序试：{@code pan.baidu.com/api/gettemplatevariable} →
+     * {@code pan.baidu.com/rest/2.0/xpan/nas?method=uinfo} → {@code mbd.baidu.com/userx/v1/info/get}。
+     * 盒子（Android 11）上实测 {@code mbd.baidu.com} 8 秒超时，先试它会让整条百度线路解析失败；pan 域
+     * 下这两个入口走的是已经打通的链路。三个都失败时，失败原因里把每个入口各自怎么了写清（{@link
+     * UidProbe#describe()}），不只说一句"访问失败"。
+     */
+    private static UidResult uid(BaiduLogin.Credential credential) {
+        String cookie = NetdiskShareHttp.text(credential == null ? null : credential.cookie).trim();
+        UidProbe probe = new UidProbe();
+        UidResult result =
+                uidFromJson(
+                        "pan.baidu.com gettemplatevariable",
+                        UID_TEMPLATE_URL + encodePart("[\"uk\"]"),
+                        UA_SHARE,
+                        REFERER,
+                        cookie,
+                        probe);
+        if (result == null) {
+            result =
+                    uidFromJson(
+                            "pan.baidu.com xpan uinfo",
+                            UID_UINFO_URL,
+                            UA_SHARE,
+                            REFERER,
+                            cookie,
+                            probe);
         }
-        // 这个接口正常会说 errno=0；没有 errno 的部署也认，只要真拿到 uid。
-        if (body.has("errno") && NetdiskShareHttp.optInt(body, "errno", -1) != 0) {
-            AppLog.w(TAG, "uid errno=" + NetdiskShareHttp.optInt(body, "errno", -1));
-            return "";
+        if (result == null) {
+            result =
+                    uidFromJson(
+                            "mbd.baidu.com info",
+                            UID_MBD_URL + encodePart(UID_MBD_FIELDS),
+                            UA_MEDIA_NO_TAIL,
+                            "",
+                            cookie,
+                            probe);
         }
-        return uidOf(body);
+        if (result != null) {
+            AppLog.w(TAG, "uid ok via " + result.source);
+            return result;
+        }
+        String detail = probe.describe();
+        String reason =
+                probe.answered == 0
+                        ? "百度账号信息接口都连不上（" + detail + "）"
+                        : "百度账号信息接口都没给出 uid（"
+                                + detail
+                                + "），可能登录已失效，请在网盘中心重新粘贴 Cookie";
+        AppLog.w(TAG, "uid failed: " + reason);
+        return UidResult.failed(reason);
     }
 
-    private static String uidOf(JsonObject body) {
-        JsonElement data = body == null ? null : body.get("data");
-        if (data == null || !data.isJsonObject()) return "";
-        JsonElement fields = data.getAsJsonObject().get("fields");
-        if (fields == null || !fields.isJsonObject()) return "";
-        return NetdiskShareHttp.optString(fields.getAsJsonObject(), "uid").trim();
+    /**
+     * 一个入口：请求 → 认 {@code errno} → 找 uid。失败只记进 {@code probe} 并返回 null，由
+     * {@link #uid} 继续试下一个入口。
+     */
+    private static UidResult uidFromJson(
+            String label,
+            String url,
+            String userAgent,
+            String referer,
+            String cookie,
+            UidProbe probe) {
+        return uidFromJson(
+                label,
+                url,
+                userAgent,
+                referer,
+                cookie,
+                probe,
+                CONNECT_TIMEOUT_MS,
+                READ_TIMEOUT_MS);
+    }
+
+    /** 同上，自带超时：8001 之后补问 mbd 的那次用短超时，别为诊断拖住失败提示。 */
+    private static UidResult uidFromJson(
+            String label,
+            String url,
+            String userAgent,
+            String referer,
+            String cookie,
+            UidProbe probe,
+            int connectMs,
+            int readMs) {
+        Response answer;
+        try {
+            answer = fetch("GET", url, null, null, userAgent, referer, cookie, connectMs, readMs);
+        } catch (IOException error) {
+            probe.fail(label + " 连不上（" + NetdiskShareHttp.describe(error) + "）");
+            return null;
+        }
+        // 接口真的回了话（哪怕是错误页）就不再算"连不上"。
+        probe.answered++;
+        JsonObject body = NetdiskShareHttp.parseObjectOrNull(answer.body);
+        if (body == null) {
+            probe.fail(label + " 返回的不是 JSON（HTTP " + answer.http + "）");
+            return null;
+        }
+        // 正常说 errno=0；没有 errno 的部署也认，只要真拿到 uid。
+        if (body.has("errno") && NetdiskShareHttp.optInt(body, "errno", -1) != 0) {
+            probe.fail(label + " errno=" + NetdiskShareHttp.optInt(body, "errno", -1));
+            return null;
+        }
+        String uid = uidOfAny(body);
+        if (uid.isEmpty()) {
+            probe.fail(label + " 没给出 uid");
+            return null;
+        }
+        return UidResult.ok(uid, label, answer.skewMs());
+    }
+
+    /**
+     * 从各家返回里找账号 uid：顶层 / {@code data} 里 / {@code data.fields} 里 / {@code result[]} 的某
+     * 一行里，键叫 {@code uid} 或 {@code uk} 都认，全都不中就返回 ""。
+     *
+     * <p>两个容易踩的点，都按"签名要什么"定：
+     * <ul>
+     *   <li>{@code uid} 优先于 {@code uk}。签名要的是**账号 uid**；{@code uk} 是网盘侧的 id，两者通常
+     *       同值，但不同值时错的那个一定签不过；
+     *   <li>{@code result[]} 里见过 {@code {"key":"uk","value":"…"}} 这种键值对形状（
+     *       {@code /api/gettemplatevariable} 就是）。只认 {@code uk}/{@code uid} 这两个 key，别的行
+     *       （模板变量、头像等）一律跳过；形状不认识就返回 ""，由调用方继续试下一个入口。
+     * </ul>
+     */
+    private static String uidOfAny(JsonObject body) {
+        if (body == null) return "";
+        String direct = valueOf(body, "uid");
+        if (direct.isEmpty()) direct = valueOf(body, "uk");
+        if (!direct.isEmpty()) return direct;
+        JsonElement data = body.get("data");
+        if (data != null && data.isJsonObject()) {
+            JsonObject inner = data.getAsJsonObject();
+            String nested = valueOf(inner, "uid");
+            if (nested.isEmpty()) nested = valueOf(inner, "uk");
+            if (!nested.isEmpty()) return nested;
+            JsonElement fields = inner.get("fields");
+            if (fields != null && fields.isJsonObject()) {
+                String field = valueOf(fields.getAsJsonObject(), "uid");
+                if (field.isEmpty()) field = valueOf(fields.getAsJsonObject(), "uk");
+                if (!field.isEmpty()) return field;
+            }
+        }
+        JsonElement result = body.get("result");
+        if (result != null && result.isJsonArray()) {
+            for (JsonElement item : result.getAsJsonArray()) {
+                if (item == null || !item.isJsonObject()) continue;
+                JsonObject row = item.getAsJsonObject();
+                String direct2 = valueOf(row, "uid");
+                if (direct2.isEmpty()) direct2 = valueOf(row, "uk");
+                if (!direct2.isEmpty()) return direct2;
+                // {"key":"uk","value":"…"} 这类键值对行：只认 uk / uid 两个 key。
+                String key = NetdiskShareHttp.optString(row, "key").trim().toLowerCase(Locale.ROOT);
+                if (!"uk".equals(key) && !"uid".equals(key)) continue;
+                String value = NetdiskShareHttp.optString(row, "value").trim();
+                if (!value.isEmpty()) return value;
+            }
+        }
+        return "";
+    }
+
+    /** 一个对象上的标量字符串值：数字与字符串都认（百度有的部署把 id 写成数字）。 */
+    private static String valueOf(JsonObject obj, String key) {
+        if (obj == null) return "";
+        JsonElement element = obj.get(key);
+        if (element == null || element.isJsonNull() || !element.isJsonPrimitive()) return "";
+        return element.getAsString().trim();
+    }
+
+    /** 三个入口的探查记录：{@code answered} 数"接口真的回了话"的个数，失败原因按试的顺序记。 */
+    private static final class UidProbe {
+        int answered;
+        private final List<String> failures = new ArrayList<>();
+
+        void fail(String reason) {
+            AppLog.w(TAG, "uid entry failed: " + reason);
+            failures.add(reason);
+        }
+
+        String describe() {
+            StringBuilder sb = new StringBuilder();
+            for (String failure : failures) {
+                if (sb.length() > 0) sb.append("；");
+                sb.append(failure);
+            }
+            return sb.toString();
+        }
+    }
+
+    /** 取 uid 的结果：成功时 {@code uid} 非空、{@code source} 是入口名；失败时 {@code reason} 已写清三个入口各自怎么了。 */
+    private static final class UidResult {
+        final String uid;
+        final String source;
+        final String reason;
+        /** 这一个入口的响应头 {@code Date} 与本机时钟的差（毫秒）；拿不到就是 0。 */
+        final long skewMs;
+
+        private UidResult(String uid, String source, String reason, long skewMs) {
+            this.uid = uid;
+            this.source = source;
+            this.reason = reason;
+            this.skewMs = skewMs;
+        }
+
+        static UidResult ok(String uid, String source, long skewMs) {
+            return new UidResult(uid, source, "", skewMs);
+        }
+
+        static UidResult failed(String reason) {
+            return new UidResult("", "", reason, 0L);
+        }
+    }
+
+    /**
+     * 只走 {@code mbd.baidu.com/userx/v1/info/get} 这一个入口（Flutter 端签名用的就是它的 uid）。
+     *
+     * <p>只在 {@code /share/list} 回 8001 之后才调：盒子上这个域 8 秒超时，平时先试它会白白拖慢解析。
+     * 拿不到 uid 不算错误，调用方按"没有第二个 uid 可比"处理。
+     */
+    private static UidResult uidFromMbd(BaiduLogin.Credential credential) {
+        String cookie = NetdiskShareHttp.text(credential == null ? null : credential.cookie).trim();
+        UidProbe probe = new UidProbe();
+        UidResult result =
+                uidFromJson(
+                        "mbd.baidu.com info",
+                        UID_MBD_URL + encodePart(UID_MBD_FIELDS),
+                        UA_MEDIA_NO_TAIL,
+                        "",
+                        cookie,
+                        probe,
+                        MBD_PROBE_TIMEOUT_MS,
+                        MBD_PROBE_TIMEOUT_MS);
+        if (result != null) return result;
+        String detail = probe.describe();
+        return UidResult.failed(detail.isEmpty() ? "mbd 入口没有回话" : detail);
     }
 
     /**
      * errno 翻译。能播返回 ""；错误码口径与 Flutter 端 {@code _checkBaidu} 一致：
-     * -7 / -9 / -21 / -144 / -145 是分享失效，别的只报 errno（不猜含义）。
+     * -7 / -9 / -21 / -144 / -145 是分享失效，别的把 errno 与百度自己那句话一起报出来（不猜含义）。
+     *
+     * <p>文案统一以「百度分享解析失败」开头：这一路失败发生在取直链时，不是播放器取流失败，用户
+     * 需要能分清是哪一段出的问题。
      */
-    private static String refusalFor(JsonObject body) {
-        int errno = NetdiskShareHttp.optInt(body, "errno", -1);
+    private static String refusalText(int errno, String baiduMessage) {
         if (errno == 0) return "";
         if (errno == -7 || errno == -9 || errno == -21 || errno == -144 || errno == -145) {
             return SHARE_GONE;
         }
-        return "百度网盘返回错误（errno=" + errno + "），可能登录已失效，请在网盘中心重新粘贴 Cookie";
+        String said = text(baiduMessage).trim();
+        StringBuilder sb = new StringBuilder("百度分享解析失败：百度网盘返回错误（errno=").append(errno);
+        if (!said.isEmpty()) sb.append("，").append(said);
+        sb.append("），可能登录已失效，请在网盘中心重新粘贴 Cookie");
+        return sb.toString();
+    }
+
+    /** 百度响应里它自己那句人话：{@code show_msg} 优先，其次 {@code errmsg}；都没有返回 ""。 */
+    private static String baiduMessage(JsonObject body) {
+        if (body == null) return "";
+        String show = NetdiskShareHttp.optString(body, "show_msg").trim();
+        if (show.isEmpty()) show = NetdiskShareHttp.optString(body, "errmsg").trim();
+        if (show.isEmpty()) return "";
+        String oneLine = show.replace('\n', ' ').replace('\r', ' ').trim();
+        return oneLine.length() > 80 ? oneLine.substring(0, 80) : oneLine;
+    }
+
+    /** 打码一个 id：只留前三后二，够在日志里对比两次是不是同一个，不落整串账号 id。 */
+    private static String maskId(String value) {
+        String text = text(value).trim();
+        if (text.length() <= 6) return "***";
+        return text.substring(0, 3) + "***" + text.substring(text.length() - 2);
+    }
+
+    /** 打码请求地址里的两项凭据：{@code sekey}（提取码换来的 randsk）与 {@code rand}（签名）。 */
+    private static String maskUrl(String url) {
+        return maskQueryValue(maskQueryValue(url, "sekey"), "rand");
+    }
+
+    private static String maskQueryValue(String url, String name) {
+        String value = text(url);
+        int at = value.indexOf("?" + name + "=");
+        if (at < 0) at = value.indexOf("&" + name + "=");
+        if (at < 0) return value;
+        int start = at + name.length() + 2;
+        int end = value.indexOf('&', start);
+        if (end < 0) end = value.length();
+        return value.substring(0, start)
+                + "***("
+                + (end - start)
+                + ")"
+                + value.substring(end);
+    }
+
+    /** 响应体打码：{@code dlink} 是签名直链，换成 {@code ***}；其余原样（截断到 400 字）。 */
+    private static String maskBody(String body) {
+        String value = text(body).replace('\n', ' ').replace('\r', ' ');
+        value = value.replaceAll("\"dlink\"\\s*:\\s*\"[^\"]*\"", "\"dlink\":\"***\"");
+        return value.length() > 400 ? value.substring(0, 400) + "…" : value;
     }
 
     /** {@code list[]} 里 {@code fs_id} 对得上的那条的 {@code dlink}；对不上返回 ""。 */
@@ -520,16 +881,45 @@ final class BaiduShareResolver {
         final String body;
         final List<String> setCookies;
         final String location;
+        /** 服务端 {@code Date} 头原样，用来校正签名里的 {@code time}；拿不到是 ""。 */
+        final String date;
 
-        Response(int http, String body, List<String> setCookies, String location) {
+        Response(int http, String body, List<String> setCookies, String location, String date) {
             this.http = http;
             this.body = body;
             this.setCookies = setCookies;
             this.location = location;
+            this.date = date;
         }
 
         boolean isRedirect() {
             return http >= 300 && http < 400 && http != 304 && !location.isEmpty();
+        }
+
+        /** 服务端时钟与本机的差（毫秒）；没有 {@code Date} 头或解析不了就是 0。 */
+        long skewMs() {
+            long server = serverTimeMillis(date);
+            return server <= 0 ? 0L : server - System.currentTimeMillis();
+        }
+    }
+
+    /**
+     * 解析 HTTP {@code Date} 头（RFC 1123，如 {@code Wed, 26 Nov 2026 12:00:00 GMT}）成毫秒。
+     *
+     * <p>为什么需要它：签名里的 {@code time} 要和百度那边对得上，而电视盒子的系统时钟经常偏几十秒到
+     * 几分钟（能过 TLS 却过不了签名）。用服务端给的时刻签名，盒子时钟不准也不会把 8001 招来。
+     */
+    static long serverTimeMillis(String date) {
+        String value = text(date).trim();
+        if (value.isEmpty()) return 0L;
+        try {
+            java.text.SimpleDateFormat format =
+                    new java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US);
+            format.setTimeZone(java.util.TimeZone.getTimeZone("GMT"));
+            java.util.Date parsed = format.parse(value);
+            return parsed == null ? 0L : parsed.getTime();
+        } catch (java.text.ParseException | RuntimeException ignored) {
+            return 0L;
         }
     }
 
@@ -640,12 +1030,35 @@ final class BaiduShareResolver {
             String userAgent,
             String referer,
             String cookie) throws IOException {
+        return fetch(
+                method,
+                url,
+                body,
+                contentType,
+                userAgent,
+                referer,
+                cookie,
+                CONNECT_TIMEOUT_MS,
+                READ_TIMEOUT_MS);
+    }
+
+    /** 同上，但自带超时；诊断性的那几次网络用短超时，别把失败提示拖到十秒。 */
+    static Response fetch(
+            String method,
+            String url,
+            String body,
+            String contentType,
+            String userAgent,
+            String referer,
+            String cookie,
+            int connectMs,
+            int readMs) throws IOException {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URL(url).openConnection();
             conn.setInstanceFollowRedirects(false);
-            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
-            conn.setReadTimeout(READ_TIMEOUT_MS);
+            conn.setConnectTimeout(connectMs);
+            conn.setReadTimeout(readMs);
             conn.setRequestMethod(text(method).trim().isEmpty() ? "GET" : method);
             conn.setRequestProperty("User-Agent", text(userAgent));
             conn.setRequestProperty("Accept", "application/json");
@@ -671,7 +1084,11 @@ final class BaiduShareResolver {
             int http = conn.getResponseCode();
             String reply = readAll(http >= 400 ? conn.getErrorStream() : conn.getInputStream());
             return new Response(
-                    http, reply, setCookies(conn), text(conn.getHeaderField("Location")).trim());
+                    http,
+                    reply,
+                    setCookies(conn),
+                    text(conn.getHeaderField("Location")).trim(),
+                    text(conn.getHeaderField("Date")).trim());
         } finally {
             if (conn != null) conn.disconnect();
         }

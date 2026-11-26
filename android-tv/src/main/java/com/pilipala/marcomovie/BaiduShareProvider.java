@@ -15,7 +15,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * 百度分享 → 线路：匿名打开分享页、验提取码、列两级目录、按文件造五段 {@code bd} id。
+ * 百度分享 → 线路：匿名打开分享页、验提取码、按层遍历目录、按文件造五段 {@code bd} id。
  *
  * <p>协议照 Flutter 端已经在跑的 {@code _baiduFiles}（{@code flutter/lib/core/cloud_share.dart}）
  * 移植，**免登录**——公开分享列目录不需要账号，只有播放直链才要（那是
@@ -26,10 +26,12 @@ import java.util.regex.Pattern;
  *   <li>有提取码时 {@code POST https://pan.baidu.com/share/verify?…&surl=<短id>&channel=chunlei&web=1…}
  *       （form: {@code pwd=…&vcode=&vcode_str=}）→ {@code randsk} 就是 {@code sekey}，同时写进
  *       Cookie 罐的 {@code BDCLND}；
- *   <li>根目录 {@code GET /share/list?…&shorturl=<短id>&root=1}（一页 20 条）拿到 {@code uk} 与
- *       {@code share_id}；子目录用 {@code sekey&uk&shareid&dir=<path>}（一页 100 条）；
- *   <li>最多两层（分享根 + 一层「剧名文件夹」），一条分享最多 {@link #MAX_FILES} 个文件，只收视频，
- *       按文件名自然序排好；
+ *   <li>根目录 {@code GET /share/list?…&shorturl=<短id>&root=1} 拿到 {@code uk} 与 {@code share_id}；
+ *       子目录用 {@code sekey&uk&shareid&dir=<path>}（两级都用同一页长 {@link #PAGE_SIZE}）；
+ *   <li>遍历口径（三家 provider 统一，2026-11-26 定）：根目录 + 最多 {@link #MAX_DEPTH} 层子目录，
+ *       每层最多 {@link #MAX_PAGES} 页 × {@link #PAGE_SIZE} 条，一条分享最多 {@link #MAX_FILES} 个文件，
+ *       只收视频，按「目录 + 文件名」的自然序排好（界面上仍只显示文件名），每层打一行
+ *       {@code walk dir=… rows=… videos=…}；
  *   <li>id 是五段 {@code ++} 分隔：{@code bd ++ share_id ++ uk ++ fs_id ++ encode(sekey)}，播放侧由
  *       {@link BaiduShareResolver} 拿它换直链。
  * </ol>
@@ -50,17 +52,15 @@ final class BaiduShareProvider implements NetdiskShareProvider {
     private static final String BASE = "https://pan.baidu.com";
 
     /** 一条分享最多收多少个文件（剧集）。 */
-    private static final int MAX_FILES = 200;
-    /** 根目录一页 20 条（照 Flutter 端实测的请求）。 */
-    private static final int ROOT_PAGE_SIZE = 20;
-    /** 子目录一页 100 条。 */
-    private static final int DIR_PAGE_SIZE = 100;
-    /** 根目录最多翻几页：一页 20 条，12 页已经超过文件上限。 */
-    private static final int ROOT_MAX_PAGES = 12;
-    /** 每个子目录最多翻两页（200 条已超过文件上限）。 */
-    private static final int DIR_MAX_PAGES = 2;
-    /** 最多下钻几个子目录：两层目录、文件上限 200，8 个够用，也不会把详情页拖到几十秒。 */
-    private static final int MAX_DIRS = 8;
+    private static final int MAX_FILES = 500;
+    /** 每层一页 100 条（根与子目录同一个口径）。 */
+    private static final int PAGE_SIZE = 100;
+    /** 每层最多翻几页。 */
+    private static final int MAX_PAGES = 3;
+    /** 根目录 + 最多 3 层子目录。 */
+    private static final int MAX_DEPTH = 3;
+    /** 一次遍历最多打几个目录请求（病态分享不至于把详情页拖住）。 */
+    private static final int MAX_REQUESTS = 150;
 
     /** 视频扩展名判据（与 Flutter 端 {@code _video} 同一组）。 */
     private static final Pattern VIDEO =
@@ -119,21 +119,28 @@ final class BaiduShareProvider implements NetdiskShareProvider {
 
     /**
      * 一条分享里的视频（已排序、已造好五段 id）。全程匿名：只有访问者 Cookie，不带账号凭据。
+     *
+     * <p>遍历口径（三家 provider 统一，2026-11-26 定）：根目录 + 最多 {@link #MAX_DEPTH} 层子目录，
+     * 每层最多 {@link #MAX_PAGES} 页 × {@link #PAGE_SIZE} 条，一条分享最多 {@link #MAX_FILES} 个文件，
+     * 每走完一层打一行 {@code walk dir=… rows=… videos=…}。子目录一律走（以前只在根目录里出现的文件夹
+     * 才走一层，且最多 8 个、每个 2 页，深一层或多几个目录就整段丢集数）。
      */
     private static List<FilePlan> files(String shareId, String passcode) throws IOException {
         String shortId = shortId(shareId);
         BaiduShareResolver.Jar jar = new BaiduShareResolver.Jar();
         openSharePage(shareId, passcode, jar);
         String sekey = passcode.isEmpty() ? jar.get("BDCLND") : verify(shortId, passcode, jar);
-        List<FilePlan> out = new ArrayList<>();
-        Set<String> seenFiles = new LinkedHashSet<>();
+        Walk walk = new Walk();
         List<Dir> dirs = new ArrayList<>();
         String uk = "";
         String apiShareId = "";
+        int rootRows = 0;
         String lastFingerprint = "";
-        for (int page = 1; page <= ROOT_MAX_PAGES && out.size() < MAX_FILES; page++) {
+        // 根：除了收文件，还要从这里拿 uk / share_id（后面的子目录请求要它们作参数）。
+        for (int page = 1; page <= MAX_PAGES && !walk.done(); page++) {
+            walk.requests++;
             JsonObject answer =
-                    listPage(jar, shortId, uk, apiShareId, "", sekey, page, ROOT_PAGE_SIZE, true);
+                    listPage(jar, shortId, "", "", "", sekey, page, PAGE_SIZE, true);
             if (answer == null) break;
             uk = firstNonEmpty(NetdiskShareHttp.optString(answer, "uk").trim(), uk);
             apiShareId =
@@ -143,27 +150,33 @@ final class BaiduShareProvider implements NetdiskShareProvider {
                 AppLog.w(TAG, "provider=baidu root list has no list[] for " + shortId);
                 break;
             }
-            String fingerprint = fingerprintOf(rows);
+            // 空页就是到头了；注意不能用「这页不满」当停止条件 —— 有的部署会把 num 截到 20。
+            if (rows.size() == 0) break;
+            String fingerprint = NetdiskShareHttp.fingerprint(rows, "fs_id");
             if (!fingerprint.isEmpty() && fingerprint.equals(lastFingerprint)) {
                 // 分页没往前走的部署：宁可少收几集，也不无限翻同一页。
                 AppLog.w(TAG, "provider=baidu paging repeated at page " + page + " for " + shortId);
                 break;
             }
             lastFingerprint = fingerprint;
-            collect(rows, out, seenFiles, dirs, apiShareId, uk, sekey);
-            if (rows.size() < ROOT_PAGE_SIZE) break;
+            rootRows += rows.size();
+            collect(rows, walk, dirs, apiShareId, uk, sekey, "", 1);
         }
+        AppLog.w(
+                TAG,
+                "walk dir=/ rows=" + rootRows + " videos=" + walk.files.size());
         if (uk.isEmpty() || apiShareId.isEmpty()) {
             AppLog.w(TAG, "provider=baidu share " + shortId + " has no uk/share_id, cannot build ids");
             return Collections.emptyList();
         }
-        // 第二层：根目录里出现的文件夹，最多 MAX_DIRS 个、每个最多两页，不再往下钻。
-        int visited = 0;
-        for (Dir dir : dirs) {
-            if (out.size() >= MAX_FILES || visited >= MAX_DIRS) break;
-            visited++;
+        // 子目录：一层层往下走（队列长度在遍历中增长），最多 MAX_DEPTH 层、每层最多 MAX_PAGES 页。
+        for (int index = 0; index < dirs.size(); index++) {
+            if (walk.done()) break;
+            Dir dir = dirs.get(index);
+            int rows = 0;
             String fingerprint = "";
-            for (int page = 1; page <= DIR_MAX_PAGES && out.size() < MAX_FILES; page++) {
+            for (int page = 1; page <= MAX_PAGES && !walk.done(); page++) {
+                walk.requests++;
                 JsonObject answer =
                         listPage(
                                 jar,
@@ -173,18 +186,30 @@ final class BaiduShareProvider implements NetdiskShareProvider {
                                 dir.path,
                                 sekey,
                                 page,
-                                DIR_PAGE_SIZE,
+                                PAGE_SIZE,
                                 false);
                 if (answer == null) break;
-                JsonArray rows = listOf(answer);
-                if (rows == null) break;
-                String print = fingerprintOf(rows);
+                JsonArray pageRows = listOf(answer);
+                if (pageRows == null || pageRows.size() == 0) break;
+                String print = NetdiskShareHttp.fingerprint(pageRows, "fs_id");
                 if (!print.isEmpty() && print.equals(fingerprint)) break;
                 fingerprint = print;
-                collect(rows, out, seenFiles, new ArrayList<>(), apiShareId, uk, sekey);
-                if (rows.size() < DIR_PAGE_SIZE) break;
+                rows += pageRows.size();
+                collect(
+                        pageRows,
+                        walk,
+                        dirs,
+                        apiShareId,
+                        uk,
+                        sekey,
+                        stripLeadingSlash(dir.path),
+                        dir.depth + 1);
             }
+            AppLog.w(
+                    TAG,
+                    "walk dir=" + dir.path + " rows=" + rows + " videos=" + walk.files.size());
         }
+        List<FilePlan> out = walk.files;
         if (out.size() > 1) Collections.sort(out, BY_NAME);
         if (out.size() > MAX_FILES) out = new ArrayList<>(out.subList(0, MAX_FILES));
         AppLog.w(
@@ -195,6 +220,8 @@ final class BaiduShareProvider implements NetdiskShareProvider {
                         + out.size()
                         + " dirs="
                         + dirs.size()
+                        + " requests="
+                        + walk.requests
                         + " sekey="
                         + (sekey.isEmpty() ? "no" : "yes"));
         return out;
@@ -346,20 +373,23 @@ final class BaiduShareProvider implements NetdiskShareProvider {
     }
 
     /**
-     * 收一层目录：目录记进 {@code dirs}（没有 path 的跳过，没 path 就列不了），文件按判据收下并造 id。
-     * 造出来的 id 还要过播放侧的形状判据，过不了就丢（日志只记各段长度，不记明文凭据）。
+     * 收一层目录：目录记进 {@code dirs}（没有 path 的跳过，没 path 就列不了；超过 {@link #MAX_DEPTH}
+     * 层的不再入队），文件按判据收下并造 id。{@code sortPath} 是这一层在排序键里的目录名（不带前导
+     * {@code /}，根目录为空串）。造出来的 id 还要过播放侧的形状判据，过不了就丢（日志只记各段长度，
+     * 不记明文凭据）。
      */
     private static void collect(
             JsonArray rows,
-            List<FilePlan> out,
-            Set<String> seenFiles,
+            Walk walk,
             List<Dir> dirs,
             String shareId,
             String uk,
-            String sekey) {
+            String sekey,
+            String sortPath,
+            int childDepth) {
         if (rows == null) return;
         for (JsonElement item : rows) {
-            if (out.size() >= MAX_FILES) return;
+            if (walk.done()) return;
             if (item == null || !item.isJsonObject()) continue;
             JsonObject row = item.getAsJsonObject();
             String fsId = NetdiskShareHttp.optString(row, "fs_id").trim();
@@ -368,11 +398,12 @@ final class BaiduShareProvider implements NetdiskShareProvider {
             if (NetdiskShareHttp.optInt(row, "isdir", -1) == 1) {
                 String path = NetdiskShareHttp.optString(row, "path").trim();
                 if (path.isEmpty() || hasDir(dirs, path)) continue;
-                dirs.add(new Dir(path));
+                if (childDepth > MAX_DEPTH) continue;
+                dirs.add(new Dir(path, childDepth));
                 continue;
             }
             if (!isVideo(row, name)) continue;
-            if (!seenFiles.add(fsId)) continue;
+            if (!walk.seen.add(fsId)) continue;
             String id =
                     "bd++"
                             + shareId
@@ -395,7 +426,7 @@ final class BaiduShareProvider implements NetdiskShareProvider {
                                 + sekey.length());
                 continue;
             }
-            out.add(new FilePlan(name, id));
+            walk.files.add(new FilePlan(name, id, NetdiskShareHttp.joinPath(sortPath, name)));
         }
     }
 
@@ -410,18 +441,6 @@ final class BaiduShareProvider implements NetdiskShareProvider {
         JsonElement list = body.get("list");
         if (list == null || !list.isJsonArray()) return null;
         return list.getAsJsonArray();
-    }
-
-    /** 一页的指纹（fs_id 串），用来认出「分页没往前走」。 */
-    private static String fingerprintOf(JsonArray rows) {
-        if (rows == null || rows.size() == 0) return "";
-        StringBuilder sb = new StringBuilder();
-        for (JsonElement item : rows) {
-            if (item == null || !item.isJsonObject()) continue;
-            if (sb.length() > 0) sb.append('|');
-            sb.append(NetdiskShareHttp.optString(item.getAsJsonObject(), "fs_id"));
-        }
-        return sb.toString();
     }
 
     private static boolean hasDir(List<Dir> dirs, String path) {
@@ -442,6 +461,14 @@ final class BaiduShareProvider implements NetdiskShareProvider {
         return id.startsWith("1") ? id.substring(1) : id;
     }
 
+    /** 去掉服务端路径的前导 {@code /}：排序键不要它，否则子目录里的文件会排到根目录文件前面。 */
+    private static String stripLeadingSlash(String path) {
+        String value = NetdiskShareHttp.text(path).trim();
+        int start = 0;
+        while (start < value.length() && value.charAt(start) == '/') start++;
+        return value.substring(start);
+    }
+
     /** form 编码（空格转 {@code +}）；提取码可能带怪字符，按标准表单编码最稳。 */
     private static String encodeForm(String value) {
         try {
@@ -451,11 +478,11 @@ final class BaiduShareProvider implements NetdiskShareProvider {
         }
     }
 
-    /** 文件名自然序：{@code E02} 排在 {@code E10} 前面。 */
+    /** 文件名自然序：{@code E02} 排在 {@code E10} 前面；排序键带目录，界面上仍只显示文件名。 */
     private static final Comparator<FilePlan> BY_NAME =
             (left, right) ->
                     NetdiskShareHttp.compareName(
-                            left == null ? null : left.name, right == null ? null : right.name);
+                            left == null ? null : left.sortKey, right == null ? null : right.sortKey);
 
     /**
      * 从分享链接里取出「分享 id + 提取码」。
@@ -512,23 +539,38 @@ final class BaiduShareProvider implements NetdiskShareProvider {
         }
     }
 
-    /** 分享里的一个子目录（只要 path，列目录用它）。 */
+    /** 分享里的一个子目录：{@code path} 是接口给的完整路径（列目录用它），{@code depth} 是它在树里的层数。 */
     private static final class Dir {
         final String path;
+        final int depth;
 
-        Dir(String path) {
+        Dir(String path, int depth) {
             this.path = path;
+            this.depth = depth;
         }
     }
 
-    /** 造好五段 id 的一集。 */
+    /** 造好五段 id 的一集。{@code sortKey} 带目录，{@code name} 只给界面。 */
     private static final class FilePlan {
         final String name;
         final String id;
+        final String sortKey;
 
-        FilePlan(String name, String id) {
+        FilePlan(String name, String id, String sortKey) {
             this.name = name;
             this.id = id;
+            this.sortKey = sortKey;
+        }
+    }
+
+    /** 一次遍历的状态：请求数、已收文件（按 fs_id 去重）、以及「两条上限任一到了」的判据。 */
+    private static final class Walk {
+        int requests;
+        final List<FilePlan> files = new ArrayList<>();
+        final Set<String> seen = new LinkedHashSet<>();
+
+        boolean done() {
+            return requests >= MAX_REQUESTS || files.size() >= MAX_FILES;
         }
     }
 }

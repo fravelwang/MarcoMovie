@@ -20,8 +20,11 @@ import java.util.List;
  *       body {@code {"pwd_id":"…","passcode":"…"}} → {@code data.stoken}；
  *   <li>列目录：{@code GET /share/sharepage/detail?...&pdir_fid=&force=0&_page=1&_size=100&_fetch_total=1&_sort=file_type:asc,file_name:asc}
  *       → {@code data.list[]}（{@code file_type == 1} 是文件、{@code 0} 是目录）；
- *   <li>分享根只有一个目录时下钻一层（最多两层，与夸克那边同一个口径），一条分享最多
- *       {@link #MAX_FILES} 个文件，按文件名自然序排好；
+ *   <li>遍历口径（三家 provider 统一，2026-11-26 定）：根目录 + 最多 {@link #MAX_DEPTH} 层子目录，
+ *       每层最多 {@link #MAX_PAGES} 页 × {@link #PAGE_SIZE} 条，一条分享最多 {@link #MAX_FILES} 个文件；
+ *       每走完一层打一行 {@code walk dir=… rows=… videos=…}。子目录一律走，不再只在"这层没文件且只有
+ *       一个目录"时才下钻（根目录里混一个文件就会把子目录里的集数整段跳过，这正是"集数不全"的来源），
+ *       按「目录 + 文件名」的自然序排好（界面上仍只显示文件名）；
  *   <li>id 是四段 {@code ++} 分隔：{@code fid ++ share_fid_token ++ pwd_id ++ stoken}，播放侧由
  *       {@link UcShareResolver} 拿它换直链。
  * </ul>
@@ -49,9 +52,13 @@ final class UcShareProvider implements NetdiskShareProvider {
     private static final String ROOT_FID = "0";
     private static final int PAGE_SIZE = 100;
     /** 一条分享最多收多少个文件（剧集），与夸克那边一致。 */
-    private static final int MAX_FILES = 200;
-    /** 最多两层：分享根 + 一层「剧名文件夹」。 */
-    private static final int MAX_DEPTH = 1;
+    private static final int MAX_FILES = 500;
+    /** 每层最多翻几页。 */
+    private static final int MAX_PAGES = 3;
+    /** 根目录 + 最多 3 层子目录。 */
+    private static final int MAX_DEPTH = 3;
+    /** 一次遍历最多打几个目录请求（病态分享不至于把详情页拖住）。 */
+    private static final int MAX_REQUESTS = 150;
 
     @Override
     public String id() {
@@ -71,12 +78,13 @@ final class UcShareProvider implements NetdiskShareProvider {
         if (share == null) return Collections.emptyList();
         String stoken = shareToken(share.pwdId, share.passcode);
         if (stoken.isEmpty()) return Collections.emptyList();
-        List<FilePlan> files = new ArrayList<>();
-        walk(share.pwdId, stoken, ROOT_FID, 0, files);
-        if (files.isEmpty()) {
+        Walk walk = new Walk();
+        walk(share.pwdId, stoken, ROOT_FID, "", 0, walk);
+        if (walk.files.isEmpty()) {
             AppLog.w(TAG, "provider=uc no file in share " + share.pwdId);
             return Collections.emptyList();
         }
+        List<FilePlan> files = walk.files;
         if (files.size() > 1) Collections.sort(files, BY_NAME);
         if (files.size() > MAX_FILES) files = new ArrayList<>(files.subList(0, MAX_FILES));
         Cms.Line line = new Cms.Line();
@@ -87,6 +95,14 @@ final class UcShareProvider implements NetdiskShareProvider {
             episode.url = file.id;
             line.episodes.add(episode);
         }
+        AppLog.w(
+                TAG,
+                "provider=uc share "
+                        + share.pwdId
+                        + " files="
+                        + files.size()
+                        + " requests="
+                        + walk.requests);
         return Collections.singletonList(line);
     }
 
@@ -128,7 +144,7 @@ final class UcShareProvider implements NetdiskShareProvider {
     }
 
     /** 一页目录；失败返回 null（调用方当成「这层没东西」）。 */
-    private static JsonArray listPage(String pwdId, String stoken, String dirFid) {
+    private static JsonArray listPage(String pwdId, String stoken, String dirFid, int page) {
         String url =
                 BASE
                         + "/share/sharepage/detail"
@@ -139,7 +155,9 @@ final class UcShareProvider implements NetdiskShareProvider {
                         + NetdiskShareHttp.encodeQuery(stoken)
                         + "&pdir_fid="
                         + NetdiskShareHttp.encodeQuery(dirFid)
-                        + "&force=0&_page=1&_size="
+                        + "&force=0&_page="
+                        + page
+                        + "&_size="
                         + PAGE_SIZE
                         + "&_fetch_total=1&_sort="
                         + NetdiskShareHttp.encodeQuery(SORT);
@@ -161,6 +179,8 @@ final class UcShareProvider implements NetdiskShareProvider {
                             + pwdId
                             + " dir="
                             + dirFid
+                            + " page="
+                            + page
                             + ": "
                             + NetdiskShareHttp.describe(error));
             return null;
@@ -168,37 +188,83 @@ final class UcShareProvider implements NetdiskShareProvider {
     }
 
     /**
-     * 收一层目录；这一层一个文件都没有、又只有一个子目录时往下走一层（{@code MAX_DEPTH} 之内）。
+     * 递归走一层目录：先翻完这一层（最多 {@link #MAX_PAGES} 页），再逐个进子目录（最多
+     * {@link #MAX_DEPTH} 层）。每层打一行 {@code walk dir=… rows=… videos=…}（{@code rows} 是这一层
+     * 列出来的条目数，{@code videos} 是累计已收条目数；非视频的条目由 {@link NetdiskShareLines} 按扩展名
+     * 丢掉，所以这里不做视频判据）。
      *
-     * <p>为什么只在"这层没文件"时下钻：分享要么是「集数文件平铺」，要么是「剧名文件夹 / 集数文件」；
-     * 前一种根目录里就有文件，再钻只会钻进花絮目录、把集数排乱。
+     * <p>为什么现在每层都下钻：以前只在"这层一个文件都没有、又只有一个子目录"时才往下走，分享根里
+     * 混一个封面/说明文件、或者根里有两个季目录，就整段不收子目录里的集数 —— 现场"集数不全"就是这个。
+     * 上下限靠层数、页数与请求数三条卡住，不会无限遍历。
      */
     private static void walk(
-            String pwdId, String stoken, String dirFid, int depth, List<FilePlan> out) {
-        JsonArray list = listPage(pwdId, stoken, dirFid);
-        if (list == null) return;
-        List<String> dirs = new ArrayList<>();
-        int before = out.size();
-        collectFiles(pwdId, stoken, list, out, dirs);
-        if (out.size() == before && dirs.size() == 1 && depth < MAX_DEPTH) {
-            walk(pwdId, stoken, dirs.get(0), depth + 1, out);
+            String pwdId, String stoken, String dirFid, String dirPath, int depth, Walk walk) {
+        if (depth > MAX_DEPTH) return;
+        if (walk.done()) return;
+        List<String[]> dirs = new ArrayList<>();
+        int rows = 0;
+        String lastFingerprint = "";
+        for (int page = 1; page <= MAX_PAGES; page++) {
+            if (walk.done()) break;
+            walk.requests++;
+            JsonArray list = listPage(pwdId, stoken, dirFid, page);
+            if (list == null || list.size() == 0) break;
+            String fingerprint = NetdiskShareHttp.fingerprint(list, "fid");
+            if (!fingerprint.isEmpty() && fingerprint.equals(lastFingerprint)) {
+                AppLog.w(
+                        TAG,
+                        "provider=uc paging repeated dir="
+                                + NetdiskShareHttp.walkDir(dirPath)
+                                + " page="
+                                + page);
+                break;
+            }
+            lastFingerprint = fingerprint;
+            rows += list.size();
+            collectFiles(pwdId, stoken, list, dirPath, walk.files, dirs);
+        }
+        AppLog.w(
+                TAG,
+                "walk dir="
+                        + NetdiskShareHttp.walkDir(dirPath)
+                        + " rows="
+                        + rows
+                        + " videos="
+                        + walk.files.size());
+        for (String[] dir : dirs) {
+            if (walk.done()) return;
+            walk(pwdId, stoken, dir[0], dir[1], depth + 1, walk);
         }
     }
 
     /**
-     * 收文件，顺手记下子目录 fid。{@code file_type}：0 是目录，1 是文件；造出来的四段 id 还要过
+     * 收文件，顺手记下子目录（fid + 路径）。{@code file_type}：0 是目录，1 是文件；造出来的四段 id 还要过
      * 播放侧的形状判据，过不了就丢（并在日志里只记各段长度，不记明文凭据）。
      */
     private static void collectFiles(
-            String pwdId, String stoken, JsonArray list, List<FilePlan> out, List<String> dirs) {
+            String pwdId,
+            String stoken,
+            JsonArray list,
+            String dirPath,
+            List<FilePlan> out,
+            List<String[]> dirs) {
         if (list == null) return;
         for (JsonElement item : list) {
+            if (out.size() >= MAX_FILES) return;
             if (item == null || !item.isJsonObject()) continue;
             JsonObject obj = item.getAsJsonObject();
             int type = NetdiskShareHttp.optInt(obj, "file_type", -1);
             if (type == 0) {
                 String fid = NetdiskShareHttp.optString(obj, "fid").trim();
-                if (!fid.isEmpty()) dirs.add(fid);
+                String dirName = NetdiskShareHttp.optString(obj, "file_name").trim();
+                if (!fid.isEmpty()) {
+                    dirs.add(
+                            new String[] {
+                                fid,
+                                NetdiskShareHttp.joinPath(
+                                        dirPath, dirName.isEmpty() ? fid : dirName)
+                            });
+                }
                 continue;
             }
             if (type != 1) continue;
@@ -220,24 +286,36 @@ final class UcShareProvider implements NetdiskShareProvider {
                                 + stoken.length());
                 continue;
             }
-            out.add(new FilePlan(name, id));
+            out.add(new FilePlan(name, id, NetdiskShareHttp.joinPath(dirPath, name)));
         }
     }
 
-    /** 文件名自然序：{@code E02} 排在 {@code E10} 前面。 */
+    /** 文件名自然序：{@code E02} 排在 {@code E10} 前面；排序键带目录，界面上仍只显示文件名。 */
     private static final Comparator<FilePlan> BY_NAME =
             (left, right) ->
                     NetdiskShareHttp.compareName(
-                            left == null ? null : left.name, right == null ? null : right.name);
+                            left == null ? null : left.sortKey, right == null ? null : right.sortKey);
 
-    /** 造好四段 id 的一集。 */
+    /** 造好四段 id 的一集。{@code sortKey} 带目录，{@code name} 只给界面。 */
     private static final class FilePlan {
         final String name;
         final String id;
+        final String sortKey;
 
-        FilePlan(String name, String id) {
+        FilePlan(String name, String id, String sortKey) {
             this.name = name;
             this.id = id;
+            this.sortKey = sortKey;
+        }
+    }
+
+    /** 一次遍历的状态：请求数、已收文件、以及「两条上限任一到了」的判据。 */
+    private static final class Walk {
+        int requests;
+        final List<FilePlan> files = new ArrayList<>();
+
+        boolean done() {
+            return requests >= MAX_REQUESTS || files.size() >= MAX_FILES;
         }
     }
 }

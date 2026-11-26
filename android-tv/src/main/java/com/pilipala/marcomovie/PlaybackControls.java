@@ -2397,6 +2397,8 @@ final class PlaybackControls {
                         if (!line.episodes.isEmpty()) {
                             int n = Math.min(Math.max(0, episodeIndex()), line.episodes.size() - 1);
                             markSleepTimerInPlaceSwitch();
+                            // 播放器里的「换源」也是 Boss 自己点的线路：失败后不自动换到别家。
+                            PlaybackController.markPickedByUser(line.episodes.get(n));
                             a.changeEpisode(site, video, line, line.episodes.get(n), 0);
                         }
                     }

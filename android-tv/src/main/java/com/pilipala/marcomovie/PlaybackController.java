@@ -256,8 +256,12 @@ final class PlaybackController {
         logAttribution(a, s, attributed, 0, 0);
         // A line-level failure gets one automatic hop first; the failed text is held back until the
         // hop budget is exhausted so the user sees one outcome instead of a stack of toasts.
+        // 用户自己点的线路：switchToNextLine 一定返回 false，这里补一句"没有自动换源"，免得他以为
+        // 应用又擅自换了一家（2026-11-26 Boss 现场：选了百度分享，失败后被换到 UC 直接播）。
+        final boolean userPicked = isUserPickedLine(a == null ? null : a.activeEpisode);
         if (switchToNextLine(a, s, attributed)) return;
-        String message = attributed.text(detail);
+        String message =
+                attributed.text(userPicked ? withUserPickedHint(detail) : detail);
         if (a.playerChrome != null) a.playerChrome.setLoading(false);
         if (a.current != null && a.current.player) {
             if (a.playStatus != null) a.playStatus.setText(message);
@@ -332,6 +336,55 @@ final class PlaybackController {
     /** Two hops show the feature without turning playback into a line roulette. */
     private static final int MAX_AUTO_LINE_SWITCHES = 2;
 
+    /**
+     * 用户在选择器里明确点过这条线路时，打在这一集 media 上的标记。只对本次播放的那一集有效：下一集是
+     * 另一个 {@link Cms.Episode} 对象，自动连播因此不受影响；详情页重新加载会造新对象，标记自然消失。
+     * 键名带 {@code _} 前缀，与其它内部标记（{@code _forceMpv} 等）同一套口径，不会漏进媒体参数。
+     */
+    static final String USER_PICKED_LINE = "_userPickedLine";
+
+    /** 手动选线的失败句子后面补这一句：说清"没有自动换源"，并指到现有的「换源」入口。 */
+    static final String USER_PICKED_LINE_HINT = "（手动选的线路，不会自动换源；可点「换源」或回选集换其他线路）";
+
+    private static String withUserPickedHint(String detail) {
+        String body = detail == null ? "" : detail.trim();
+        return body.isEmpty() ? USER_PICKED_LINE_HINT : body + USER_PICKED_LINE_HINT;
+    }
+
+    /**
+     * 这一集是不是"Boss 自己点的线路"播的。命中时失败只说明原因，不做线路自动切换、也不做跨站自动
+     * 换源 —— 他选的是百度，就不能在他没同意的情况下换成 UC 直接播。
+     */
+    static boolean isUserPickedLine(Cms.Episode ep) {
+        return ep != null && ep.media != null && ep.media.optBoolean(USER_PICKED_LINE, false);
+    }
+
+    /**
+     * 播放入口的唯一打标点：{@code resolvePlayer} 之前先看这一页的选择器有没有"用户点过的线路"
+     * （{@link EpisodeSelection#pickedLine}），且这次要播的就是那条线路，才给这一集打标。
+     *
+     * <p>为什么放在这里而不是每个按钮上：TV 的播放、选集面板、换站交接、继续播放最后都收敛到这一个
+     * 入口；按钮上各写一遍会漏一条路径，而漏一条就等于换源又偷偷回来了。
+     */
+    private static void markUserPickedLine(MainActivity a, Cms.Line line, Cms.Episode ep) {
+        if (a == null || ep == null || line == null || a.current == null) return;
+        if (!a.current.selection.isPicked(line.name)) return;
+        markPickedByUser(ep);
+    }
+
+    /**
+     * 给"Boss 自己点的线路播的这一集"打标。播放入口（{@link #resolvePlayer} 由详情页选择器决定的那条）
+     * 与播放器里的「换源」都收敛到这一个方法。
+     */
+    static void markPickedByUser(Cms.Episode ep) {
+        if (ep == null) return;
+        try {
+            ep.media.put(USER_PICKED_LINE, true);
+        } catch (Exception ignored) {
+            // org.json 的受检异常；标记只是体验开关，写不进去就按旧行为换源。
+        }
+    }
+
     private static final LineFailover lineFailover = new LineFailover();
 
     /**
@@ -340,6 +393,9 @@ final class PlaybackController {
      * tried. Device failures are not retried here: another line feeds the same decoder. At most
      * {@link #MAX_AUTO_LINE_SWITCHES} hops, so a site whose lines all fail still ends on the normal
      * failure text. Netdisk lines are included, their native resolution is already in place.
+     *
+     * <p>例外：这一集要是 Boss 在选择器里点的那条线路播的（{@link #isUserPickedLine}），这里一律
+     * 返回 false —— 他选了哪家就看哪家，失败了说原因，不替他换。
      */
     private static boolean switchToNextLine(
             MainActivity a, Cms.Site s, PlaybackFailure.Attribution kind) {
@@ -349,6 +405,9 @@ final class PlaybackController {
                 && kind != PlaybackFailure.Attribution.SOURCE) {
             return false;
         }
+        // 这条线路是 Boss 在选择器里自己点的：失败就停在这一集，把原因说出来，不再替他换线路。
+        // 默认线路/自动挑的线路走下面的自动换源，行为一个字节都不变。
+        if (isUserPickedLine(a.activeEpisode)) return false;
         Cms.Video video = lineFailover.video;
         Cms.Line from = a.activeLine;
         if (video == null
@@ -526,6 +585,7 @@ final class PlaybackController {
 
     static void resolvePlayer(
             MainActivity a, Cms.Site s, Cms.Video v, Cms.Line line, Cms.Episode ep) {
+        markUserPickedLine(a, line, ep);
         if (lineFailover.freshResolveRequested) {
             // Our own re-resolve: same episode, same line, so the attempt budgets must survive.
             lineFailover.freshResolveRequested = false;
@@ -853,8 +913,14 @@ final class PlaybackController {
                                                 clearPlaybackLoading(a);
                                                 if (url.isEmpty()) {
                                                     a.changingMiniEpisode = false;
-                                                    if (tryHistoryCrossSourceFailover(
-                                                            a, s, a.resumeAt, "原片源未返回有效播放地址")) {
+                                                    // 用户自己点的线路失败时不做跨站自动换源（那条路也是"换到
+                                                    // 别家直接播"），只把原因说清楚。
+                                                    if (!isUserPickedLine(a.activeEpisode)
+                                                            && tryHistoryCrossSourceFailover(
+                                                                    a,
+                                                                    s,
+                                                                    a.resumeAt,
+                                                                    "原片源未返回有效播放地址")) {
                                                         return;
                                                     }
                                                     String spiderMsg =

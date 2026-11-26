@@ -12,13 +12,18 @@ import java.util.List;
 /**
  * 夸克分享 → 线路：本机登录态换 stoken、列目录、按文件造五段 id。
  *
- * <p>这段逻辑原来长在 {@link NetdiskShareLines} 里，本次搬到 provider 里，**行为不变**：
+ * <p>这段逻辑原来长在 {@link NetdiskShareLines} 里，协议一层一个字没改；2026-11-26 只换了遍历口径
+ * （原来只肯下钻一层、每层只翻一页，集数会不全）：
  * <ul>
  *   <li>换个 stoken 走 {@code POST /share/sharepage/token}，列目录走
  *       {@code GET /share/sharepage/detail}，都要本机夸克账号的 cookie（{@link QuarkQrLogin}）；
- *   <li>根目录只有一个目录时往下走一层（分享常是「剧名文件夹 / 集数文件」两级），再深不猜；
+ *   <li>遍历口径（三家 provider 统一，2026-11-26 定）：根目录 + 最多 {@link #MAX_DEPTH} 层子目录，
+ *       每层最多 {@link #MAX_PAGES} 页 × {@link #SHARE_PAGE_SIZE} 条，一条分享最多 {@link #MAX_FILES}
+ *       个文件；每走完一层打一行 {@code walk dir=… rows=… videos=…}，上机就能分清"分享里只有 14 个"
+ *       与"我们只找到 14 个"。子目录一律走，不再只在"这层没文件且只有一个目录"时才下钻（那正是集数
+ *       不全的来源：根目录里只要混了一个文件，子目录里的集数就被整段跳过）；
  *   <li>只收 {@code file_type == 1}、{@code size > 0}、fid 是 32 hex、{@code share_fid_token} 是
- *       token 形状的条目，一条分享最多 {@link #MAX_FILES} 个文件，按文件名自然序排好；
+ *       token 形状的条目，按「目录 + 文件名」的自然序排好（界面上仍只显示文件名）；
  *   <li>id 是五段 {@code ++} 分隔：{@code fid ++ share_fid_token ++ pwd_id ++ stoken ++ size}，
  *       形状与播放侧 {@link QuarkShareResolver} 的 {@code parseIdent} 完全对齐。
  * </ul>
@@ -42,9 +47,15 @@ final class QuarkShareProvider implements NetdiskShareProvider {
     private static final String ROOT_FID = "0";
 
     /** 一条分享最多收多少个文件（剧集）。 */
-    private static final int MAX_FILES = 200;
+    private static final int MAX_FILES = 500;
     /** 夸克列表接口一页 100 条。 */
     private static final int SHARE_PAGE_SIZE = 100;
+    /** 每层最多翻几页。 */
+    private static final int MAX_PAGES = 3;
+    /** 根目录 + 最多 3 层子目录。 */
+    private static final int MAX_DEPTH = 3;
+    /** 一次遍历最多打几个目录请求（病态分享不至于把详情页拖住；正常分享用不到这么多）。 */
+    private static final int MAX_REQUESTS = 150;
 
     @Override
     public String id() {
@@ -102,26 +113,20 @@ final class QuarkShareProvider implements NetdiskShareProvider {
      * 一条分享里的文件（已排好序、已造好五段 id）。
      *
      * <p>换 stoken 走 {@code POST /share/sharepage/token}；列表走 {@code GET /share/sharepage/detail}。
-     * 根目录只有一个文件夹时往下走一层，再深就不猜了（卡里定的上限两层）。
+     * 遍历口径见类注释：根 + 最多 3 层子目录、每层最多 3 页 × 100 条、最多 500 个文件。
      */
     private static List<FilePlan> filesOf(String cookie, String pwdId, String passcode) {
         Token token = shareToken(cookie, pwdId, passcode);
         if (token == null) return Collections.emptyList();
-        List<ShareFile> files = new ArrayList<>();
-        JsonArray root = listPage(cookie, pwdId, token.stoken, ROOT_FID);
-        List<String> dirs = new ArrayList<>();
-        collectFiles(root, files, dirs);
-        if (files.isEmpty() && dirs.size() == 1) {
-            JsonArray inner = listPage(cookie, pwdId, token.stoken, dirs.get(0));
-            collectFiles(inner, files, new ArrayList<>());
-        }
-        if (files.isEmpty()) {
+        Walk walk = new Walk();
+        walk(cookie, pwdId, token.stoken, ROOT_FID, "", 0, walk);
+        if (walk.files.isEmpty()) {
             AppLog.w(TAG, "provider=quark no file in share " + pwdId);
             return Collections.emptyList();
         }
-        if (files.size() > 1) Collections.sort(files, BY_NAME);
-        List<FilePlan> out = new ArrayList<>(files.size());
-        for (ShareFile file : files) {
+        if (walk.files.size() > 1) Collections.sort(walk.files, BY_NAME);
+        List<FilePlan> out = new ArrayList<>(walk.files.size());
+        for (ShareFile file : walk.files) {
             if (out.size() >= MAX_FILES) break;
             StringBuilder id = new StringBuilder(80);
             id.append(file.fid)
@@ -142,7 +147,9 @@ final class QuarkShareProvider implements NetdiskShareProvider {
                         + " title="
                         + NetdiskShareHttp.text(token.title)
                         + " files="
-                        + out.size());
+                        + out.size()
+                        + " requests="
+                        + walk.requests);
         return out;
     }
 
@@ -183,7 +190,8 @@ final class QuarkShareProvider implements NetdiskShareProvider {
     }
 
     /** 一页目录；失败返回 null（调用方当成「这层没东西」）。 */
-    private static JsonArray listPage(String cookie, String pwdId, String stoken, String dirFid) {
+    private static JsonArray listPage(
+            String cookie, String pwdId, String stoken, String dirFid, int page) {
         String url =
                 BASE
                         + "/share/sharepage/detail?pr=ucpro&fr=pc&pwd_id="
@@ -192,7 +200,9 @@ final class QuarkShareProvider implements NetdiskShareProvider {
                         + NetdiskShareHttp.encodeQuery(stoken)
                         + "&pdir_fid="
                         + NetdiskShareHttp.encodeQuery(dirFid)
-                        + "&force=0&_page=1&_size="
+                        + "&force=0&_page="
+                        + page
+                        + "&_size="
                         + SHARE_PAGE_SIZE
                         + "&_fetch_total=1&_sort="
                         + NetdiskShareHttp.encodeQuery(SORT);
@@ -206,6 +216,8 @@ final class QuarkShareProvider implements NetdiskShareProvider {
                             + pwdId
                             + " dir="
                             + dirFid
+                            + " page="
+                            + page
                             + ": "
                             + NetdiskShareHttp.describe(error));
             return null;
@@ -213,10 +225,68 @@ final class QuarkShareProvider implements NetdiskShareProvider {
     }
 
     /**
-     * 收文件，顺手记下子目录 fid。只认 {@code file_type == 1}（文件）且 {@code size > 0}，
+     * 递归走一层目录：先翻完这一层（最多 {@link #MAX_PAGES} 页），再逐个进子目录（最多
+     * {@link #MAX_DEPTH} 层）。每层打一行 {@code walk dir=… rows=… videos=…}（{@code rows} 是这一层
+     * 列出来的条目数，{@code videos} 是累计已收条目数；非视频的条目由 {@link NetdiskShareLines} 按扩展名
+     * 丢掉，所以这里不做视频判据），上机抓一条日志就能判断"分享里到底有多少集"。
+     */
+    private static void walk(
+            String cookie,
+            String pwdId,
+            String stoken,
+            String dirFid,
+            String dirPath,
+            int depth,
+            Walk walk) {
+        if (depth > MAX_DEPTH) return;
+        if (walk.done()) return;
+        List<String[]> dirs = new ArrayList<>();
+        int rows = 0;
+        String lastFingerprint = "";
+        for (int page = 1; page <= MAX_PAGES; page++) {
+            if (walk.done()) break;
+            walk.requests++;
+            JsonArray list = listPage(cookie, pwdId, stoken, dirFid, page);
+            if (list == null || list.size() == 0) break;
+            String fingerprint = NetdiskShareHttp.fingerprint(list, "fid");
+            if (!fingerprint.isEmpty() && fingerprint.equals(lastFingerprint)) {
+                AppLog.w(
+                        TAG,
+                        "provider=quark paging repeated dir="
+                                + NetdiskShareHttp.walkDir(dirPath)
+                                + " page="
+                                + page);
+                break;
+            }
+            lastFingerprint = fingerprint;
+            rows += list.size();
+            collectFiles(pwdId, stoken, list, dirPath, walk.files, dirs);
+        }
+        AppLog.w(
+                TAG,
+                "walk dir="
+                        + NetdiskShareHttp.walkDir(dirPath)
+                        + " rows="
+                        + rows
+                        + " videos="
+                        + walk.files.size());
+        for (String[] dir : dirs) {
+            if (walk.done()) return;
+            walk(cookie, pwdId, stoken, dir[0], dir[1], depth + 1, walk);
+        }
+    }
+
+    /**
+     * 收文件，顺手记下子目录（fid + 路径）。只认 {@code file_type == 1}（文件）且 {@code size > 0}，
      * 且 fid 是 32 hex、share_fid_token 是 token 形状 —— 形状不全的条目送给播放器也换不出直链。
      */
-    private static void collectFiles(JsonArray list, List<ShareFile> out, List<String> dirs) {
+    private static void collectFiles(
+            String pwdId,
+            String stoken,
+            JsonArray list,
+            String dirPath,
+            List<ShareFile> out,
+            List<String[]> dirs) {
         if (list == null) return;
         for (JsonElement item : list) {
             if (out.size() >= MAX_FILES) return;
@@ -224,8 +294,16 @@ final class QuarkShareProvider implements NetdiskShareProvider {
             JsonObject obj = item.getAsJsonObject();
             int type = NetdiskShareHttp.optInt(obj, "file_type", -1);
             if (type == 0) {
-                String fid = NetdiskShareHttp.optString(obj, "fid");
-                if (!fid.isEmpty()) dirs.add(fid);
+                String fid = NetdiskShareHttp.optString(obj, "fid").trim();
+                String dirName = NetdiskShareHttp.optString(obj, "file_name").trim();
+                if (!fid.isEmpty()) {
+                    dirs.add(
+                            new String[] {
+                                fid,
+                                NetdiskShareHttp.joinPath(
+                                        dirPath, dirName.isEmpty() ? fid : dirName)
+                            });
+                }
                 continue;
             }
             if (type != 1) continue;
@@ -235,15 +313,22 @@ final class QuarkShareProvider implements NetdiskShareProvider {
             if (!NetdiskShareHttp.isHex(fid, 32) || !NetdiskShareHttp.isToken(token) || size <= 0) {
                 continue;
             }
-            out.add(new ShareFile(fid, token, NetdiskShareHttp.optString(obj, "file_name"), size));
+            String name = NetdiskShareHttp.optString(obj, "file_name");
+            out.add(
+                    new ShareFile(
+                            fid,
+                            token,
+                            name,
+                            size,
+                            NetdiskShareHttp.joinPath(dirPath, name)));
         }
     }
 
-    /** 文件名自然序：{@code E02} 排在 {@code E10} 前面。 */
+    /** 文件名自然序：{@code E02} 排在 {@code E10} 前面；排序键带目录，界面上仍只显示文件名。 */
     private static final Comparator<ShareFile> BY_NAME =
             (left, right) ->
                     NetdiskShareHttp.compareName(
-                            left == null ? null : left.name, right == null ? null : right.name);
+                            left == null ? null : left.sortKey, right == null ? null : right.sortKey);
 
     // ------------------------------------------------------------------ 小数据结构
 
@@ -258,18 +343,30 @@ final class QuarkShareProvider implements NetdiskShareProvider {
         }
     }
 
-    /** 分享里的一个文件（还没拼成 id）。 */
+    /** 分享里的一个文件（还没拼成 id）。{@code sortKey} 带目录，{@code name} 只给界面。 */
     private static final class ShareFile {
         final String fid;
         final String token;
         final String name;
         final long size;
+        final String sortKey;
 
-        ShareFile(String fid, String token, String name, long size) {
+        ShareFile(String fid, String token, String name, long size, String sortKey) {
             this.fid = fid;
             this.token = token;
             this.name = name;
             this.size = size;
+            this.sortKey = sortKey;
+        }
+    }
+
+    /** 一次遍历的状态：请求数、已收文件、以及「两条上限任一到了」的判据。 */
+    private static final class Walk {
+        int requests;
+        final List<ShareFile> files = new ArrayList<>();
+
+        boolean done() {
+            return requests >= MAX_REQUESTS || files.size() >= MAX_FILES;
         }
     }
 

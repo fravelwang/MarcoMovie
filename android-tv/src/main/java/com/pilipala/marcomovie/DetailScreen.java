@@ -825,6 +825,10 @@ final class DetailScreen {
                             "detail-line:" + n,
                             () -> {
                                 renderEpisodes(a, site, video, index, 0, panel, null);
+                                // 「这条线路是 Boss 点的」：只在这个点击回调里打标。渲染时那次
+                                // select() 不算 —— 详情页一画就会 select 默认/记忆线路。
+                                // 失败后靠这个标记决定要不要偷偷换到别家线路（PlaybackController）。
+                                if (a.current != null) a.current.selection.pick(candName);
                                 View play = a.root.findViewWithTag("detail-play");
                                 if (play instanceof Button) {
                                     ((Button) play).setText("►  开始播放");
