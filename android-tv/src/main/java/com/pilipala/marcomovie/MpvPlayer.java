@@ -512,6 +512,11 @@ public final class MpvPlayer extends MoviePlayer {
                 MPVLib.setOptionString("demuxer-max-bytes", String.valueOf(maxBytes));
                 MPVLib.setOptionString("demuxer-max-back-bytes", String.valueOf(backBytes));
                 MPVLib.setOptionString("demuxer-readahead-secs", String.valueOf(bufferSeconds));
+                // ytdl_hook 会在每个 http 地址上先跑 youtube-dl；盒子上没有这个二进制，于是 mpv
+                // 直接 "loading failed" → 退回 media3（网盘 4K 因此只能单连接软解）。关掉它，
+                // 让 mpv 自己打开直链。顺手把 5.1 下混成立体声，E-AC3 音轨在电视上才有声。
+                MPVLib.setOptionString("ytdl", "no");
+                MPVLib.setOptionString("audio-channels", "stereo");
                 MPVLib.setOptionString("network-timeout", "20");
                 MPVLib.setOptionString("hls-bitrate", "max");
                 MPVLib.setOptionString("deinterlace", "auto");
