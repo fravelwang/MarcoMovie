@@ -709,13 +709,16 @@ public final class CspEngine implements SourceEngine {
         }
     }
 
+    /** 上游真名：FongMi/CatVod 的宿主代理类是 {@code com.github.catvod.Proxy}（port 默认 -1）。 */
+    private static final String PROXY_CLASS = "com.github.catvod.Proxy";
+
     static void initPluginProxy(ClassLoader loader) {
         if (loader == null) return;
         for (ClassLoader cl : collectPluginLoaders(loader, null)) {
             if (!INITIALIZED_PROXY_LOADERS.add(cl)) continue;
             for (String proxyClassName :
                     new String[] {
-                        "com.github.catvod.spider.Proxy", "com.github.catvod.spider.ProxyOrigin"
+                        PROXY_CLASS, "com.github.catvod.spider.Proxy", "com.github.catvod.spider.ProxyOrigin"
                     }) {
                 try {
                     Class<?> proxyClass = Class.forName(proxyClassName, false, cl);
@@ -734,7 +737,7 @@ public final class CspEngine implements SourceEngine {
         for (ClassLoader cl : collectPluginLoaders(loader, null)) {
             for (String proxyClassName :
                     new String[] {
-                        "com.github.catvod.spider.Proxy", "com.github.catvod.spider.ProxyOrigin"
+                        PROXY_CLASS, "com.github.catvod.spider.Proxy", "com.github.catvod.spider.ProxyOrigin"
                     }) {
                 try {
                     Class<?> proxyClass = Class.forName(proxyClassName, false, cl);
@@ -972,7 +975,7 @@ public final class CspEngine implements SourceEngine {
         for (ClassLoader cl : collectPluginLoaders(rootLoader, null)) {
             for (String proxyClassName :
                     new String[] {
-                        "com.github.catvod.spider.Proxy", "com.github.catvod.spider.ProxyOrigin"
+                        PROXY_CLASS, "com.github.catvod.spider.Proxy", "com.github.catvod.spider.ProxyOrigin"
                     }) {
                 try {
                     Class<?> proxyCls = Class.forName(proxyClassName, false, cl);
