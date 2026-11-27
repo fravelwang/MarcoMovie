@@ -261,7 +261,14 @@ final class FongMiGateway implements SourceGateway {
         } catch (Throwable failure) {
             return null;
         }
-        if (listing == null || listing.videos == null || listing.videos.isEmpty()) return null;
+        if (listing == null || listing.videos == null || listing.videos.isEmpty()) {
+            // An empty list is the site saying "no lines"; its own message is the only explanation
+            // worth showing. Keep it (meta null) so the caller can put it on the dead-end page.
+            if (listing == null || listing.message == null || listing.message.trim().isEmpty()) {
+                return null;
+            }
+            return new MediaDetail(null, null, listing.message);
+        }
         Cms.Video video = listing.videos.get(0);
         if (video == null) return null;
         List<LineRef> lines = new ArrayList<>();
@@ -279,7 +286,7 @@ final class FongMiGateway implements SourceGateway {
             }
         }
         // A detail parsed outside a site context does not need siteKey; toVideo ignores it.
-        return new MediaDetail(toMedia("", video), lines);
+        return new MediaDetail(toMedia("", video), lines, listing.message);
     }
 
     /** MediaDetail → the base listing object the detail UI and the cache validation consume. */
@@ -287,6 +294,7 @@ final class FongMiGateway implements SourceGateway {
         if (detail == null || detail.meta == null) return null;
         Cms.Video video = toListing(detail.meta);
         if (video == null) return null;
+        video.siteMessage = detail.message;
         for (LineRef line : detail.lines) {
             if (line == null) continue;
             Cms.Line target = new Cms.Line();

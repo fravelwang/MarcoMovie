@@ -532,6 +532,16 @@ final class TvV17DetailScreen {
         if (screen.sourceUpgradeAction != null) screen.sourceUpgradeAction.run();
     }
 
+    /**
+     * 播放失败但仍停在详情页时，把原因写进同一行状态位（不弹新对话框、不盖页面）。只在
+     * 这一页还挂着（{@link #active}）且属于同一个 host 时写，避免把上一页的失败画到新页上。
+     */
+    static void showActiveStatus(MainActivity host, String text) {
+        TvV17DetailScreen screen = active == null ? null : active.get();
+        if (screen == null || screen.host != host) return;
+        screen.setLoadingStatus(text);
+    }
+
     /** Set by the curated page: adopt the ledger default when it outranks the current source. */
     void setSourceUpgradeAction(Runnable action) {
         this.sourceUpgradeAction = action;

@@ -12,12 +12,19 @@ import java.util.List;
 final class MediaDetail {
     final MediaRef meta;
     final List<LineRef> lines;
+    /** Site's own words when the reply carried {@code msg}/{@code message}/{@code errMsg}. */
+    final String message;
 
     MediaDetail(MediaRef meta, List<LineRef> lines) {
+        this(meta, lines, "");
+    }
+
+    MediaDetail(MediaRef meta, List<LineRef> lines, String message) {
         this.meta = meta;
         List<LineRef> copy = new ArrayList<>();
         if (lines != null) copy.addAll(lines);
         this.lines = Collections.unmodifiableList(copy);
+        this.message = message == null ? "" : message;
     }
 
     /**

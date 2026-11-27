@@ -152,6 +152,36 @@ final class TvDetailHost {
     static final String NO_PLAYABLE_LINES_PLAY_LABEL = "该来源暂无线路";
 
     /**
+     * 死路页状态行。站点自己给了 msg 时，第一段由播放按钮（{@link #NO_PLAYABLE_LINES_PLAY_LABEL}）
+     * 说，状态行只说第二段「站点说：…」；没给 msg 时保持原来那句通用文案，绝不画空括号或 null。
+     */
+    static String deadEndStatus(String siteMessage) {
+        String said = Cms.siteMessageText(siteMessage);
+        return said.isEmpty() ? NO_PLAYABLE_LINES_STATUS : "站点说：" + said;
+    }
+
+    /**
+     * 我们自己网盘解析失败的实话（{@code GuardSpiderId.lastFailureReason()} /
+     * {@code QuarkShareResolver.lastFailureReason()} 那一套），同一位置给一行。空原因返回空串，
+     * 调用方据此不画。
+     */
+    static String ownFailureStatus(String reason) {
+        String said = Cms.siteMessageText(reason);
+        return said.isEmpty() ? "" : "本机解析：" + said;
+    }
+
+    /**
+     * 播放失败还停在详情页时，把 {@link #ownFailureStatus} 写进同一行状态位。原因字符串由
+     * {@code PlaybackController} 用现有 {@code netdiskRefusalReason()}（内部就是各解析器的
+     * {@code lastFailureReason()}）给出，这里不新造判据。
+     */
+    static void showOwnFailure(MainActivity a, String reason) {
+        String status = ownFailureStatus(reason);
+        if (status.isEmpty()) return;
+        TvV17DetailScreen.showActiveStatus(a, status);
+    }
+
+    /**
      * 排空后那颗搜索按钮的文案。详情页不再自动跳搜索页（{@code SourceAutoSwitch} 的
      * {@code searchWhenExhausted=false}），用户点它才 {@link MainActivity#openSearch}。
      */
@@ -972,13 +1002,15 @@ final class TvDetailHost {
                     // of the curated matching page when the ledger knows another source.
                     String fallbackTitle =
                             initialVideo.title != null ? initialVideo.title.trim() : "";
+                    // 站点自己说的话（空列表回包里的 msg）；没有就空串，界面保持通用文案。
+                    final String siteReply = SourceController.siteReply(error);
                     boolean switching =
                             SourceAutoSwitch.switchIfDefaultHasNoLines(
                                     a,
                                     site,
                                     activeVideo[0],
                                     valid,
-                                    detailExhaustedHint(a, ui, valid, fallbackTitle),
+                                    detailExhaustedHint(a, ui, valid, fallbackTitle, siteReply),
                                     false,
                                     cardSources);
                     // 提前探测这一轮已经排空了（它先于这次失败结束）：失败分支不再派发，这里直接
@@ -989,10 +1021,10 @@ final class TvDetailHost {
                         // 同样是"还可能有别的来源"：派发了探测就说正在尝试，别先报错。
                         ui.setLoadingStatus(SWITCHING_SOURCE_STATUS);
                     } else if (exhaustedBeforeFailure) {
-                        detailExhaustedHint(a, ui, valid, fallbackTitle).run();
+                        detailExhaustedHint(a, ui, valid, fallbackTitle, siteReply).run();
                     } else if (autoSwitchOff) {
                         // 开关关着：没有探过任何别的站，停在死路页，搜索入口留给用户自己点。
-                        ui.setLoadingStatus(NO_PLAYABLE_LINES_STATUS);
+                        ui.setLoadingStatus(deadEndStatus(siteReply));
                         ui.clearSourceSwitchInProgress(NO_PLAYABLE_LINES_PLAY_LABEL);
                         if (!fallbackTitle.isEmpty()) {
                             ui.setSourceSwitchAction(
@@ -1000,6 +1032,9 @@ final class TvDetailHost {
                                     () -> a.openSearch(fallbackTitle));
                         }
                         a.toast(AUTO_SWITCH_OFF_SEARCH_HINT);
+                    } else if (!siteReply.isEmpty()) {
+                        // 站点回的是空列表并给了原话：这是一条死路，不只是"加载失败"。
+                        ui.setLoadingStatus(deadEndStatus(siteReply));
                     } else {
                         ui.setLoadingStatus(a.message(error));
                     }
@@ -1171,10 +1206,20 @@ final class TvDetailHost {
 
     private static Runnable detailExhaustedHint(
             MainActivity a, TvV17DetailScreen ui, Valid valid, String title) {
+        return detailExhaustedHint(a, ui, valid, title, "");
+    }
+
+    private static Runnable detailExhaustedHint(
+            MainActivity a,
+            TvV17DetailScreen ui,
+            Valid valid,
+            String title,
+            String siteMessage) {
         final String query = title == null ? "" : title.trim();
+        final String status = deadEndStatus(siteMessage);
         return () -> {
             if (!valid.get()) return;
-            ui.setLoadingStatus(NO_PLAYABLE_LINES_STATUS);
+            ui.setLoadingStatus(status);
             ui.clearSourceSwitchInProgress(NO_PLAYABLE_LINES_PLAY_LABEL);
             if (query.isEmpty()) return;
             ui.setSourceSwitchAction(SEARCH_OTHER_SOURCES_LABEL, () -> a.openSearch(query));
@@ -1209,12 +1254,13 @@ final class TvDetailHost {
                         site,
                         resolved,
                         valid,
-                        detailExhaustedHint(a, ui, valid, resolved.title),
+                        detailExhaustedHint(a, ui, valid, resolved.title, resolved.siteMessage),
                         false,
                         cardSources);
         // 探测派出去了就先说"正在尝试其他来源"，别让那两秒显示成"没有线路"；
-        // 没派出去（账本没有别的站）才照旧说没有可播放线路。
-        ui.setLoadingStatus(switching ? SWITCHING_SOURCE_STATUS : NO_PLAYABLE_LINES_STATUS);
+        // 没派出去（账本没有别的站）才照旧说没有可播放线路（站点给了 msg 就接第二段）。
+        ui.setLoadingStatus(
+                switching ? SWITCHING_SOURCE_STATUS : deadEndStatus(resolved.siteMessage));
         if (switching) {
             // 播放按钮同步换成"正在换源…"并保持不可点：点了也播不出来。
             ui.showSourceSwitchInProgress(SWITCHING_SOURCE_PLAY_LABEL);

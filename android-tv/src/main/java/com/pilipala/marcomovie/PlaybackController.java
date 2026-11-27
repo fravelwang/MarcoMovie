@@ -251,6 +251,19 @@ final class PlaybackController {
      */
     static void failInPlaceSwitch(
             MainActivity a, Cms.Site s, PlaybackFailure.Attribution kind, String detail) {
+        failInPlaceSwitch(a, s, kind, detail, false);
+    }
+
+    /**
+     * @param showOnDetail 为真时，若这次失败还停在详情页，把同一句实话写进详情状态行
+     *     （{@code 本机解析：…}）。只给"我们自己的网盘解析失败"那几条路用；自动换源成功时不写。
+     */
+    static void failInPlaceSwitch(
+            MainActivity a,
+            Cms.Site s,
+            PlaybackFailure.Attribution kind,
+            String detail,
+            boolean showOnDetail) {
         PlaybackFailure.Attribution attributed =
                 kind == null ? PlaybackFailure.Attribution.UNKNOWN : kind;
         logAttribution(a, s, attributed, 0, 0);
@@ -262,6 +275,9 @@ final class PlaybackController {
         if (switchToNextLine(a, s, attributed)) return;
         String message =
                 attributed.text(userPicked ? withUserPickedHint(detail) : detail);
+        if (showOnDetail && a != null && (a.current == null || !a.current.player)) {
+            TvDetailHost.showOwnFailure(a, detail);
+        }
         if (a.playerChrome != null) a.playerChrome.setLoading(false);
         if (a.current != null && a.current.player) {
             if (a.playStatus != null) a.playStatus.setText(message);
@@ -783,7 +799,8 @@ final class PlaybackController {
                                                         a,
                                                         s,
                                                         PlaybackFailure.Attribution.SOURCE,
-                                                        refusal);
+                                                        refusal,
+                                                        true);
                                             });
                                     return;
                                 }
@@ -1035,7 +1052,8 @@ final class PlaybackController {
                                                                 a,
                                                                 s,
                                                                 PlaybackFailure.Attribution.SOURCE,
-                                                                netdiskRefusal);
+                                                                netdiskRefusal,
+                                                                true);
                                                     } else if (!spiderMsg.isEmpty()) {
                                                         failInPlaceSwitch(
                                                                 a,
@@ -1053,7 +1071,8 @@ final class PlaybackController {
                                                                 PlaybackFailure.Attribution.SOURCE,
                                                                 refusal.isEmpty()
                                                                         ? "该网盘线路未返回播放地址，请先在顶部「网盘」里扫码登录对应网盘，或点击右上角 ⇄ 切换其他线路"
-                                                                        : refusal);
+                                                                        : refusal,
+                                                                true);
                                                     } else {
                                                         failInPlaceSwitch(
                                                                 a,

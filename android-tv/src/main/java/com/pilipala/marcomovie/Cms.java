@@ -297,6 +297,11 @@ public final class Cms {
                 tag,
                 doubanScore = "",
                 doubanId = "";
+        /**
+         * 详情回包顶层的 {@code msg}/{@code message}/{@code errMsg} 原话。空串表示站点没给。
+         * 只用于详情死路页上屏（见 {@code TvDetailHost}），不参与匹配或缓存键。
+         */
+        public String siteMessage = "";
         public final List<Line> lines = new ArrayList<>();
     }
 
@@ -336,6 +341,11 @@ public final class Cms {
     public static final class Listing {
         public int page = 1, pageCount = 1;
         public final List<Video> videos = new ArrayList<>();
+        /**
+         * 站点自己在回包里说的话（{@code msg}/{@code message}/{@code errMsg}）。空列表时它才
+         * 是"为什么没有线路"的唯一线索，所以解析层不能丢（见 {@link #siteMessageText}）。
+         */
+        public String message = "";
     }
 
     public static final class ImageRequest {
@@ -2781,6 +2791,70 @@ public final class Cms {
         return v;
     }
 
+    /**
+     * 站点在回包里自己说的话。三个键都见过（花卷用 {@code msg}，百度/夸克接口用 {@code message}，
+     * 个别采集站用 {@code errMsg}），只认字符串，避免把 JSONObject 的 toString 当人话。
+     */
+    private static String listingMessage(JSONObject o) {
+        if (o == null) return "";
+        for (String field : new String[] {"msg", "message", "errMsg"}) {
+            Object value = o.opt(field);
+            if (!(value instanceof String)) continue;
+            String text = ((String) value).trim();
+            if (!text.isEmpty()) return text;
+        }
+        return "";
+    }
+
+    /**
+     * 死路页上屏前的清理：去换行、去 HTML 标签、压空白、截到 60 字以内；空/纯空白/成功占位词
+     * （见 {@link #isGenericSiteMessage}）返回空串。调用方据此决定要不要画第二行 —— 空串时绝不
+     * 显示「站点说：」或 {@code null}。
+     */
+    static String siteMessageText(String raw) {
+        String text = raw == null ? "" : raw;
+        if (text.isEmpty()) return "";
+        text = text.replace('\r', ' ').replace('\n', ' ');
+        text = text.replaceAll("<[^>]*>", " ");
+        text = text.replace("&nbsp;", " ")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&amp;", "&");
+        text = text.replaceAll("\\s+", " ").trim();
+        if (text.isEmpty() || isGenericSiteMessage(text)) return "";
+        if (text.length() > 60) text = text.substring(0, 59) + "…";
+        return text;
+    }
+
+    /**
+     * 采集站的成功回包也带 {@code msg}（非凡/360/量子/天堂实测都是「数据列表」）。这句不是失败
+     * 原因，画到死路页就是 Boss 说的"空话"；只认这一小撮固定占位词，别把真正的报错过滤掉。
+     */
+    private static boolean isGenericSiteMessage(String text) {
+        switch (text.toLowerCase(Locale.ROOT)) {
+            case "数据列表":
+            case "数据详情":
+            case "数据":
+            case "成功":
+            case "请求成功":
+            case "获取成功":
+            case "操作成功":
+            case "ok":
+            case "success":
+            case "true":
+            case "null":
+            case "无":
+            case "空":
+            case "暂无数据":
+            case "无数据":
+                return true;
+            default:
+                return false;
+        }
+    }
+
     public static Listing listing(String json) throws Exception {
         if (json != null && json.trim().startsWith("<")) {
             Listing l = new Listing();
@@ -2826,10 +2900,13 @@ public final class Cms {
             return l;
         }
         JSONObject o = new JSONObject(json);
+        String message = listingMessage(o);
         if (!o.has("list") && o.optJSONObject("data") != null) {
             o = o.getJSONObject("data");
+            if (message.isEmpty()) message = listingMessage(o);
         }
         Listing l = new Listing();
+        l.message = message;
         l.page = Math.max(1, o.optInt("page", 1));
         l.pageCount = Math.max(l.page, o.optInt("pagecount", l.page));
         JSONArray a = o.optJSONArray("list");

@@ -956,7 +956,28 @@ final class SourceController {
                                             timing.returned = SystemClock.elapsedRealtime();
                                 if (Thread.currentThread().isInterrupted()) return;
                                 MediaDetail detail = gateway.parseDetail(raw);
-                                if (detail == null) throw new IOException("来源没有返回影片详情");
+                                if (detail == null || detail.meta == null) {
+                                    // 站点回的是空列表：它的 msg 就是"为什么没有线路"的唯一原文。
+                                    // 先原样留一行日志，再把清理后的话交给界面上屏（见
+                                    // TvDetailHost 的死路页第二行）。
+                                    String said = Cms.siteMessageText(detail == null ? "" : detail.message);
+                                    AppLog.w(
+                                            "SourceController",
+                                            "detail reply empty site="
+                                                    + (site == null ? "-" : site.key)
+                                                    + " body="
+                                                    + clipDetailBody(raw));
+                                    if (said.isEmpty()) throw new IOException("来源没有返回影片详情");
+                                    throw new SiteReplyException(said);
+                                }
+                                if (!detail.message.trim().isEmpty()) {
+                                    AppLog.w(
+                                            "SourceController",
+                                            "detail site message site="
+                                                    + (site == null ? "-" : site.key)
+                                                    + " msg="
+                                                    + Cms.siteMessageText(detail.message));
+                                }
                                 timing.parsed = SystemClock.elapsedRealtime();
                                 Cms.Video video = gateway.toVideo(detail);
                                 if ((video.id == null || video.id.trim().isEmpty()) && id != null) {
@@ -1075,6 +1096,36 @@ final class SourceController {
     private static final String GENERIC_MESSAGE =
             "连接超时、来源不可达或数据格式不受支持。请检查配置与网络后重试。";
 
+    /**
+     * 站点回了空列表、但自己给了一句 msg。带上这句原文，界面才能在死路页写第二行
+     * 「站点说：…」；不是新的一套错误分类，只是把 {@link Cms.Listing#message} 送到调用方。
+     */
+    static final class SiteReplyException extends IOException {
+        final String siteMessage;
+
+        SiteReplyException(String siteMessage) {
+            super(siteMessage);
+            this.siteMessage = siteMessage == null ? "" : siteMessage;
+        }
+    }
+
+    /** 详情失败时站点自己的原话；不是 {@link SiteReplyException} 返回空串。 */
+    static String siteReply(Throwable error) {
+        return error instanceof SiteReplyException
+                ? ((SiteReplyException) error).siteMessage
+                : "";
+    }
+
+    /**
+     * 原始回包压成一行日志（换行压空格、最多 240 字）。只用于"空列表"这一种回包，
+     * 平时不落响应体。
+     */
+    private static String clipDetailBody(String raw) {
+        if (raw == null) return "";
+        String body = raw.replace('\r', ' ').replace('\n', ' ').trim();
+        return body.length() > 240 ? body.substring(0, 240) + "…" : body;
+    }
+
     static String message(Throwable e) {
         return message(e, 0);
     }
@@ -1103,6 +1154,7 @@ final class SourceController {
         String s = e.getMessage();
         // 站点侧已关闭/异常（closed 文本、NPE、5xx）：这句人话原样给用户，不再套"扩展来源请求失败"。
         if (e instanceof SourceClosedException && s != null && !s.isEmpty()) return s;
+        if (e instanceof SiteReplyException) return ((SiteReplyException) e).siteMessage;
         if (e instanceof CspEngine.EngineException) return s;
         if (e instanceof com.pilipala.catpaw.CatPawHost.DrpySourceException
                 && s != null
