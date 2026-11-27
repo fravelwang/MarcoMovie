@@ -34,9 +34,19 @@ final class DetailScreen {
     private DetailScreen() {}
 
     static void show(MainActivity a, Cms.Site s, Cms.Video listing, Cms.Video ready) {
+        show(a, s, listing, ready, null);
+    }
+
+    /** TV 详情页还需要墙卡自带的候选池；手机壳不跑自动换源，忽略即可。 */
+    static void show(
+            MainActivity a,
+            Cms.Site s,
+            Cms.Video listing,
+            Cms.Video ready,
+            SourceLedger.Sources cardSources) {
         if (a.redirectListing(s, listing)) return;
         if (a.isTvDevice()) {
-            TvDetailHost.show(a, s, listing, ready);
+            TvDetailHost.show(a, s, listing, ready, cardSources);
             return;
         }
         a.renderPage("", "", false);

@@ -820,16 +820,42 @@ public final class MainActivity extends Activity {
      * page's 换站观看, folder/action cards from a site's own list, and settings previews.
      */
     void openTitle(Cms.Video video) {
+        openTitle(video, null);
+    }
+
+    /**
+     * 带"卡片自带来源"的版本：片库墙卡片把 {@link LibraryAggregator.Item#sites} 交进来，详情页失败时
+     * 自动换源就以它为候选（见 {@link SourceLedger#resolve(MainActivity, Cms.Video, SourceLedger.Sources)}），
+     * 账本只作补充。其他入口（首页海报、搜索卡、收藏）没有这份记录，传 null 即旧行为。
+     */
+    void openTitle(Cms.Video video, SourceLedger.Sources cardSources) {
         if (video == null) return;
         clearCuratedFallback();
-        SourceLedger.Sources resolved = SourceLedger.resolve(this, video);
+        SourceLedger.Sources resolved = SourceLedger.resolve(this, video, cardSources);
+        if (cardSources != null && !cardSources.isEmpty()) {
+            StringBuilder keys = new StringBuilder();
+            for (Cms.Site cardSite : cardSources.sites) {
+                if (cardSite == null || cardSite.key == null) continue;
+                if (keys.length() > 0) keys.append(',');
+                keys.append(cardSite.key);
+            }
+            AppLog.w(
+                    "MainActivity",
+                    "openTitle "
+                            + video.title
+                            + " card sources="
+                            + cardSources.count()
+                            + " ["
+                            + keys
+                            + "]");
+        }
         if (resolved.defaultSite != null && resolved.defaultListing != null) {
             if (TvCuratedHome.isCuratedVideo(video)) {
                 // A catalog title opened through a site: if that site cannot produce the detail,
                 // fall back to the matching page rather than a dead end.
                 rememberCuratedFallback(video, resolved.defaultSite, resolved.defaultListing);
             }
-            openListing(resolved.defaultSite, resolved.defaultListing);
+            openListing(resolved.defaultSite, resolved.defaultListing, cardSources);
             return;
         }
         TvDetailHost.openCurated(this, video);
@@ -901,6 +927,14 @@ public final class MainActivity extends Activity {
      * redirect page in the back stack.
      */
     void openListing(Cms.Site s, Cms.Video v) {
+        openListing(s, v, null);
+    }
+
+    /**
+     * {@link #openListing(Cms.Site, Cms.Video)} 加一片卡片来源候选：自动换源换到目标站后，目标页
+     * 失败时还要能继续问这张卡记录的其余站，所以池子跟着标题一起走到新页面。
+     */
+    void openListing(Cms.Site s, Cms.Video v, SourceLedger.Sources cardSources) {
         if (v == null) return;
         if (v.action != null && !v.action.isEmpty()) {
             sourceAction(s, v.action);
@@ -922,7 +956,7 @@ public final class MainActivity extends Activity {
             SourceController.sourceAction(this, s, v.id, true);
             return;
         }
-        open(new Screen(() -> detail(s, v)), true);
+        open(new Screen(() -> detail(s, v, null, cardSources)), true);
     }
 
     /**
@@ -2846,16 +2880,21 @@ public final class MainActivity extends Activity {
     }
 
     void detail(Cms.Site s, Cms.Video listing) {
-        detail(s, listing, null);
+        detail(s, listing, null, null);
     }
 
     void detail(Cms.Site s, Cms.Video listing, Cms.Video ready) {
+        detail(s, listing, ready, null);
+    }
+
+    void detail(
+            Cms.Site s, Cms.Video listing, Cms.Video ready, SourceLedger.Sources cardSources) {
         rememberSeries(s, ready != null ? ready : listing);
         if (!isTvDevice()) {
             MobileDetailScreen.show(this, s, listing, ready);
             return;
         }
-        DetailScreen.show(this, s, listing, ready);
+        DetailScreen.show(this, s, listing, ready, cardSources);
         if (root != null && android.os.Build.VERSION.SDK_INT > 23) {
             activeTransition = PlayerTransitionHelper.animateTvPageFade(root, true, reduced, null);
         }

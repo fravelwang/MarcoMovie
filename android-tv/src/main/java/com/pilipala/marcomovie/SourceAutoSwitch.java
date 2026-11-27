@@ -39,9 +39,10 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>只跳一次：换站走 {@link MainActivity#openListing}，目标站会重建页面；探过的站记在
  * {@link #AUTO_SWITCH_TRIED} 里 {@link #AUTO_SWITCH_RETRY_MS} 毫秒，同一部片不会因为反复进详情
- * 变成无休止的换站接力。账本里的站全都播不了时，{@link #switchIfDefaultHasNoLines} 这条来路会
- * 回落到"按标题搜索"（{@link #crossSiteSearch}）：账本外的站（例如能播的 360资源）只有这条路
- * 走得到，而自动换源只在账本内挑。
+ * 变成无休止的换站接力。账本里的站全都播不了时，{@link #switchIfDefaultHasNoLines} 这条来路按
+ * {@code searchWhenExhausted} 分两收尾：为真回落到"按标题搜索"（{@link #crossSiteSearch}，账本外
+ * 的站例如能播的 360资源 只有这条路走得到）；为假（详情页）留在详情页，把"搜索其他来源"交给用户
+ * 自己点。
  *
  * <p>探测直接走防腐层（{@link FongMiGateway#detailRaw} + {@link FongMiGateway#parseDetail}），
  * 不走 {@code SourceController.loadDetail}：那条路会往 UI 投递、会写详情缓存，探测不能有副作用。
@@ -50,6 +51,15 @@ import java.util.concurrent.atomic.AtomicLong;
 final class SourceAutoSwitch {
     /** How many ledger-known sites one automatic switch may probe in the background. */
     private static final int AUTO_SWITCH_PROBE_LIMIT = 6;
+
+    /**
+     * 调用方给了"卡片自带来源"时的上限：一张墙卡自己说 N 源，就该把这 N 个站都当候选问一遍，
+     * 不能拿账本那条 6 个的上限把后半截（例如配置末尾的 w2x_ 站）静悄悄截掉。
+     *
+     * <p>为什么不是无限：卡片来自一次墙聚合，最多也就几十个站；真正的并发由详情池和"换站定了
+     * 就停派发"两道闸门约束，24 个只是给候选表一个硬顶，不是并发数。
+     */
+    private static final int AUTO_SWITCH_CARD_PROBE_LIMIT = 24;
 
     /** A site probed by the automatic switch is not probed again for this long. */
     private static final long AUTO_SWITCH_RETRY_MS = 60000L;
@@ -131,6 +141,11 @@ final class SourceAutoSwitch {
      * {@link #crossSiteSearch}: the ledger only ever holds a handful of sites, and the ones that can
      * play are often outside it.
      *
+     * <p>{@code searchWhenExhausted} 就是这条跨站回落的闸门。为真时保持原来的收尾：一轮全灭就按
+     * 标题跳搜索页。为假时（详情页三条来路都传假）只把调用方给的排空态还回去，页面留在原地；想搜的
+     * 用户自己点详情页上那颗「🔍 全站搜其他源」。{@link #crossSiteSearch} 因此不再由详情页自动
+     * 触发，只有用户点了那颗按钮才会走到 {@link MainActivity#openSearch}。
+     *
      * @return true when a probe round was dispatched; the page may switch asynchronously later
      */
     static boolean switchIfDefaultHasNoLines(
@@ -139,10 +154,49 @@ final class SourceAutoSwitch {
             Cms.Video video,
             TvDetailHost.Valid valid,
             Runnable onExhausted) {
+        return switchIfDefaultHasNoLines(a, site, video, valid, onExhausted, true);
+    }
+
+    /**
+     * 带闸门的版本；{@code searchWhenExhausted} 为假即"排空不跳页"，详情页三条来路都走它。
+     *
+     * @param searchWhenExhausted 一轮全灭时要不要自动跳搜索页；详情页传 false，留在详情页
+     * @return true when a probe round was dispatched; the page may switch asynchronously later
+     */
+    static boolean switchIfDefaultHasNoLines(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            TvDetailHost.Valid valid,
+            Runnable onExhausted,
+            boolean searchWhenExhausted) {
+        return switchIfDefaultHasNoLines(
+                a, site, video, valid, onExhausted, searchWhenExhausted, null);
+    }
+
+    /**
+     * 带"卡片自带来源"的版本：{@code cardSources} 就是片库墙卡片自己那一轮的来源（{@code Item.sites}），
+     * 与账本合并去重后当候选，卡片在前、账本补充。
+     *
+     * <p>日志按站逐条写：{@code probe <site key> detail ok} / {@code fail(<原因>)}，所以 w2x_ 前缀
+     * 的站被问到与否在 logcat 里一眼可见。
+     *
+     * @param cardSources 调用方给的候选池（墙卡自带来源），可 null
+     * @param searchWhenExhausted 一轮全灭时要不要自动跳搜索页；详情页传 false，留在详情页
+     * @return true when a probe round was dispatched; the page may switch asynchronously later
+     */
+    static boolean switchIfDefaultHasNoLines(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            TvDetailHost.Valid valid,
+            Runnable onExhausted,
+            boolean searchWhenExhausted,
+            SourceLedger.Sources cardSources) {
         if (a == null || site == null || video == null || valid == null) return false;
         // A local-drive listing is a file on disk, not a site: never hand it to a web source.
         if (LocalMediaLibrary.LOCAL_SITE_KEY.equals(site.key)) return false;
-        SourceLedger.Sources known = SourceLedger.resolve(a, video);
+        SourceLedger.Sources known = SourceLedger.resolve(a, video, cardSources);
         if (known == null || known.isEmpty()) return false;
         // 默认源已经判定失败，所以提示词说"没有可播放线路"。
         boolean dispatched =
@@ -153,9 +207,15 @@ final class SourceAutoSwitch {
                         valid,
                         known,
                         "没有可播放线路",
-                        crossSiteSearch(a, video, onExhausted),
-                        true);
+                        searchWhenExhausted
+                                ? crossSiteSearch(a, video, onExhausted)
+                                : onExhausted,
+                        true,
+                        cardSources);
         if (dispatched) return true;
+        // 不跳页的来路到这里就结束：没有候选可探时页面保持调用方给的状态。上一轮"探光了"的便条
+        // 只服务于"再搜一次"那条旧收尾，这里不消费它。
+        if (!searchWhenExhausted) return false;
         // 这一轮派不出去（账本里没有可探的候选），但这部片刚被上一轮探光过 —— 典型来路是网盘默认源：
         // probeAhead 15 秒就先探了一轮、全灭，详情到 31 秒才报错，此时 60 秒记忆让上面的探测一个候选
         // 都拿不到。跨站回落不能因为这段记忆丢掉，否则"账本里都不行"的结论就白下了。
@@ -184,11 +244,14 @@ final class SourceAutoSwitch {
      * 等待里拽到搜索页是抢跑。
      *
      * <p>记忆仍在真正派发探测时写，所以默认源稍后真的失败、走到 {@link #switchIfDefaultHasNoLines} 时，
-     * 不会把同一批站再探一遍。但"这一轮已经探光了"这件事会经 {@link #AUTO_SWITCH_EXHAUSTED} 递过去：
-     * 那次失败照样能走到跨站回落，不至于因为 60 秒记忆而停在死路上。
+     * 不会把同一批站再探一遍。{@code searchWhenExhausted} 为真时，"这一轮已经探光了"会经
+     * {@link #AUTO_SWITCH_EXHAUSTED} 递给紧随其后的那次失败，让它照样走到跨站回落；为假（详情页）
+     * 时不留这张便条 —— 失败分支自己会落到"没有可播放线路 + 用户自己点搜索"，不需要也不该被一张
+     * 便条拽去搜索页。
      *
      * @param settled 详情是否已经落地（{@code TvDetailHost} 的 {@code detailSettled}）；null 当"还没落地"
      * @param onExhausted 一轮探完全部候选、一个能播的都没有时回调（UI 线程，只回调一次，可 null）
+     * @param searchWhenExhausted 排空后要不要为"稍后的失败"留下跨站搜索的便条；详情页传 false
      * @return true 表示延迟检查已挂上；页面可能稍后异步换站
      */
     static boolean probeAhead(
@@ -197,12 +260,30 @@ final class SourceAutoSwitch {
             Cms.Video video,
             TvDetailHost.Valid valid,
             boolean[] settled,
-            Runnable onExhausted) {
+            Runnable onExhausted,
+            boolean searchWhenExhausted) {
+        return probeAhead(
+                a, site, video, valid, settled, onExhausted, searchWhenExhausted, null);
+    }
+
+    /**
+     * 带"卡片自带来源"的提前探测：候选池与 {@link #switchIfDefaultHasNoLines} 同源，卡片在前、
+     * 账本补充；{@code cardSources} 让卡片上那些账本还不认识的站（w2x_ 那批）也能提前问详情。
+     */
+    static boolean probeAhead(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            TvDetailHost.Valid valid,
+            boolean[] settled,
+            Runnable onExhausted,
+            boolean searchWhenExhausted,
+            SourceLedger.Sources cardSources) {
         if (a == null || site == null || video == null || valid == null) return false;
         if (LocalMediaLibrary.LOCAL_SITE_KEY.equals(site.key)) return false;
         // 只有网盘站的详情会慢到值得提前探；普通站慢是另一回事，不在这里赌。
         if (!SourcePreferences.netdiskNamed(site)) return false;
-        final SourceLedger.Sources known = SourceLedger.resolve(a, video);
+        final SourceLedger.Sources known = SourceLedger.resolve(a, video, cardSources);
         // "第一次打开别再等两分钟"同一条判据：账本只认识一个站时没有候选可探。
         if (known == null || known.count() < 2) return false;
         if (!hasOrdinaryCandidate(known, site.key)) return false;
@@ -213,7 +294,15 @@ final class SourceAutoSwitch {
                     if (settled != null && settled[0]) return;
                     // 默认源这会儿只是在加载，还没失败。
                     probeAndSwitch(
-                            a, site, video, valid, known, "加载慢", onExhausted, false);
+                            a,
+                            site,
+                            video,
+                            valid,
+                            known,
+                            "加载慢",
+                            onExhausted,
+                            !searchWhenExhausted,
+                            cardSources);
                 },
                 TvDetailHost.PROBE_AHEAD_DELAY_MS);
         return true;
@@ -221,16 +310,17 @@ final class SourceAutoSwitch {
 
     /**
      * 探测与换站的唯一实现：{@link #switchIfDefaultHasNoLines} 与 {@link #probeAhead} 都走这里，
-     * 区别只有进门的闸门、{@code why} 那句提示词，以及一轮全灭时收不收尾到跨站搜索
-     * （{@code crossSiteFallback}）。
+     * 区别只有进门的闸门、{@code why} 那句提示词，以及一轮全灭时这一轮自己收不收干净
+     * （{@code settlesOwnExhaustion}）。
      *
      * <p>{@code onExhausted} 是"一轮探完、一个能播的都没有"的收尾通知：调用方在派发探测时往往已经把
      * 页面切成"正在尝试其他来源…"，探完没命中必须让它收回去，否则那句过渡态就成了新的死路。所以这里
      * 只在 {@link SourcePlan#pick} 仍为空、这一轮从没换过站（{@code claimed} 一直 false）时回调一次。
      * 成功换站不回调。
      *
-     * @param crossSiteFallback 这一轮全灭时由 {@code onExhausted} 自己收尾到跨站搜索：为真时不再留
-     *     {@link #AUTO_SWITCH_EXHAUSTED} 那张便条，否则同一部片会被"整轮全灭"的结论拽两次搜索页
+     * @param settlesOwnExhaustion 这一轮全灭时自己的收尾已经完整（跳搜索页或把详情页恢复成死路态）：
+     *     为真时不再留 {@link #AUTO_SWITCH_EXHAUSTED} 那张便条，否则同一部片会被"整轮全灭"的结论
+     *     处理两次。为假表示结论要交给紧随其后的那次失败去执行。
      */
     private static boolean probeAndSwitch(
             MainActivity a,
@@ -240,13 +330,19 @@ final class SourceAutoSwitch {
             SourceLedger.Sources known,
             String why,
             Runnable onExhausted,
-            boolean crossSiteFallback) {
+            boolean settlesOwnExhaustion,
+            SourceLedger.Sources cardSources) {
         final long now = android.os.SystemClock.elapsedRealtime();
         final List<Cms.Site> candidates = new ArrayList<>();
         final List<Cms.Video> listings = new ArrayList<>();
         final List<SiteRef> probed = new ArrayList<>();
         final Map<String, Cms.Site> siteByKey = new HashMap<>();
         final Map<String, Cms.Video> listingByKey = new HashMap<>();
+        // 卡片自己说 N 源，就把这 N 个都当候选；账本补充的候选仍用原来的 6 个上限。
+        final int probeLimit =
+                cardSources != null && !cardSources.isEmpty()
+                        ? AUTO_SWITCH_CARD_PROBE_LIMIT
+                        : AUTO_SWITCH_PROBE_LIMIT;
         synchronized (AUTO_SWITCH_TRIED) {
             // 60 秒记忆：先清过期项，再把"这部片这次已经探过的站"交给领域层跳过。
             for (Iterator<Long> it = AUTO_SWITCH_TRIED.values().iterator(); it.hasNext(); ) {
@@ -255,11 +351,19 @@ final class SourceAutoSwitch {
             final List<SourcePlan.Candidate> eligible = new ArrayList<>();
             final Set<String> skip = new HashSet<>();
             for (Cms.Site candidate : known.sites) {
-                if (candidate == null || candidate.key == null) continue;
+                if (candidate == null || candidate.key == null || candidate.key.isEmpty()) continue;
                 Cms.Video listing = known.listingAt(candidate.key);
-                if (listing == null || listing.id == null || listing.id.trim().isEmpty()) continue;
+                if (listing == null || listing.id == null || listing.id.trim().isEmpty()) {
+                    AppLog.w(
+                            "AutoSwitch",
+                            "probe " + candidate.key + " detail skip(no listing)");
+                    continue;
+                }
+                if (candidate.key.equals(site.key)) continue;
                 if (AUTO_SWITCH_TRIED.containsKey(autoSwitchKey(video, candidate.key))) {
                     skip.add(candidate.key);
+                    AppLog.w("AutoSwitch", "probe " + candidate.key + " detail skip(recent)");
+                    continue;
                 }
                 eligible.add(
                         new SourcePlan.Candidate(
@@ -268,15 +372,24 @@ final class SourceAutoSwitch {
                 siteByKey.put(candidate.key, candidate);
                 listingByKey.put(candidate.key, listing);
             }
-            // 顺序（普通站优先、同档账本序）和上限都由领域层给；这里只记住"探了哪几个"。
-            for (SourcePlan.Candidate chosen :
-                    SourcePlan.probeOrder(
-                            eligible, site.key, skip, AUTO_SWITCH_PROBE_LIMIT)) {
-                String key = chosen.site.key;
+            // 顺序（普通站优先、同档候选序）和上限都由领域层给；这里只记住"探了哪几个"。
+            final List<SourcePlan.Candidate> chosen =
+                    SourcePlan.probeOrder(eligible, site.key, skip, probeLimit);
+            final Set<String> chosenKeys = new HashSet<>();
+            for (SourcePlan.Candidate candidate : chosen) {
+                String key = candidate.site.key;
+                chosenKeys.add(key);
                 candidates.add(siteByKey.get(key));
                 listings.add(listingByKey.get(key));
-                probed.add(chosen.site);
+                probed.add(candidate.site);
                 AUTO_SWITCH_TRIED.put(autoSwitchKey(video, key), now);
+            }
+            // 被上限截掉的也留一条：卡片上的站没被问到时，logcat 能直接看出是"截断"不是"没来源"。
+            for (SourcePlan.Candidate candidate : eligible) {
+                String key = candidate.site.key;
+                if (!chosenKeys.contains(key)) {
+                    AppLog.w("AutoSwitch", "probe " + key + " detail skip(limit)");
+                }
             }
         }
         if (candidates.isEmpty()) return false;
@@ -289,10 +402,11 @@ final class SourceAutoSwitch {
                         valid,
                         why,
                         onExhausted,
-                        crossSiteFallback,
+                        settlesOwnExhaustion,
                         probed,
                         siteByKey,
-                        listingByKey);
+                        listingByKey,
+                        cardSources);
         final FongMiGateway gateway = new FongMiGateway(a);
         // 探测这一趟属于哪个引擎世代：换代之后这次取到的原文不能再按新键写进缓存。
         final int probeEpoch = a.engineEpoch;
@@ -309,28 +423,38 @@ final class SourceAutoSwitch {
                         // 让出线程给新页面的详情请求（否则缓存命中也得排在它们后面）。
                         if (round.closed.get()) return;
                         DetailVerdict verdict = DetailVerdict.NONE;
+                        boolean detailOk = false;
+                        String failReason = null;
                         try {
                             String raw = gateway.detailRaw(siteRef, listing.id, null);
                             MediaDetail detail = gateway.parseDetail(raw);
                             if (detail != null && detail.playable()) {
                                 verdict = verdictFor(a, candidateSite, detail);
+                                if (verdict.capability == SourcePlan.Capability.NONE) {
+                                    failReason = "no usable line";
+                                } else {
+                                    detailOk = true;
+                                }
                                 // 这趟网络代价已经付过了：把原文喂给详情缓存，换站后新页面按同一个
                                 // id 取详情时直接命中，不必再等第二趟（写前 rememberDetail 再判可播）。
                                 if (raw != null && probeEpoch == a.engineEpoch) {
                                     SourceController.rememberDetail(
                                             a, candidateSite, listing.id, raw);
                                 }
+                            } else {
+                                failReason = detail == null ? "detail null" : "no playable line";
                             }
                         } catch (GatewayException failure) {
+                            failReason = failure.kind + " " + failure.getMessage();
+                        } catch (Throwable failure) {
+                            failReason = String.valueOf(failure);
+                        }
+                        if (failReason != null) {
                             AppLog.w(
                                     "AutoSwitch",
-                                    siteRef.key
-                                            + " probe: "
-                                            + failure.kind
-                                            + " "
-                                            + failure.getMessage());
-                        } catch (Throwable failure) {
-                            AppLog.w("AutoSwitch", siteRef.key + " probe: " + failure);
+                                    "probe " + siteRef.key + " detail fail(" + failReason + ")");
+                        } else if (detailOk) {
+                            AppLog.w("AutoSwitch", "probe " + siteRef.key + " detail ok");
                         }
                         if (verdict.target == null) {
                             round.answer(siteRef, verdict.capability);
@@ -351,6 +475,9 @@ final class SourceAutoSwitch {
      *
      * <p>顺序是先收尾再切页：调用方的 {@code onExhausted} 负责把那句"正在尝试其他来源…"换回它
      * 自己的死路文案，页面随后就被搜索页替掉，不留半句过渡态。
+     *
+     * <p>只有 {@code searchWhenExhausted} 为真的来路会走到这里。详情页三条来路都传假：排空后留在
+     * 详情页，由那颗用户自己点的「🔍 全站搜其他源」调 {@link MainActivity#openSearch}。
      */
     private static Runnable crossSiteSearch(
             MainActivity a, Cms.Video video, Runnable onExhausted) {
@@ -379,11 +506,13 @@ final class SourceAutoSwitch {
         final TvDetailHost.Valid valid;
         final String why;
         final Runnable onExhausted;
-        /** 这一轮全灭时 {@code onExhausted} 自己会收尾到跨站搜索（见 {@link #exhaust} 的便条）。 */
-        final boolean crossSiteFallback;
+        /** 这一轮全灭时自己的收尾已经完整（跳搜索页或恢复详情页死路态），不再留便条。 */
+        final boolean settlesOwnExhaustion;
         final List<SiteRef> probed;
         final Map<String, Cms.Site> siteByKey;
         final Map<String, Cms.Video> listingByKey;
+        /** 调用方给的卡片来源池：换站到目标页后还要继续用它，见 {@link #switchTo}。 */
+        final SourceLedger.Sources cardSources;
         /** 已答的站：site key → 能力；缺项按"还没答"处理（{@link SourcePlan#settled} 的输入）。 */
         final Map<String, SourcePlan.Capability> answers = new HashMap<>();
 
@@ -404,20 +533,22 @@ final class SourceAutoSwitch {
                 TvDetailHost.Valid valid,
                 String why,
                 Runnable onExhausted,
-                boolean crossSiteFallback,
+                boolean settlesOwnExhaustion,
                 List<SiteRef> probed,
                 Map<String, Cms.Site> siteByKey,
-                Map<String, Cms.Video> listingByKey) {
+                Map<String, Cms.Video> listingByKey,
+                SourceLedger.Sources cardSources) {
             this.a = a;
             this.from = from;
             this.video = video;
             this.valid = valid;
             this.why = why;
             this.onExhausted = onExhausted;
-            this.crossSiteFallback = crossSiteFallback;
+            this.settlesOwnExhaustion = settlesOwnExhaustion;
             this.probed = probed;
             this.siteByKey = siteByKey;
             this.listingByKey = listingByKey;
+            this.cardSources = cardSources;
         }
 
         /** 记一个候选的答复；答案表够判了就判，判完要么换站、要么收尾。 */
@@ -578,8 +709,10 @@ final class SourceAutoSwitch {
                         // 14 集，下标跨站没有意义，线路名在目标站更可能压根不存在。
                         a.prepareSiteHandover(target, targetListing, video, null, null, null);
                         // Same entry point the 换站观看 picker uses: the page is
-                        // rebuilt on that site and the ledger keeps its own order.
-                        a.openListing(target, targetListing);
+                        // rebuilt on that site and the ledger keeps its own order. The card pool
+                        // travels with it so the target page can still ask the remaining card
+                        // sources if this switch itself turns out to be a dead end.
+                        a.openListing(target, targetListing, cardSources);
                         // 轻提示，不打断：换站本来就不该让用户每跳一次按一下「知道了」。
                         a.toast("「" + fromName + "」" + why + "，已换到「" + sourceName(target) + "」");
                     });
@@ -588,13 +721,14 @@ final class SourceAutoSwitch {
         /**
          * 一轮探完、一个能播的都没有：把调用方那片过渡态还回去。
          *
-         * <p>顺手给"这部片被探光了"留张便条，但只在这一轮自己不搜索时留（{@code crossSiteFallback}
-         * 为假，也就是 {@link #probeAhead} 那条来路）：它的结论要交给紧随其后的那次失败去执行。
-         * 已经搜过的那一轮不留，否则同一部片再失败一次就又被弹回搜索页。
+         * <p>顺手给"这部片被探光了"留张便条，但只在这一轮自己还不收尾时留
+         * （{@code settlesOwnExhaustion} 为假，也就是 {@code probeAhead} 那条要跨站搜索的来路）：
+         * 它的结论要交给紧随其后的那次失败去执行。已经自己收尾的那一轮不留，否则同一部片会被同一条
+         * 结论处理两次。
          */
         private void exhaust() {
             AppLog.w("AutoSwitch", "no playable candidate for " + title());
-            if (!crossSiteFallback) markExhausted(video);
+            if (!settlesOwnExhaustion) markExhausted(video);
             final Runnable callback = onExhausted;
             if (callback == null) return;
             a.ui.post(

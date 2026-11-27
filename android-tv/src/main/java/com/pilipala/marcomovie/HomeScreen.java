@@ -956,6 +956,9 @@ final class HomeScreen {
         LibraryModel model = LibraryModel.from(result, filter.mode, a.sourceLedger);
         List<LibraryModel.MergedItem> visible = LibraryQuery.visible(model, filter);
         for (LibraryModel.MergedItem item : visible) videos.add(item.video);
+        // Diagnostic for "which wall cards actually sampled a w2x_ site": the card pool only lives
+        // in this round, and without this line picking a card that exercises it is guesswork.
+        logWallSourcePools(result);
         // 一轮一次批量上报：这就是本轮墙上可见的那批卡片，账本清理时不许把它们当 LRU 淘汰对象。
         reportWallTitles(visible);
 
@@ -2911,6 +2914,91 @@ final class HomeScreen {
     /** The sites that carry this card, read from the one source ledger in playback order. */
     List<Cms.Site> wallSources(Cms.Video video) {
         return SourceLedger.resolve(a, video).sites;
+    }
+
+    /**
+     * The candidate pool this wall card carries: every site its aggregation round actually sampled
+     * for the title, with that site's own listing. It is the card's own record ("N 源" came from
+     * these) and outlives nothing but the round — the ledger is the long-term memory and only
+     * supplements it in {@link SourceLedger#resolve(MainActivity, Cms.Video, SourceLedger.Sources)}.
+     *
+     * <p>Order is config order (what the wall aggregates in), so a card with ten sources keeps the
+     * same order its poster saw. Catalog-only cards return null: they have no site listing, and
+     * {@link TvDetailHost#openCurated} owns that path.
+     */
+    SourceLedger.Sources cardSourcePool(Cms.Video video) {
+        if (video == null) return null;
+        LibraryAggregator.Result wall = a.libraryWall;
+        LibraryAggregator.Item item = wall == null ? null : wall.itemFor(video);
+        if (item == null || item.sites == null || item.sites.isEmpty()) return null;
+        List<Cms.Site> sites = new ArrayList<>(item.sites);
+        final Map<String, Integer> configOrder = new HashMap<>();
+        if (a.config != null && a.config.sites != null) {
+            int index = 0;
+            for (Cms.Site site : a.config.sites) {
+                if (site != null && site.key != null && !configOrder.containsKey(site.key)) {
+                    configOrder.put(site.key, index);
+                }
+                index++;
+            }
+        }
+        Collections.sort(
+                sites,
+                (left, right) -> {
+                    int leftIndex = left == null ? Integer.MAX_VALUE
+                            : configOrder.getOrDefault(left.key, Integer.MAX_VALUE);
+                    int rightIndex = right == null ? Integer.MAX_VALUE
+                            : configOrder.getOrDefault(right.key, Integer.MAX_VALUE);
+                    return Integer.compare(leftIndex, rightIndex);
+                });
+        return SourceLedger.candidates(sites, item.videosBySite);
+    }
+
+    /**
+     * One line per wall card whose round sampled at least one {@code w2x_} site: title, how many
+     * sources this round found, how many the ledger knows, and the w2x_ keys. This is the only
+     * place that information exists (the card pool is per-round), so it is also the evidence that
+     * a card opened in a real test actually carried the sites being probed.
+     */
+    private void logWallSourcePools(LibraryAggregator.Result result) {
+        if (result == null || result.items == null) return;
+        int cardsWithW2x = 0;
+        int w2xListings = 0;
+        for (LibraryAggregator.Item item : result.items) {
+            if (item == null || item.video == null || item.sites == null) continue;
+            StringBuilder keys = new StringBuilder();
+            int w2x = 0;
+            for (Cms.Site site : item.sites) {
+                if (site == null || site.key == null || !site.key.startsWith("w2x_")) continue;
+                w2x++;
+                if (keys.length() > 0) keys.append(',');
+                keys.append(site.key);
+            }
+            if (w2x == 0) continue;
+            cardsWithW2x++;
+            w2xListings += w2x;
+            AppLog.w(
+                    "LibraryWall",
+                    "pool "
+                            + item.video.title
+                            + " item="
+                            + item.sites.size()
+                            + " ledger="
+                            + a.sourceLedger.sourcesOf(item.video).size()
+                            + " w2x="
+                            + w2x
+                            + " ["
+                            + keys
+                            + "]");
+        }
+        AppLog.w(
+                "LibraryWall",
+                "apply items="
+                        + result.items.size()
+                        + " w2xCards="
+                        + cardsWithW2x
+                        + " w2xListings="
+                        + w2xListings);
     }
 
     /**

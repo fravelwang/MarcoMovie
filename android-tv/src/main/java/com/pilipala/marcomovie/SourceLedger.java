@@ -705,6 +705,83 @@ final class SourceLedger {
     }
 
     /**
+     * {@link #resolve(MainActivity, Cms.Video)} 再加一片由调用方给的候选：片库墙卡片自己记着
+     * "这个标题在哪些站有"（{@link LibraryAggregator.Item#sites}），点开卡片时那条信息不该丢。
+     *
+     * <p>顺序：卡片来源（调用方已按配置序排好）在前，账本只补卡片没列的站；两层都按 site key
+     * 去重，listing 各取自己那份（卡片的是该站自己的目录项，账本的是它记下的那份）。卡片没有
+     * listing 的站不进候选——{@code SourceAutoSwitch} 没法用一个空 id 去问详情。
+     *
+     * <p>账本为空时直接返回卡片池：这时 {@code openTitle} 也能打开卡片的第一个来源，而不是因为
+     * "账本还不认识这部片"掉到推荐匹配页。
+     *
+     * <p>默认站仍按账本原来的选择（上次能播的站优先、网盘优先）：这张池子只扩候选，不抢"点开
+     * 卡片先打开哪一页"的决定权。只有账本没有可用默认值时，才落到卡片第一个有 listing 的站。
+     */
+    static Sources resolve(MainActivity a, Cms.Video video, Sources cardSources) {
+        Sources ledger = resolve(a, video);
+        if (cardSources == null || cardSources.isEmpty()) return ledger;
+        if (ledger.isEmpty()) return cardSources;
+        List<Cms.Site> sites = new ArrayList<>(cardSources.sites.size() + ledger.sites.size());
+        Map<String, Cms.Video> listings = new LinkedHashMap<>();
+        Set<String> seen = new HashSet<>();
+        for (Cms.Site site : cardSources.sites) {
+            if (site == null || site.key == null || site.key.isEmpty() || !seen.add(site.key)) {
+                continue;
+            }
+            Cms.Video listing = cardSources.listingAt(site.key);
+            if (listing == null) continue;
+            sites.add(site);
+            listings.put(site.key, listing);
+        }
+        for (Cms.Site site : ledger.sites) {
+            if (site == null || site.key == null || site.key.isEmpty() || !seen.add(site.key)) {
+                continue;
+            }
+            sites.add(site);
+            Cms.Video listing = ledger.listingAt(site.key);
+            if (listing != null) listings.put(site.key, listing);
+        }
+        Cms.Site primary = ledger.defaultSite;
+        Cms.Video primaryListing = ledger.defaultListing;
+        if (primary == null
+                || primaryListing == null
+                || !listings.containsKey(primary.key)) {
+            primary = null;
+            primaryListing = null;
+            for (Cms.Site site : sites) {
+                Cms.Video listing = listings.get(site.key);
+                if (listing == null) continue;
+                primary = site;
+                primaryListing = listing;
+                break;
+            }
+        }
+        return new Sources(sites, primary, primaryListing, listings);
+    }
+
+    /**
+     * 把片库墙卡片自己记的来源做成一片候选池；只留"有这个站自己的 listing"的站，顺序原样。
+     * 返回 null 表示这张卡没有自带来源（例如只有豆瓣元数据的推荐卡）。
+     */
+    static Sources candidates(List<Cms.Site> sites, Map<String, Cms.Video> listings) {
+        if (sites == null || sites.isEmpty() || listings == null || listings.isEmpty()) return null;
+        List<Cms.Site> ordered = new ArrayList<>(sites.size());
+        Map<String, Cms.Video> byKey = new LinkedHashMap<>();
+        for (Cms.Site site : sites) {
+            if (site == null || site.key == null || site.key.isEmpty()) continue;
+            Cms.Video listing = listings.get(site.key);
+            if (listing == null || listing.id == null || listing.id.trim().isEmpty()) continue;
+            if (byKey.containsKey(site.key)) continue;
+            ordered.add(site);
+            byKey.put(site.key, listing);
+        }
+        if (ordered.isEmpty()) return null;
+        Cms.Site primary = ordered.get(0);
+        return new Sources(ordered, primary, byKey.get(primary.key), byKey);
+    }
+
+    /**
      * Moves the site that last really played this title to the head of {@code ordered}; the rest of
      * the list keeps the {@link HomeScreen#netdiskFirst} order, so nothing but the primary changes.
      * A pointer at a site that is no longer one of the title's sources is ignored (and cleaned up by

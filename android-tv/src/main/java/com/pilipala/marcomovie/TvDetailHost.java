@@ -42,6 +42,15 @@ final class TvDetailHost {
     static final String NO_PLAYABLE_LINES_PLAY_LABEL = "该来源暂无线路";
 
     /**
+     * 排空后那颗搜索按钮的文案。详情页不再自动跳搜索页（{@code SourceAutoSwitch} 的
+     * {@code searchWhenExhausted=false}），用户点它才 {@link MainActivity#openSearch}。
+     */
+    static final String SEARCH_OTHER_SOURCES_LABEL = "🔍 全站搜其他源";
+
+    /** 排空后的一句提示：不挡阅读，只说清按钮在哪。 */
+    static final String EXHAUSTED_SEARCH_HINT = "账本里的站都播不了，可以点下面的『🔍 全站搜其他源』";
+
+    /**
      * Hard budget for a curated cross-site match. Past this the page stops matching and says so:
      * a show the ledger does not know yet must not leave the viewer on a spinning line.
      */
@@ -470,6 +479,20 @@ final class TvDetailHost {
     }
 
     static void show(MainActivity a, Cms.Site site, Cms.Video listing, Cms.Video ready) {
+        show(a, site, listing, ready, null);
+    }
+
+    /**
+     * {@code cardSources} is the wall card's own source pool (every site its aggregation round
+     * sampled for this title). It rides along into every automatic-switch call so the probe can ask
+     * sites the ledger has not learned yet — the whole point of opening a card that says "10 源".
+     */
+    static void show(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video listing,
+            Cms.Video ready,
+            SourceLedger.Sources cardSources) {
         a.renderPage(listing.title == null ? "详情" : listing.title, "");
         final MainActivity.Screen screen = a.current;
         final int ticket = a.generation;
@@ -493,6 +516,8 @@ final class TvDetailHost {
         final WatchHistory.Entry[] activeBookmark = {findBookmark(a, site, initialVideo)};
         // Flips when the detail binds or fails, so the slow-source hint stops firing.
         final boolean[] detailSettled = {false};
+        // probeAhead 那一轮排空了：失败分支据此把"没有可播放线路 + 用户自己点搜索"画完（不再跳页）。
+        final boolean[] probeAheadExhausted = {false};
         final boolean initiallyPlayable = hasPlayableLines(initialVideo);
 
         int[] initSel =
@@ -753,10 +778,10 @@ final class TvDetailHost {
                                                 valid,
                                                 shareLines,
                                                 true),
-                                () -> recoverWithoutLines(a, site, resolved, ui, valid))) {
+                                () -> recoverWithoutLines(a, site, resolved, ui, valid, cardSources))) {
                             return;
                         }
-                        recoverWithoutLines(a, site, resolved, ui, valid);
+                        recoverWithoutLines(a, site, resolved, ui, valid, cardSources);
                     } else {
                         // 有线路，但一条都不是夸克可解析 id（例如全是 UC 四段 id，本应用没有 UC 原生
                         // 解析器，插件又报"PC端未登录或Cookie失效"）：页面里有夸克分享就补一条，并把
@@ -811,17 +836,35 @@ final class TvDetailHost {
                     // The source failed outright: same probe-and-switch fallback as the empty-lines
                     // path, dispatched before the error state. This is the branch that runs instead
                     // of the curated matching page when the ledger knows another source.
-                    boolean switching =
-                            SourceAutoSwitch.switchIfDefaultHasNoLines(
-                                    a, site, activeVideo[0], valid, switchExhaustedHint(ui, valid));
-                    // 同样是"还可能有别的来源"：派发了探测就说正在尝试，别先报错。
-                    ui.setLoadingStatus(switching ? SWITCHING_SOURCE_STATUS : a.message(error));
                     String fallbackTitle =
                             initialVideo.title != null ? initialVideo.title.trim() : "";
+                    boolean switching =
+                            SourceAutoSwitch.switchIfDefaultHasNoLines(
+                                    a,
+                                    site,
+                                    activeVideo[0],
+                                    valid,
+                                    detailExhaustedHint(a, ui, valid, fallbackTitle),
+                                    false,
+                                    cardSources);
+                    // 提前探测这一轮已经排空了（它先于这次失败结束）：失败分支不再派发，这里直接
+                    // 落到「没有可播放线路 + 用户自己点的搜索按钮」，不再跳搜索页。
+                    boolean exhaustedBeforeFailure = !switching && probeAheadExhausted[0];
+                    if (switching) {
+                        // 同样是"还可能有别的来源"：派发了探测就说正在尝试，别先报错。
+                        ui.setLoadingStatus(SWITCHING_SOURCE_STATUS);
+                    } else if (exhaustedBeforeFailure) {
+                        detailExhaustedHint(a, ui, valid, fallbackTitle).run();
+                    } else {
+                        ui.setLoadingStatus(a.message(error));
+                    }
                     // A known alternative is the fastest recovery from a dead source; global
                     // search stays the fallback when the ledger knows only this one.
-                    if (!ui.showKnownSourceSwitch() && !fallbackTitle.isEmpty()) {
-                        ui.setSourceSwitchAction("🔍 全站搜其他源", () -> a.openSearch(fallbackTitle));
+                    if (!exhaustedBeforeFailure
+                            && !ui.showKnownSourceSwitch()
+                            && !fallbackTitle.isEmpty()) {
+                        ui.setSourceSwitchAction(
+                                SEARCH_OTHER_SOURCES_LABEL, () -> a.openSearch(fallbackTitle));
                     }
                     if (ui.switchSourceBtn.getVisibility() == android.view.View.VISIBLE) {
                         ui.switchSourceBtn.requestFocus();
@@ -847,7 +890,28 @@ final class TvDetailHost {
             // 这条只是挂一个延迟检查，到点发现详情已落地就不探。没命中时失败分支里的
             // switchIfDefaultHasNoLines 仍是兜底（同一条 60 秒记忆，不会重复探同一批站）。
             SourceAutoSwitch.probeAhead(
-                    a, site, initialVideo, valid, detailSettled, switchExhaustedHint(ui, valid));
+                    a,
+                    site,
+                    initialVideo,
+                    valid,
+                    detailSettled,
+                    () -> {
+                        if (!valid.get()) return;
+                        probeAheadExhausted[0] = true;
+                        // 详情已经落地：失败了就把这一轮排空的结论画成"没有可播放线路 + 用户自己点
+                        // 的搜索按钮"；已经有可播线路就什么都不用做，别把成功页盖成死路。
+                        if (detailSettled[0]) {
+                            if (!hasUsableLine(a, site, activeVideo[0])) {
+                                detailExhaustedHint(a, ui, valid, initialVideo.title).run();
+                            }
+                            return;
+                        }
+                        // 默认源还在加载：这一轮只是"先探的几个都不行"，先给个死路文案，等详情落地
+                        // 由失败分支接手（不在这里跳页、也不在这里放搜索按钮）。
+                        switchExhaustedHint(ui, valid).run();
+                    },
+                    false,
+                    cardSources);
             a.loadDetail(site, listing.id, bindInPlace, onDetailError);
         }
     }
@@ -867,6 +931,27 @@ final class TvDetailHost {
     }
 
     /**
+     * 详情页探测排空后的收尾：恢复「没有可播放线路」的死路态，并把「搜索其他来源」做成用户自己点的
+     * 按钮 —— 只有点下去才 {@link MainActivity#openSearch}，不点就留在详情页。
+     *
+     * <p>与 {@link #switchExhaustedHint} 的区别只有一个落点：那句提示和那颗按钮只在详情页的失败
+     * 分支上用（{@code switchIfDefaultHasNoLines} 与提前探测排空后的失败衔接），不能拿到
+     * {@code probeAhead} 的"默认源只是慢"那一步去抢跑。
+     */
+    private static Runnable detailExhaustedHint(
+            MainActivity a, TvV17DetailScreen ui, Valid valid, String title) {
+        final String query = title == null ? "" : title.trim();
+        return () -> {
+            if (!valid.get()) return;
+            ui.setLoadingStatus(NO_PLAYABLE_LINES_STATUS);
+            ui.clearSourceSwitchInProgress(NO_PLAYABLE_LINES_PLAY_LABEL);
+            if (query.isEmpty()) return;
+            ui.setSourceSwitchAction(SEARCH_OTHER_SOURCES_LABEL, () -> a.openSearch(query));
+            a.toast(EXHAUSTED_SEARCH_HINT);
+        };
+    }
+
+    /**
      * 「详情绑定了，但一条线路都没有」的收尾：先让自动换源去账本里探别的站，探得到就换，探不到就
      * 停在这条死路上。
      *
@@ -874,16 +959,28 @@ final class TvDetailHost {
      * 分享也没捞到」（{@link NetdiskShareLines} 的后台回调）。放在一处，两边的文案和判据不会走偏。
      */
     private static void recoverWithoutLines(
-            MainActivity a, Cms.Site site, Cms.Video resolved, TvV17DetailScreen ui, Valid valid) {
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video resolved,
+            TvV17DetailScreen ui,
+            Valid valid,
+            SourceLedger.Sources cardSources) {
         if (a == null || resolved == null || ui == null) return;
-        // The default source bound the title but has no episode: probe the ledger's other sites in
-        // the background and switch to the first one that really plays. Dispatched before the "no
-        // lines" state so that state is what stays when no candidate plays. For a title with two or
-        // more ledger sources this probe is also why the curated matching page is skipped
+        // The default source bound the title but has no episode: probe the other candidates
+        // (the wall card's own sources first, the ledger after) in the background and switch to
+        // the first one that really plays. Dispatched before the "no lines" state so that state is
+        // what stays when no candidate plays. For a title with two or more ledger sources this
+        // probe is also why the curated matching page is skipped
         // (SourceAutoSwitch.prefersProbeOverCurated).
         boolean switching =
                 SourceAutoSwitch.switchIfDefaultHasNoLines(
-                        a, site, resolved, valid, switchExhaustedHint(ui, valid));
+                        a,
+                        site,
+                        resolved,
+                        valid,
+                        detailExhaustedHint(a, ui, valid, resolved.title),
+                        false,
+                        cardSources);
         // 探测派出去了就先说"正在尝试其他来源"，别让那两秒显示成"没有线路"；
         // 没派出去（账本没有别的站）才照旧说没有可播放线路。
         ui.setLoadingStatus(switching ? SWITCHING_SOURCE_STATUS : NO_PLAYABLE_LINES_STATUS);
@@ -891,12 +988,14 @@ final class TvDetailHost {
             // 播放按钮同步换成"正在换源…"并保持不可点：点了也播不出来。
             ui.showSourceSwitchInProgress(SWITCHING_SOURCE_PLAY_LABEL);
         }
-        // Prefer the ledger picker when another site is known; global search is the fallback for a
-        // title with a single known source.
-        if (!ui.showKnownSourceSwitch()
-                && resolved.title != null
-                && !resolved.title.trim().isEmpty()) {
-            ui.setSourceSwitchAction("🔍 换其他源", () -> a.openSearch(resolved.title.trim()));
+        String title = resolved.title == null ? "" : resolved.title.trim();
+        if (!switching && !title.isEmpty()) {
+            // 没有候选可探，这一页就停在死路上：搜索入口留给用户自己点，不自动跳。
+            ui.setSourceSwitchAction(SEARCH_OTHER_SOURCES_LABEL, () -> a.openSearch(title));
+            a.toast(EXHAUSTED_SEARCH_HINT);
+        } else if (!ui.showKnownSourceSwitch() && !title.isEmpty()) {
+            // 探测还在跑：先给账本内的切换入口；一轮全灭后由 detailExhaustedHint 换成全站搜索按钮。
+            ui.setSourceSwitchAction(SEARCH_OTHER_SOURCES_LABEL, () -> a.openSearch(title));
         }
     }
 

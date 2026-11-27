@@ -747,7 +747,13 @@ final class LibraryRenderer {
                         : wallMode ? video.title + "，待匹配片源" : video.title);
         // 打开某部片只有一个入口：openTitle 在按下这一下时重新查账本（账本会在聚焦补搜/搜索/
         // 详情匹配期间增长），所以点位与"谁排第一"永远一致；没有来源的目录卡由它转推荐匹配页。
-        card.setOnClickListener(v -> host.a.openTitle(video));
+        // 墙卡还带着自己这一轮聚合到的来源（见 HomeScreen.cardSourcePool）：详情页的自动换源
+        // 必须把它们当候选，否则账本外的站（例如 w2x_ 那批）永远问不到。
+        card.setOnClickListener(
+                v ->
+                        host.a.openTitle(
+                                video,
+                                wallMode ? host.cardSourcePool(video) : null));
         card.setOnFocusChangeListener(
                 (v, f) -> {
                     if (host.a.isTvDevice()) {
