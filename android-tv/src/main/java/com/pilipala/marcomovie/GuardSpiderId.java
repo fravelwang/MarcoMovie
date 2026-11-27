@@ -147,6 +147,11 @@ final class GuardSpiderId {
         return NetdiskLineLabels.isAudioName(innerE);
     }
 
+    /** 文件名是不是非视频（音频或压缩包），详情页换源用它判断"这条线播不出画面"。 */
+    boolean looksLikeNonVideoFile() {
+        return NetdiskLineLabels.isNonVideoName(innerE);
+    }
+
     /** 外层 d 的「[31.5GB]文件名」，只给日志用（剧集名以分享列表里的文件名为准）。 */
     String label() {
         return label;

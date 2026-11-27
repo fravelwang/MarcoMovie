@@ -17,6 +17,50 @@ final class NetdiskLineLabels {
 
     private NetdiskLineLabels() {}
 
+    /**
+     * 非视频扩展名：音频 + 压缩包。这些站常把视频改名成音频/压缩包躲扫描，夸克 v2/play 不给档、
+     * download 回 23018，用户只会看到失败。
+     */
+    static boolean isNonVideoName(String fileName) {
+        return isAudioName(fileName) || isArchiveName(fileName);
+    }
+
+    /** 压缩包扩展名（小写，带点）。 */
+    static boolean isArchiveName(String fileName) {
+        String name = fileName == null ? "" : fileName.trim().toLowerCase(Locale.ROOT);
+        int dot = name.lastIndexOf('.');
+        if (dot < 0) return false;
+        String extension = name.substring(dot);
+        switch (extension) {
+            case ".7z":
+            case ".zip":
+            case ".rar":
+            case ".tar":
+            case ".gz":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** 这部片至少有一条"视频线路"（文件名不是音频/压缩包，或解不出文件名）。 */
+    static boolean hasVideoLine(Cms.Video video) {
+        if (video == null || video.lines == null) return false;
+        for (Cms.Line line : video.lines) {
+            if (line == null || line.episodes == null) continue;
+            boolean any = false;
+            for (Cms.Episode episode : line.episodes) {
+                if (episode == null || episode.url == null || episode.url.trim().isEmpty()) continue;
+                GuardSpiderId guard = GuardSpiderId.decode(episode.url);
+                if (guard != null && !guard.looksLikeNonVideoFile()) continue;
+                any = true;
+                break;
+            }
+            if (any) return true;
+        }
+        return false;
+    }
+
     /** 音频扩展名（小写，带点）。 */
     static boolean isAudioName(String fileName) {
         String name = fileName == null ? "" : fileName.trim().toLowerCase(Locale.ROOT);
@@ -48,7 +92,7 @@ final class NetdiskLineLabels {
         boolean anyVideo = false;
         for (Cms.Line line : video.lines) {
             if (line == null) continue;
-            boolean audio = isAudioLine(line);
+            boolean audio = isNonVideoLine(line);
             if (audio) {
                 if (line.name != null && !line.name.endsWith(SUFFIX.trim())) {
                     line.name = (line.name == null ? "" : line.name) + SUFFIX;
@@ -73,13 +117,13 @@ final class NetdiskLineLabels {
         return false;
     }
 
-    /** 这条线路的第一集是不是音频文件名（能解出 Guard 内层 e 才算）。 */
-    private static boolean isAudioLine(Cms.Line line) {
+    /** 这条线路的第一集是不是非视频文件名（能解出 Guard 内层 e 才算）。 */
+    private static boolean isNonVideoLine(Cms.Line line) {
         if (line == null || line.episodes == null) return false;
         for (Cms.Episode episode : line.episodes) {
             if (episode == null || episode.url == null || episode.url.trim().isEmpty()) continue;
             GuardSpiderId guard = GuardSpiderId.decode(episode.url);
-            if (guard != null && guard.looksLikeAudioFile()) return true;
+            if (guard != null && guard.looksLikeNonVideoFile()) return true;
         }
         return false;
     }

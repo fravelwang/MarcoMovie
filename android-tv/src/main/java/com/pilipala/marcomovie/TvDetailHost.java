@@ -5,9 +5,13 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /** TV-only bridge to detail loading, curated source resolution, favorites, and bookmark playback. */
 final class TvDetailHost {
@@ -51,6 +55,90 @@ final class TvDetailHost {
 
     /** 真的没有可播放线路（探测没派发，或派发了但一轮全灭）时的状态行。 */
     static final String NO_PLAYABLE_LINES_STATUS = "该来源没有返回可播放线路";
+
+    /**
+     * 已经因为"整片只有非视频线"给某个 (片 id, 来源 key) 换过一次的记号：同进程内只换一次。
+     * 用户手动切回那个来源时键已存在，所以不会被再次自动切走（对应卡里的"上限一次"）。
+     */
+    private static final Set<String> PREFER_VIDEO_TRIED = new HashSet<>();
+
+    /**
+     * 当前来源全部线路都是非视频（音频/压缩包）时，从候选池（卡片来源 → 账本）里找一个真的有视频线的
+     * 来源，用现有换源通道（{@code openListing}）切过去。异步：逐个拉详情判断，第一个命中的就切。
+     *
+     * <p>上限一次：{@link #PREFER_VIDEO_TRIED} 按 (片 id, 来源 key) 记录，切过一次就不再从同一个
+     * 来源自动切走；用户手动切回来时键已存在，因此保持他选的来源。
+     */
+    private static void preferVideoSource(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            SourceLedger.Sources cardSources,
+            Valid valid) {
+        if (a == null || site == null || video == null || site.key == null) return;
+        final String fromKey = site.key;
+        final String onceKey = video.id + "|" + fromKey;
+        synchronized (PREFER_VIDEO_TRIED) {
+            if (!PREFER_VIDEO_TRIED.add(onceKey)) return;
+        }
+        final SourceLedger.Sources known = SourceLedger.resolve(a, video, cardSources);
+        if (known == null || known.isEmpty()) return;
+        final List<Cms.Site> candidates = new ArrayList<>();
+        final Map<String, Cms.Video> listings = new LinkedHashMap<>();
+        for (Cms.Site candidate : known.sites) {
+            if (candidate == null || candidate.key == null || candidate.key.equals(fromKey)) {
+                continue;
+            }
+            Cms.Video listing = known.listingAt(candidate.key);
+            if (listing == null || listing.id == null || listing.id.trim().isEmpty()) continue;
+            if (SourceCooling.isCooled(candidate.key)) continue;
+            candidates.add(candidate);
+            listings.put(candidate.key, listing);
+            if (candidates.size() >= 6) break;
+        }
+        if (candidates.isEmpty()) return;
+        a.submitPage(
+                () -> {
+                    Cms.Site hit = null;
+                    Cms.Video hitListing = null;
+                    for (Cms.Site candidate : candidates) {
+                        if (Thread.currentThread().isInterrupted()) return;
+                        Cms.Video listing = listings.get(candidate.key);
+                        try {
+                            SourceEngine engine = SourceController.engine(a, candidate);
+                            Cms.Listing detail = Cms.listing(engine.detail(listing.id));
+                            if (detail.videos.isEmpty()) continue;
+                            Cms.Video loaded = detail.videos.get(0);
+                            NetdiskLineLabels.apply(loaded);
+                            if (NetdiskLineLabels.hasVideoLine(loaded)) {
+                                hit = candidate;
+                                hitListing = listing;
+                                break;
+                            }
+                        } catch (Throwable ignored) {
+                            // 下一个候选。
+                        }
+                    }
+                    final Cms.Site target = hit;
+                    final Cms.Video targetListing = hitListing;
+                    if (target == null) return;
+                    a.ui.post(
+                            () -> {
+                                if (!valid.get() || a.isFinishing()) return;
+                                AppLog.w(
+                                        "TvDetail",
+                                        "prefer video source: from="
+                                                + fromKey
+                                                + " to="
+                                                + target.key
+                                                + " reason=all-audio");
+                                a.openListing(
+                                        target,
+                                        targetListing,
+                                        SourceLedger.candidates(candidates, listings));
+                            });
+                });
+    }
 
     /** 整部片只有音频线路时的提示（站点把视频改名成音频，夸克 v2/play 没有音频档）。 */
     static final String AUDIO_ONLY_LINE_HINT = "这条线路是音频文件，可能播不出画面";
@@ -825,7 +913,9 @@ final class TvDetailHost {
                                 null);
                         ui.setLoadingStatus("");
                         if (allAudio[0]) {
-                            // 整部片只有音频线路：把话说在前面，播放器黑屏时用户不会以为是我们的问题。
+                            // 整部片只有音频/压缩包线路：先去候选池里找一个"有视频线"的来源（一次），
+                            // 找不到才把话说在前面，播放器黑屏时用户不会以为是我们的问题。
+                            preferVideoSource(a, site, resolved, cardSources, valid);
                             ui.setLoadingStatus(AUDIO_ONLY_LINE_HINT);
                             a.toast(AUDIO_ONLY_LINE_HINT);
                         }
