@@ -75,6 +75,12 @@ final class LibraryAggregator {
     /** Wave 1 only looks at this many sites per round; a cursor rotates through the rest. */
     static final int MAX_WAVE1_SITES = 36;
 
+    /**
+     * Guard 站同一轮里那次重试的预算。比首试短：首试已经用掉一整份预算（init 12 s / fetch 10 s），
+     * 重试再不限量就会把整轮的 18 s 吃光；6 s 足够接住"抖一下"的那种偶发失败。
+     */
+    static final long GUARD_RETRY_BUDGET_MS = 6000L;
+
     /** Prefs key holding the rotation cursor over never-tried sites. */
     static final String CURSOR_KEY = "library_agg_cursor";
 
@@ -757,18 +763,46 @@ final class LibraryAggregator {
             long started = android.os.SystemClock.elapsedRealtime();
             ScheduledFuture<?> watchdog = arm(ENGINE_TIMEOUT_MS);
             SourceEngine engine;
+            final boolean guardSite =
+                    site != null && site.key != null && site.key.startsWith("w2x_");
+            // 每个站每轮最多一次重试：init 失败与 home 失败共用这个名额，避免叠加成循环。
+            final boolean[] retried = {false};
             try {
                 engine = activity.engine(site);
             } catch (Throwable failure) {
                 if (watchdog != null) watchdog.cancel(false);
-                SiteOutcome outcome =
-                        new SiteOutcome(
-                                index,
-                                null,
-                                android.os.SystemClock.elapsedRealtime() - started,
-                                0L);
-                sink.offer(outcome);
-                return outcome;
+                // Guard 站的 init 会偶发超时（实测 init 打满 12 s 引擎预算，下一轮又好了）：
+                // 同一轮里再建一次，有界（只一次）。失败仍按原样上报。
+                if (guardSite && !retried[0]) {
+                    // 首试多半是被预算看门狗打断的（init 打满 12 s）：清掉中断位，重试用更短的
+                    // 预算再问一次。只重试一次，失败照旧上报。
+                    retried[0] = true;
+                    Thread.interrupted();
+                    AppLog.w(TAG, "w2x home retry site=" + site.key + " try=2");
+                    watchdog = arm(GUARD_RETRY_BUDGET_MS);
+                    try {
+                        engine = activity.engine(site);
+                    } catch (Throwable second) {
+                        if (watchdog != null) watchdog.cancel(false);
+                        SiteOutcome outcome =
+                                new SiteOutcome(
+                                        index,
+                                        null,
+                                        android.os.SystemClock.elapsedRealtime() - started,
+                                        0L);
+                        sink.offer(outcome);
+                        return outcome;
+                    }
+                } else {
+                    SiteOutcome outcome =
+                            new SiteOutcome(
+                                    index,
+                                    null,
+                                    android.os.SystemClock.elapsedRealtime() - started,
+                                    0L);
+                    sink.offer(outcome);
+                    return outcome;
+                }
             }
             if (watchdog != null) watchdog.cancel(false);
             long initMs = android.os.SystemClock.elapsedRealtime() - started;
@@ -783,13 +817,32 @@ final class LibraryAggregator {
             } finally {
                 if (watchdog != null) watchdog.cancel(false);
             }
+            // Guard 站的 home 会偶发失败（远程配置/网关抖一下，下一轮又好了）。同一轮里对它再试
+            // 一次，有界：只重试一次、只在"第一次是抛异常"且线程没被预算看门狗打断时重试；重试
+            // 的那次使用自己的预算，超时就不再试。
+            if (guardSite
+                    && !retried[0]
+                    && (videos == null || videos.isEmpty())) {
+                // 抛异常与"回空列表"都算这一次失败：同一个站每轮只重试一次（名额与 init 共用）。
+                retried[0] = true;
+                Thread.interrupted();
+                AppLog.w(TAG, "w2x home retry site=" + site.key + " try=2");
+                watchdog = arm(GUARD_RETRY_BUDGET_MS);
+                try {
+                    videos = fetch(activity, site, engine);
+                } catch (Throwable ignored) {
+                    // Give up after this one retry; the round goes on.
+                } finally {
+                    if (watchdog != null) watchdog.cancel(false);
+                }
+            }
             SiteOutcome outcome =
                     new SiteOutcome(
                             index,
                             videos,
                             initMs,
                             android.os.SystemClock.elapsedRealtime() - fetchStarted,
-                            budget);
+                            retried[0] ? budget * 2 : budget);
             sink.offer(outcome);
             return outcome;
         }
@@ -823,22 +876,36 @@ final class LibraryAggregator {
     }
 
     /**
-     * Indices of the sites the user pinned or set as the default preference, in that order.
-     * Empty when nothing is pinned, so the wall keeps its old ordering by default.
+     * Indices of the sites the user pointed at, in intent order: 默认偏好源 (PREFERRED_SITE) →
+     * 当前浏览站点 (SELECTED_SITE) → 手排置顶顺序. Empty when none is set, so the wall keeps its
+     * old ordering by default.
+     *
+     * <p>SELECTED_SITE 是「源 → 选择站点」切过去的那一站：Boss 切站点就是想看它的片，所以它必须
+     * 进 wave 1，否则墙的取样和这个开关毫无关系（T-09 只接了 PREFERRED_SITE，切浏览站点等于没切）。
+     * 放在显式偏好之后：默认偏好源是长期默认，浏览站点是这一次的意图，两者都存在时先尊重长期默认。
      */
     private static List<Integer> preferenceFirst(MainActivity a, List<Cms.Site> targets) {
         List<Integer> out = new ArrayList<>();
         if (a == null || targets == null || targets.isEmpty()) return out;
-        for (String key : SourcePreferences.order(a)) {
-            for (int index = 0; index < targets.size(); index++) {
-                Cms.Site site = targets.get(index);
-                if (site != null && key.equals(site.key) && !out.contains(index)) out.add(index);
-            }
-        }
         for (int index = 0; index < targets.size(); index++) {
             Cms.Site site = targets.get(index);
             if (site != null && SourcePreferences.isPreferred(a, site) && !out.contains(index)) {
                 out.add(index);
+            }
+        }
+        String selected = a.prefs == null ? "" : a.prefs.getString(Prefs.SELECTED_SITE, "");
+        if (selected != null && !selected.isEmpty()) {
+            for (int index = 0; index < targets.size(); index++) {
+                Cms.Site site = targets.get(index);
+                if (site != null && selected.equals(site.key) && !out.contains(index)) {
+                    out.add(index);
+                }
+            }
+        }
+        for (String key : SourcePreferences.order(a)) {
+            for (int index = 0; index < targets.size(); index++) {
+                Cms.Site site = targets.get(index);
+                if (site != null && key.equals(site.key) && !out.contains(index)) out.add(index);
             }
         }
         if (!out.isEmpty()) {

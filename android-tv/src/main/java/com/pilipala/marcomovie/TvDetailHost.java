@@ -17,6 +17,20 @@ final class TvDetailHost {
     /** A detail that has not bound its lines after this long gets the slow-source hint. */
     static final long SLOW_SOURCE_HINT_MS = 6000L;
 
+    /**
+     * 墙卡换源的等待上限，按来源类型给：Guard/`w2x_` 站本来就慢（实测详情 4–12 s），给 12 s；
+     * 其它站 8 s。之前统一 3 s，会把 4–6 s 就能落地的 w2x 站、甚至排队中的普通站一起切掉
+     * （T-10 复盘中看到），所以这里只负责"等这么久还没回来任何数据才换"，已经落地的绝不切。
+     */
+    static final long CARD_FAILOVER_GUARD_MS = 12000L;
+    static final long CARD_FAILOVER_NORMAL_MS = 8000L;
+
+    /**
+     * 墙轮（LibraryAggregator）在跑时，引擎队列会先伺候浏览请求，这一跳的详情实际是在排队；
+     * 排队时间不该算成"这个站慢"，所以预算放宽到 1.5 倍。
+     */
+    static final double CARD_FAILOVER_BUSY_MULTIPLIER = 1.5d;
+
     /** Appended under the loading line; the loader itself keeps running. */
     static final String SLOW_SOURCE_HINT = "当前源较慢，可按「切换来源」换一个";
 
@@ -833,6 +847,9 @@ final class TvDetailHost {
                                 a, fallbackBm, site.key, "原片源加载失败", true);
                         return;
                     }
+                    // 卡片自带的来源池：首选站失败就立刻问池子里的下一个，不等自动换源那一轮探测
+                    // （那一轮要逐站问详情，用户看到的是"卡住"）。池子每跳一次就少一个站，跳完为止。
+                    if (hopCardSource(a, site, listing, cardSources)) return;
                     // The source failed outright: same probe-and-switch fallback as the empty-lines
                     // path, dispatched before the error state. This is the branch that runs instead
                     // of the curated matching page when the ledger knows another source.
@@ -885,6 +902,41 @@ final class TvDetailHost {
             }
         } else {
             scheduleSlowSourceHint(a, ui, detailSettled, valid);
+            if (cardSources != null
+                    && cardSources.count() > 1
+                    && !SourcePreferences.netdiskNamed(site)) {
+                // 这一跳的等待预算：Guard 站 12 s、普通站 8 s；墙轮在跑（引擎队列忙）时再 ×1.5。
+                // 只有"还没落地"（detailSettled=false）才换；已经绑定或已经报错就绝不切 —— 报错那条
+                // 走 onDetailError 的立即换源，不在这里重复。
+                final Cms.Site firstSite = site;
+                final String kind =
+                        firstSite != null
+                                        && firstSite.key != null
+                                        && firstSite.key.startsWith("w2x_")
+                                ? "guard"
+                                : "normal";
+                long waitMs =
+                        "guard".equals(kind) ? CARD_FAILOVER_GUARD_MS : CARD_FAILOVER_NORMAL_MS;
+                final boolean busy = a.libraryWallLoading;
+                if (busy) waitMs = (long) (waitMs * CARD_FAILOVER_BUSY_MULTIPLIER);
+                final long budgetMs = waitMs;
+                a.ui.postDelayed(
+                        () -> {
+                            if (!valid.get() || detailSettled[0]) return;
+                            AppLog.w(
+                                    "TvDetail",
+                                    "card failover wait="
+                                            + budgetMs
+                                            + "ms kind="
+                                            + kind
+                                            + " busy="
+                                            + busy
+                                            + " site="
+                                            + (firstSite == null ? "-" : firstSite.key));
+                            hopCardSource(a, firstSite, listing, cardSources);
+                        },
+                        budgetMs);
+            }
             // 默认源是网盘站时，若它 15 秒还没把详情拿回来（那 31 秒的网盘详情就是这样），就让其它候选
             // 的探测在后台开始，探到能播的就换过去。15 秒内答完的网盘站（原盘/高码率）不受影响：
             // 这条只是挂一个延迟检查，到点发现详情已落地就不探。没命中时失败分支里的
@@ -938,6 +990,47 @@ final class TvDetailHost {
      * 分支上用（{@code switchIfDefaultHasNoLines} 与提前探测排空后的失败衔接），不能拿到
      * {@code probeAhead} 的"默认源只是慢"那一步去抢跑。
      */
+    /**
+     * 墙卡的顺序换源：首选站详情失败时，立刻打开卡片池里下一个「有希望」的站（池子的顺序由
+     * {@code HomeScreen.cardSourcePool} 排好：上次播过的 → 非 csp_MacCMS → 其余），并把已失败的站
+     * 从池子里去掉再传下去，所以最多跳「池子大小 - 1」次，不会来回弹。
+     *
+     * <p>只对带卡片池的打开生效（墙卡）；搜索卡、首页海报、收藏没有池子，行为不变。
+     *
+     * @return true 表示已经跳到下一个站（调用方不要再跑自动换源探测）
+     */
+    private static boolean hopCardSource(
+            MainActivity a, Cms.Site failed, Cms.Video listing, SourceLedger.Sources cardSources) {
+        if (a == null || cardSources == null || cardSources.isEmpty()) return false;
+        Cms.Site next = null;
+        Cms.Video nextListing = null;
+        List<Cms.Site> rest = new ArrayList<>();
+        java.util.Map<String, Cms.Video> restListings = new java.util.LinkedHashMap<>();
+        for (Cms.Site candidate : cardSources.sites) {
+            if (candidate == null || candidate.key == null || candidate.key.isEmpty()) continue;
+            Cms.Video other = cardSources.listingAt(candidate.key);
+            if (other == null || other.id == null || other.id.trim().isEmpty()) continue;
+            if (failed != null && candidate.key.equals(failed.key)) continue;
+            rest.add(candidate);
+            restListings.put(candidate.key, other);
+            if (next == null) {
+                next = candidate;
+                nextListing = other;
+            }
+        }
+        if (next == null || nextListing == null) return false;
+        AppLog.w(
+                "TvDetail",
+                "card failover site="
+                        + (failed == null ? "-" : failed.key)
+                        + " -> "
+                        + next.key
+                        + " title="
+                        + (listing == null ? "" : listing.title));
+        a.openListing(next, nextListing, SourceLedger.candidates(rest, restListings));
+        return true;
+    }
+
     private static Runnable detailExhaustedHint(
             MainActivity a, TvV17DetailScreen ui, Valid valid, String title) {
         final String query = title == null ? "" : title.trim();

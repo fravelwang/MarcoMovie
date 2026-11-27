@@ -849,13 +849,34 @@ public final class MainActivity extends Activity {
                             + keys
                             + "]");
         }
-        if (resolved.defaultSite != null && resolved.defaultListing != null) {
+        // 墙卡自带来源的"有希望"顺序（HomeScreen.cardSourcePool 已经排好）优先于账本默认站：
+        // 点卡先打开卡片池里第一个有 listing 的站，账本默认只在这张池子没有可用项时兜底。
+        // 没有卡片池的入口（首页海报、搜索卡、收藏）一个字节都不变。
+        Cms.Site openSite = resolved.defaultSite;
+        Cms.Video openListingVideo = resolved.defaultListing;
+        if (cardSources != null && !cardSources.isEmpty()) {
+            for (Cms.Site candidate : cardSources.sites) {
+                if (candidate == null || candidate.key == null || candidate.key.isEmpty()) continue;
+                Cms.Video listing = cardSources.listingAt(candidate.key);
+                if (listing == null || listing.id == null || listing.id.trim().isEmpty()) continue;
+                openSite = candidate;
+                openListingVideo = listing;
+                break;
+            }
+            AppLog.w(
+                    "MainActivity",
+                    "openTitle card open="
+                            + (openSite == null ? "-" : openSite.key)
+                            + " ledgerDefault="
+                            + (resolved.defaultSite == null ? "-" : resolved.defaultSite.key));
+        }
+        if (openSite != null && openListingVideo != null) {
             if (TvCuratedHome.isCuratedVideo(video)) {
                 // A catalog title opened through a site: if that site cannot produce the detail,
                 // fall back to the matching page rather than a dead end.
-                rememberCuratedFallback(video, resolved.defaultSite, resolved.defaultListing);
+                rememberCuratedFallback(video, openSite, openListingVideo);
             }
-            openListing(resolved.defaultSite, resolved.defaultListing, cardSources);
+            openListing(openSite, openListingVideo, cardSources);
             return;
         }
         TvDetailHost.openCurated(this, video);

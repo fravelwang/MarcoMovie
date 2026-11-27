@@ -2942,9 +2942,16 @@ final class HomeScreen {
                 index++;
             }
         }
+        // 「有希望」的顺序（Boss 2026-11-27 定）：上次真播过的站 > 不是 csp_MacCMS 的站（w2x Guard
+        // 那批）> csp_MacCMS（虎斑那条已死、详情 NPE）。层内仍按配置序。首个有 listing 的站就是
+        // 卡片点开后默认打开的那一页，所以这里决定"点卡先进哪家"。
+        final String lastPlayed =
+                a.sourceLedger == null ? null : a.sourceLedger.lastPlayedSite(video);
         Collections.sort(
                 sites,
                 (left, right) -> {
+                    int byHope = Integer.compare(hopeRank(left, lastPlayed), hopeRank(right, lastPlayed));
+                    if (byHope != 0) return byHope;
                     int leftIndex = left == null ? Integer.MAX_VALUE
                             : configOrder.getOrDefault(left.key, Integer.MAX_VALUE);
                     int rightIndex = right == null ? Integer.MAX_VALUE
@@ -2952,6 +2959,17 @@ final class HomeScreen {
                     return Integer.compare(leftIndex, rightIndex);
                 });
         return SourceLedger.candidates(sites, item.videosBySite);
+    }
+
+    /**
+     * 墙卡来源的"有希望"层级：0 = 上次真播过的站，1 = 不是 {@code csp_MacCMS} 的站（w2x Guard 等），
+     * 2 = {@code csp_MacCMS}（虎斑那条在盒子上详情就 NPE），3 = 无 key。
+     */
+    private static int hopeRank(Cms.Site site, String lastPlayed) {
+        if (site == null || site.key == null) return 3;
+        if (lastPlayed != null && lastPlayed.equals(site.key)) return 0;
+        String api = site.api == null ? "" : site.api.trim();
+        return "csp_MacCMS".equalsIgnoreCase(api) ? 2 : 1;
     }
 
     /**
