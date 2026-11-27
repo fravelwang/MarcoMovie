@@ -52,6 +52,9 @@ final class TvDetailHost {
     /** 真的没有可播放线路（探测没派发，或派发了但一轮全灭）时的状态行。 */
     static final String NO_PLAYABLE_LINES_STATUS = "该来源没有返回可播放线路";
 
+    /** 整部片只有音频线路时的提示（站点把视频改名成音频，夸克 v2/play 没有音频档）。 */
+    static final String AUDIO_ONLY_LINE_HINT = "这条线路是音频文件，可能播不出画面";
+
     /** 同一状态的播放按钮文案：按钮不可点。 */
     static final String NO_PLAYABLE_LINES_PLAY_LABEL = "该来源暂无线路";
 
@@ -519,6 +522,9 @@ final class TvDetailHost {
                                 && context.matches(a.config, a.privateMode, a.engineEpoch);
 
         final Cms.Video initialVideo = ready != null ? ready : listing;
+        // 音频线路打标记并排到最后（只动展示名/顺序，解析不变），整片只有音频时给一句提示。
+        final boolean[] allAudio = {false};
+        if (NetdiskLineLabels.apply(initialVideo)) allAudio[0] = true;
         mergeListingFallback(initialVideo, listing);
         SeriesScrapeStore.OverrideRecord savedOv =
                 SeriesScrapeStore.load(
@@ -726,6 +732,7 @@ final class TvDetailHost {
                             SeriesScrapeStore.load(
                                     a, site != null ? site.key : "", resolved.id, resolved.title);
                     if (ov != null) TvSeriesScrapeDialog.applyOverrideToVideo(resolved, ov);
+                    if (NetdiskLineLabels.apply(resolved)) allAudio[0] = true;
                     activeVideo[0] = resolved;
                     WatchHistory.Entry bm = findBookmark(a, site, resolved);
                     activeBookmark[0] = bm;
@@ -817,6 +824,11 @@ final class TvDetailHost {
                                                 true),
                                 null);
                         ui.setLoadingStatus("");
+                        if (allAudio[0]) {
+                            // 整部片只有音频线路：把话说在前面，播放器黑屏时用户不会以为是我们的问题。
+                            ui.setLoadingStatus(AUDIO_ONLY_LINE_HINT);
+                            a.toast(AUDIO_ONLY_LINE_HINT);
+                        }
                         bindSeasonPopupDiscovery(a, site, resolved, ui);
                         View curFocus = a.getCurrentFocus();
                         if (curFocus == null

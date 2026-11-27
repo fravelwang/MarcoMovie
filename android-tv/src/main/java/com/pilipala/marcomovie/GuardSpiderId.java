@@ -64,6 +64,8 @@ final class GuardSpiderId {
     private final String innerB;
     private final String innerC;
     private final String innerD;
+    /** 内层 e：夸克/UC 是文件名（115 是字节数），用来判断"视频被改名成音频"。 */
+    private final String innerE;
     /** 外层 d：「[31.5GB]文件名」，只用于日志（剧集名以分享列表里的文件名为准）。 */
     private final String label;
 
@@ -73,12 +75,14 @@ final class GuardSpiderId {
             String innerB,
             String innerC,
             String innerD,
+            String innerE,
             String label) {
         this.provider = provider;
         this.innerA = innerA;
         this.innerB = innerB;
         this.innerC = innerC;
         this.innerD = innerD;
+        this.innerE = innerE;
         this.label = label;
     }
 
@@ -117,6 +121,7 @@ final class GuardSpiderId {
                     b,
                     c,
                     d,
+                    inner.optString("e", "").trim(),
                     outer.optString("d", "").trim());
         } catch (org.json.JSONException error) {
             // 不是这一层包装（或者样本变了）：交给原来的流程。
@@ -130,6 +135,16 @@ final class GuardSpiderId {
 
     boolean isPan115() {
         return PAN115.equals(provider);
+    }
+
+    /** 内层 e 的文件名（可能为空）。 */
+    String fileName() {
+        return innerE;
+    }
+
+    /** 文件名是不是音频扩展（这些站常把视频改名成音频躲扫描）。 */
+    boolean looksLikeAudioFile() {
+        return NetdiskLineLabels.isAudioName(innerE);
     }
 
     /** 外层 d 的「[31.5GB]文件名」，只给日志用（剧集名以分享列表里的文件名为准）。 */
