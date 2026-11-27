@@ -1953,6 +1953,12 @@ final class SettingsScreen {
                             .show();
                 });
         toggle("自动播放下一集", Prefs.AUTO_NEXT, true, null);
+        toggle(
+                "自动换源",
+                "关着时线路失败不会自己换站/换来源，只在页面上给「🔍 全站搜其他源」按钮",
+                Prefs.AUTO_SOURCE_SWITCH,
+                Prefs.AUTO_SOURCE_SWITCH_DEFAULT,
+                null);
         if (a.isTvDevice()) {
             toggle("播放中右上角显示进度与时间", Prefs.TV_PLAYER_TOP_RIGHT_HUD, true, null);
         } else {
@@ -2849,6 +2855,16 @@ final class SettingsScreen {
     }
 
     void toggle(String title, String key, boolean defaultValue, Runnable after) {
+        toggle(title, null, key, defaultValue, after);
+    }
+
+    /** 带副标题的开关行：副标题排在标题下方，用来说明这个开关关着时会发生什么。 */
+    void toggle(
+            String title,
+            String subtitle,
+            String key,
+            boolean defaultValue,
+            Runnable after) {
         boolean tv = a.isTvDevice();
         boolean initial = a.prefs.getBoolean(key, defaultValue);
         LinearLayout row = a.row();
@@ -2866,6 +2882,14 @@ final class SettingsScreen {
         final TextView titleView = a.text(title, tv ? 16 : 17, MainActivity.WHITE);
         titleView.setTypeface(null, Typeface.BOLD);
         copy.addView(titleView);
+        final TextView subtitleView;
+        if (subtitle != null && !subtitle.isEmpty()) {
+            subtitleView = a.text(subtitle, 12.5f, 0x8aebebf5);
+            subtitleView.setPadding(0, a.dp(3), 0, 0);
+            copy.addView(subtitleView);
+        } else {
+            subtitleView = null;
+        }
         final TextView caption = a.text(initial ? "开启" : "关闭", 12.5f, 0xa8ebebf5);
         caption.setPadding(0, a.dp(3), 0, 0);
         if (!tv) copy.addView(caption);
@@ -2918,6 +2942,7 @@ final class SettingsScreen {
                         if (row.getBackground() != focusedBg) row.setBackground(focusedBg);
                         titleView.setTextColor(0xff101013);
                         caption.setTextColor(0xff48484a);
+                        if (subtitleView != null) subtitleView.setTextColor(0xff48484a);
                         float scale = a.reduced ? 1f : 1.014f;
                         if (a.reduced) {
                             row.setScaleX(1f);
@@ -2934,6 +2959,7 @@ final class SettingsScreen {
                         if (row.getBackground() != restingBg) row.setBackground(restingBg);
                         titleView.setTextColor(MainActivity.WHITE);
                         caption.setTextColor(0xa8ebebf5);
+                        if (subtitleView != null) subtitleView.setTextColor(0x8aebebf5);
                         row.setScaleX(1f);
                         row.setScaleY(1f);
                     }

@@ -76,6 +76,11 @@ final class TvDetailHost {
             SourceLedger.Sources cardSources,
             Valid valid) {
         if (a == null || site == null || video == null || site.key == null) return;
+        if (!a.prefs.getBoolean(
+                Prefs.AUTO_SOURCE_SWITCH, Prefs.AUTO_SOURCE_SWITCH_DEFAULT)) {
+            AppLog.w("TvDetail", "auto switch disabled, skip=preferVideoSource");
+            return;
+        }
         final String fromKey = site.key;
         final String onceKey = video.id + "|" + fromKey;
         synchronized (PREFER_VIDEO_TRIED) {
@@ -154,6 +159,16 @@ final class TvDetailHost {
 
     /** 排空后的一句提示：不挡阅读，只说清按钮在哪。 */
     static final String EXHAUSTED_SEARCH_HINT = "账本里的站都播不了，可以点下面的『🔍 全站搜其他源』";
+
+    /** 自动换源关着时的同位置提示：没探过别的站，不能说"都播不了"。 */
+    static final String AUTO_SWITCH_OFF_SEARCH_HINT =
+            "自动换源已关闭，点下面的『🔍 全站搜其他源』自己找";
+
+    static boolean autoSourceSwitchOn(MainActivity a) {
+        return a != null
+                && a.prefs.getBoolean(
+                        Prefs.AUTO_SOURCE_SWITCH, Prefs.AUTO_SOURCE_SWITCH_DEFAULT);
+    }
 
     /**
      * Hard budget for a curated cross-site match. Past this the page stops matching and says so:
@@ -969,17 +984,29 @@ final class TvDetailHost {
                     // 提前探测这一轮已经排空了（它先于这次失败结束）：失败分支不再派发，这里直接
                     // 落到「没有可播放线路 + 用户自己点的搜索按钮」，不再跳搜索页。
                     boolean exhaustedBeforeFailure = !switching && probeAheadExhausted[0];
+                    final boolean autoSwitchOff = !autoSourceSwitchOn(a);
                     if (switching) {
                         // 同样是"还可能有别的来源"：派发了探测就说正在尝试，别先报错。
                         ui.setLoadingStatus(SWITCHING_SOURCE_STATUS);
                     } else if (exhaustedBeforeFailure) {
                         detailExhaustedHint(a, ui, valid, fallbackTitle).run();
+                    } else if (autoSwitchOff) {
+                        // 开关关着：没有探过任何别的站，停在死路页，搜索入口留给用户自己点。
+                        ui.setLoadingStatus(NO_PLAYABLE_LINES_STATUS);
+                        ui.clearSourceSwitchInProgress(NO_PLAYABLE_LINES_PLAY_LABEL);
+                        if (!fallbackTitle.isEmpty()) {
+                            ui.setSourceSwitchAction(
+                                    SEARCH_OTHER_SOURCES_LABEL,
+                                    () -> a.openSearch(fallbackTitle));
+                        }
+                        a.toast(AUTO_SWITCH_OFF_SEARCH_HINT);
                     } else {
                         ui.setLoadingStatus(a.message(error));
                     }
                     // A known alternative is the fastest recovery from a dead source; global
                     // search stays the fallback when the ledger knows only this one.
-                    if (!exhaustedBeforeFailure
+                    if (!autoSwitchOff
+                            && !exhaustedBeforeFailure
                             && !ui.showKnownSourceSwitch()
                             && !fallbackTitle.isEmpty()) {
                         ui.setSourceSwitchAction(
@@ -1104,6 +1131,11 @@ final class TvDetailHost {
     private static boolean hopCardSource(
             MainActivity a, Cms.Site failed, Cms.Video listing, SourceLedger.Sources cardSources) {
         if (a == null || cardSources == null || cardSources.isEmpty()) return false;
+        if (!a.prefs.getBoolean(
+                Prefs.AUTO_SOURCE_SWITCH, Prefs.AUTO_SOURCE_SWITCH_DEFAULT)) {
+            AppLog.w("TvDetail", "auto switch disabled, skip=card failover");
+            return false;
+        }
         Cms.Site next = null;
         Cms.Video nextListing = null;
         List<Cms.Site> rest = new ArrayList<>();
@@ -1191,7 +1223,10 @@ final class TvDetailHost {
         if (!switching && !title.isEmpty()) {
             // 没有候选可探，这一页就停在死路上：搜索入口留给用户自己点，不自动跳。
             ui.setSourceSwitchAction(SEARCH_OTHER_SOURCES_LABEL, () -> a.openSearch(title));
-            a.toast(EXHAUSTED_SEARCH_HINT);
+            a.toast(
+                    autoSourceSwitchOn(a)
+                            ? EXHAUSTED_SEARCH_HINT
+                            : AUTO_SWITCH_OFF_SEARCH_HINT);
         } else if (!ui.showKnownSourceSwitch() && !title.isEmpty()) {
             // 探测还在跑：先给账本内的切换入口；一轮全灭后由 detailExhaustedHint 换成全站搜索按钮。
             ui.setSourceSwitchAction(SEARCH_OTHER_SOURCES_LABEL, () -> a.openSearch(title));

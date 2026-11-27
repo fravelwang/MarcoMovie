@@ -139,6 +139,17 @@ final class Prefs {
     static final String SUBSCRIPTION_LAST_AUTO_STATUS = "subscription_last_auto_status";
     static final String ACCOUNT_CONFIG_CENTER_KEY = "account_config_center_key";
 
+    /**
+     * 自动换源总开关：关着时详情页遇到空线路/失败只停在「没有可播放线路」，不再自动换站或换来源，
+     * 全站搜索必须由用户自己点。默认关，没存过这条键的用户一律按关处理。
+     *
+     * <p>故意不放进 {@link #KEYS}：那个数组被多份离线检查钉死在 46 项，且设置重置/备份恢复不该
+     * 顺手把这个影响判断的开关翻回开。读取一律用 {@link #AUTO_SOURCE_SWITCH_DEFAULT}。
+     */
+    static final String AUTO_SOURCE_SWITCH = "auto_source_switch";
+
+    static final boolean AUTO_SOURCE_SWITCH_DEFAULT = false;
+
     // Appearance & playback settings exported/restored in backups; update the Prefs.KEYS.length
     // assertion in ReviewFixChecks.java whenever keys are added or removed.
     static final String[] KEYS = {

@@ -196,6 +196,11 @@ final class SourceAutoSwitch {
         if (a == null || site == null || video == null || valid == null) return false;
         // A local-drive listing is a file on disk, not a site: never hand it to a web source.
         if (LocalMediaLibrary.LOCAL_SITE_KEY.equals(site.key)) return false;
+        if (!a.prefs.getBoolean(
+                Prefs.AUTO_SOURCE_SWITCH, Prefs.AUTO_SOURCE_SWITCH_DEFAULT)) {
+            AppLog.w("AutoSwitch", "auto switch disabled, skip=switchIfDefaultHasNoLines");
+            return false;
+        }
         SourceLedger.Sources known = SourceLedger.resolve(a, video, cardSources);
         if (known == null || known.isEmpty()) return false;
         // 默认源已经判定失败，所以提示词说"没有可播放线路"。
@@ -283,6 +288,11 @@ final class SourceAutoSwitch {
         if (LocalMediaLibrary.LOCAL_SITE_KEY.equals(site.key)) return false;
         // 只有网盘站的详情会慢到值得提前探；普通站慢是另一回事，不在这里赌。
         if (!SourcePreferences.netdiskNamed(site)) return false;
+        if (!a.prefs.getBoolean(
+                Prefs.AUTO_SOURCE_SWITCH, Prefs.AUTO_SOURCE_SWITCH_DEFAULT)) {
+            AppLog.w("AutoSwitch", "auto switch disabled, skip=probeAhead");
+            return false;
+        }
         final SourceLedger.Sources known = SourceLedger.resolve(a, video, cardSources);
         // "第一次打开别再等两分钟"同一条判据：账本只认识一个站时没有候选可探。
         if (known == null || known.count() < 2) return false;
