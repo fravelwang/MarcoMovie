@@ -117,14 +117,25 @@ final class NetdiskLineLabels {
         return false;
     }
 
-    /** 这条线路的第一集是不是非视频文件名（能解出 Guard 内层 e 才算）。 */
+    /**
+     * 这条线路是不是「整条都是非视频文件名」：只要有一集是视频文件（或解不出 Guard 内层 e），
+     * 就算视频线路。判据与 {@link #hasVideoLine} 同口径。
+     *
+     * <p>以前是「任意一集非视频就算整条音频」：4K 站常把一季里的前几集改名成 {@code .mp3}、
+     * 后面的集仍是 {@code .mp4}，这种线路会被整条标成「音频」，进而触发「只有音频线路 → 自动
+     * 换源」，把 16 集的 4K 源换成只有 5 集的旧源。2026-11-27 盒子实测《两京十五日》虎斑4K：
+     * 16 集（E01–E10 被站点改名 .mp3、E11–E16 是 .mp4）被自动切到旧木偶的 5 集。
+     */
     private static boolean isNonVideoLine(Cms.Line line) {
         if (line == null || line.episodes == null) return false;
+        boolean decoded = false;
         for (Cms.Episode episode : line.episodes) {
             if (episode == null || episode.url == null || episode.url.trim().isEmpty()) continue;
             GuardSpiderId guard = GuardSpiderId.decode(episode.url);
-            if (guard != null && guard.looksLikeNonVideoFile()) return true;
+            if (guard == null) return false;
+            decoded = true;
+            if (!guard.looksLikeNonVideoFile()) return false;
         }
-        return false;
+        return decoded;
     }
 }
