@@ -1101,6 +1101,8 @@ final class SourceController {
                 return "无法连接来源服务，请重试或切换其他来源。";
         }
         String s = e.getMessage();
+        // 站点侧已关闭/异常（closed 文本、NPE、5xx）：这句人话原样给用户，不再套"扩展来源请求失败"。
+        if (e instanceof SourceClosedException && s != null && !s.isEmpty()) return s;
         if (e instanceof CspEngine.EngineException) return s;
         if (e instanceof com.pilipala.catpaw.CatPawHost.DrpySourceException
                 && s != null

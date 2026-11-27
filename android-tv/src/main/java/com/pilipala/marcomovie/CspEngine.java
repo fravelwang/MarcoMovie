@@ -1083,20 +1083,87 @@ public final class CspEngine implements SourceEngine {
 
     private String call(String operation, Call c, boolean cmsObject) throws Exception {
         synchronized (pluginLock) {
+            String result = null;
             try {
                 syncAllPluginActivities(MainActivity.activeActivity);
-                String result = c.run();
+                result = c.run();
                 if (result == null || result.trim().isEmpty()) throw new IOException("插件返回空结果");
-                if (cmsObject) new JSONObject(result);
+                if (cmsObject) {
+                    try {
+                        new JSONObject(result);
+                    } catch (org.json.JSONException notJson) {
+                        // 站点侧关掉时回的常是 "closed" 这种非 JSON 文本：这是"源不可用"，不是我们崩了。
+                        throw closedException(operation, result, notJson);
+                    }
+                }
                 diagnostic(operation + "_ok", site.api, null);
                 return result;
+            } catch (SourceClosedException closed) {
+                throw closed;
             } catch (Throwable t) {
                 Throwable error = unwrap(t);
+                // spider 直接 NPE（老配置里常见的"站关了"表现）与 HTTP 5xx/520 都归到"接口已关闭或异常"；
+                // 其余异常原样包成 EngineException，行为不变。
+                if (error instanceof NullPointerException || looksLikeServerError(error)) {
+                    throw closedException(operation, result, error);
+                }
                 diagnostic(operation + "_failed", site.api, error);
                 throw new EngineException(
                         "扩展来源请求失败：" + error.getClass().getSimpleName() + "。请检查来源或稍后重试。", error);
             }
         }
+    }
+
+    /**
+     * 站点侧关闭/异常的统一收口：打一行带原始异常与响应开头的日志（截断），把该站放进十分钟冷却，
+     * 再抛 {@link SourceClosedException} 让界面说人话（"<站名> 接口已关闭或异常，已跳过"）。
+     */
+    private SourceClosedException closedException(String operation, String body, Throwable error) {
+        String key = site == null || site.key == null ? "" : site.key;
+        String name =
+                site != null && site.name != null && !site.name.trim().isEmpty()
+                        ? site.name
+                        : (key.isEmpty() ? "该源" : key);
+        String head = body == null ? "" : body.replace('\n', ' ').replace('\r', ' ').trim();
+        if (head.length() > 120) head = head.substring(0, 120) + "…";
+        String message = error == null ? "" : error.getMessage();
+        if (message == null) message = "";
+        if (message.length() > 120) message = message.substring(0, 120) + "…";
+        // 不吞信息：原始异常类型/消息 + 响应体开头，一行留档。
+        AppLog.w(
+                "CspEngine",
+                "source closed site="
+                        + key
+                        + " op="
+                        + operation
+                        + " err="
+                        + (error == null ? "-" : error.getClass().getSimpleName() + ":" + message)
+                        + " body="
+                        + head);
+        SourceCooling.cool(key, operation + " closed");
+        diagnostic(operation + "_closed", site == null ? "" : site.api, error);
+        return new SourceClosedException(name, name + " 接口已关闭或异常，已跳过", error);
+    }
+
+    /** {@code HTTP 5xx} / {@code 520} 这类站点侧错误（消息里带状态码时才算）。 */
+    private static boolean looksLikeServerError(Throwable error) {
+        Throwable cursor = error;
+        for (int depth = 0; cursor != null && depth < 4; depth++) {
+            String message = cursor.getMessage();
+            if (message != null) {
+                java.util.regex.Matcher matcher =
+                        java.util.regex.Pattern.compile("(?i)(?:http\\s*)?\\b(5[0-9]{2})\\b")
+                                .matcher(message);
+                if (matcher.find()) {
+                    String code = matcher.group(1);
+                    if (!"500".equals(code) || message.toLowerCase(java.util.Locale.ROOT).contains("http")) {
+                        return true;
+                    }
+                }
+            }
+            cursor = cursor.getCause();
+        }
+        return false;
     }
 
     private void ensureConfigHomeWarmed() {

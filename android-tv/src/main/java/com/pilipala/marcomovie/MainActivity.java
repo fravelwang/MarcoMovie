@@ -859,6 +859,7 @@ public final class MainActivity extends Activity {
                 if (candidate == null || candidate.key == null || candidate.key.isEmpty()) continue;
                 Cms.Video listing = cardSources.listingAt(candidate.key);
                 if (listing == null || listing.id == null || listing.id.trim().isEmpty()) continue;
+                if (SourceCooling.isCooled(candidate.key)) continue;
                 openSite = candidate;
                 openListingVideo = listing;
                 break;

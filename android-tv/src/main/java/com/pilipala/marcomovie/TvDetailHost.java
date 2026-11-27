@@ -1011,6 +1011,10 @@ final class TvDetailHost {
             Cms.Video other = cardSources.listingAt(candidate.key);
             if (other == null || other.id == null || other.id.trim().isEmpty()) continue;
             if (failed != null && candidate.key.equals(failed.key)) continue;
+            if (SourceCooling.isCooled(candidate.key)) {
+                AppLog.w("TvDetail", "card failover skip cooled key=" + candidate.key);
+                continue;
+            }
             rest.add(candidate);
             restListings.put(candidate.key, other);
             if (next == null) {

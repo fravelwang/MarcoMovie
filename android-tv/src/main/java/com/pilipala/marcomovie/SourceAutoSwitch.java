@@ -360,6 +360,10 @@ final class SourceAutoSwitch {
                     continue;
                 }
                 if (candidate.key.equals(site.key)) continue;
+                if (SourceCooling.isCooled(candidate.key)) {
+                    AppLog.w("AutoSwitch", "probe " + candidate.key + " detail skip(cooled)");
+                    continue;
+                }
                 if (AUTO_SWITCH_TRIED.containsKey(autoSwitchKey(video, candidate.key))) {
                     skip.add(candidate.key);
                     AppLog.w("AutoSwitch", "probe " + candidate.key + " detail skip(recent)");

@@ -241,7 +241,14 @@ final class LibraryAggregator {
         final List<Integer> untried = new ArrayList<>(count);
         final List<Integer> retry = new ArrayList<>();
         for (int i = 0; i < count; i++) {
-            String state = SiteHealth.state(a, result.targets.get(i).key);
+            Cms.Site target = result.targets.get(i);
+            String key = target == null ? null : target.key;
+            if (SourceCooling.isCooled(key)) {
+                // 冷却中的站（接口已关闭/异常）这一轮直接不探：十分钟内不花预算问它。
+                AppLog.w(TAG, "source cooled skip key=" + key);
+                continue;
+            }
+            String state = SiteHealth.state(a, key);
             if (SiteHealth.OK.equals(state)) knownOk.add(i);
             else if (SiteHealth.FAIL.equals(state)) retry.add(i);
             else untried.add(i);
