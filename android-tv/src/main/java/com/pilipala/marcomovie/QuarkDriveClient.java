@@ -119,7 +119,10 @@ final class QuarkDriveClient implements NetdiskDrive {
     public Play play(String fileId, int maxRank) throws IOException {
         PlayVariant variant = playVariant(fileId, maxRank);
         if (variant == null) return null;
-        return new Play(variant.url, variant.resolution, variant.rank, cookie, UA, REFERER);
+        // /file/v2/play 每次应答都轮换 __puus 并下发 Video-Auth，视频 CDN 缺了这两个就回 412；
+        // 保存的 Cookie 只够调目录接口。补这一跳与分享线共用 QuarkPlayCookie，播放参数不动。
+        String playCookie = QuarkPlayCookie.refresh(cookie, fileId, 0L);
+        return new Play(variant.url, variant.resolution, variant.rank, playCookie, UA, REFERER);
     }
 
     /**
