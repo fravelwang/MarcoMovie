@@ -61,13 +61,14 @@ import java.util.regex.Pattern;
  *   <li>save task: {@code GET /task?task_id=} - <b>not measured</b>, same place
  * </ul>
  *
- * <p>Copies land in {@link #SAVE_DIR_NAME} under the drive root (created on demand) so every
- * transfer this app makes can be found, and later cleaned up, in one folder. Before each copy the
- * folder is listed and the earlier copies of the same episode (same size, same base name with the
- * {@code (n)} duplicate suffixes stripped) are deleted, so playing an episode repeatedly keeps one
- * file instead of stacking {@code (1)}, {@code (2)}, ...; when the drive still lacks the room for
- * the new copy the resolution stops with a reason the caller can show. When the folder cannot be
- * prepared the copy falls back to the root, i.e. the behaviour before the folder existed.
+ * <p>Copies land in {@link #PLAY_DIR_NAME} inside {@link #ROOT_DIR_NAME} (both created on demand),
+ * the same layout 百度 uses: one root per drive, current episode under {@code play/}. Before each
+ * copy that folder is listed and the earlier copies of the same episode (same size, same base name
+ * with the {@code (n)} duplicate suffixes stripped) are deleted, so playing an episode repeatedly
+ * keeps one file instead of stacking {@code (1)}, {@code (2)}, ...; when the drive still lacks the
+ * room for the new copy the resolution stops with a reason the caller can show. When {@code play/}
+ * cannot be prepared the copy degrades to {@link #ROOT_DIR_NAME} (still ours, never the drive root);
+ * that is the only place this app writes, so the user's root stays clean.
  */
 final class QuarkShareResolver {
 
@@ -82,6 +83,10 @@ final class QuarkShareResolver {
     private static final int CONNECT_TIMEOUT_MS = 8000;
     private static final int READ_TIMEOUT_MS = 8000;
     private static final int MAX_BODY_BYTES = 1 << 20;
+
+    /** 建目录后回读的重试次数与间隔（夸克目录列举有秒级延迟，见 {@link #ensureChildDir}）。 */
+    private static final int DIR_READBACK_TRIES = 3;
+    private static final long DIR_READBACK_MS = 400L;
 
     /** One page of a share directory. */
     private static final int SHARE_PAGE_SIZE = 100;
@@ -108,11 +113,14 @@ final class QuarkShareResolver {
     private static final String ROOT_FID = "0";
 
     /**
-     * Dedicated destination folder for everything this app copies into the user's own drive. Kept
-     * in one folder so a user can find and later clean up the app's transfers instead of hunting
-     * for them among the files in the drive root.
+     * The one folder this app owns on 夸克 (Boss 2026-11-27: 每台盘只留一个根，名字统一成
+     * {@code MarcoMovie})，与百度同名同构。根目录里只放子目录，当前集的临时副本放
+     * {@link #PLAY_DIR_NAME}。
      */
-    private static final String SAVE_DIR_NAME = "MarcoPlayer";
+    private static final String ROOT_DIR_NAME = "MarcoMovie";
+
+    /** 当前这一集的临时副本目录（{@code MarcoMovie/play}）；播前只清它，根目录不动。 */
+    private static final String PLAY_DIR_NAME = "play";
 
     /**
      * Account quota, read right before a copy. Field names measured on the live service
@@ -240,9 +248,16 @@ final class QuarkShareResolver {
         }
         AppLog.w(TAG, "step3 hit: fid=" + hit.fid + " name=" + hit.name);
 
-        // Step 4 destination: resolved once here and passed down, so one resolution never lists the
-        // root twice for the folder. A failure degrades to the root and is logged, never thrown.
+        // Step 4 destination: resolved once here and passed down, so one resolution lists each level
+        // once. A failure never throws; with no folder of our own the copy is refused instead of being
+        // dropped into the drive root (2026-11-27 定).
         String saveDirFid = ensureSaveDir(client, credential.cookie);
+        if (saveDirFid.isEmpty()) {
+            // 没有我们自己的落点就不转存：宁可这一集播不了，也不往盘根写文件（2026-11-27 定）。
+            lastRefusalReason = "夸克临时目录 " + ROOT_DIR_NAME + "/" + PLAY_DIR_NAME + " 没备好，这次不转存";
+            AppLog.w(TAG, "step4 refused, no save dir: " + lastRefusalReason);
+            return null;
+        }
 
         // Step 4a: drop the earlier copies of this episode before copying it again, so the folder
         // never piles up name(1).mp4, name(2).mp4 ... of the same file. Only entries that match this
@@ -389,66 +404,114 @@ final class QuarkShareResolver {
     // ---------------------------------------------------------------- step 4a: destination folder
 
     /**
-     * Returns the fid of {@link #SAVE_DIR_NAME}, creating it when it does not exist yet.
+     * Returns the fid of {@code MarcoMovie/play}, creating the folders when they do not exist yet.
      *
-     * <p>The lookup reuses {@link QuarkDriveClient#list(String)} on the drive root (the same call
-     * the own-drive fallback uses), so no listing HTTP is duplicated here. The fid is cached only
-     * for the current resolution, by being passed to the save as a parameter; no cross-run cache is
-     * kept because the user may rename or delete the folder between runs and one root listing per
-     * resolution is cheap.
+     * <p>Same layout as 百度 (Boss 2026-11-27): one root per drive, the current episode under
+     * {@code play/}. Both levels are looked up with {@link QuarkDriveClient#list(String)} (the same
+     * call the own-drive fallback uses) so no listing HTTP is duplicated here, and the lookups stay
+     * per-resolution: no cross-run cache, because the user may rename or delete the folders between
+     * runs and one listing per level is cheap.
      *
-     * <p>Every failure (listing error, create error, answer without {@code data.fid}) degrades to
-     * {@link #ROOT_FID}, which is exactly the pre-folder behaviour: playback must keep working even
-     * when the folder cannot be prepared.
+     * <p>Every failure is logged, never thrown, and degrades **inside our own root**: {@code play/}
+     * missing → use {@link #ROOT_DIR_NAME}; nothing usable at all → "" (the caller then refuses the
+     * copy). It never degrades to the drive root any more: writing there is exactly what scattered
+     * the user's root before 2026-11-27, and a failed resolution is cheaper than one more stray file.
      *
-     * @return the folder fid, or {@link #ROOT_FID} when it could not be prepared
+     * @return the folder fid, or "" when neither folder could be prepared
      */
     private static String ensureSaveDir(QuarkDriveClient client, String cookie) {
+        String rootFid = ensureChildDir(client, cookie, ROOT_FID, ROOT_DIR_NAME);
+        if (rootFid.isEmpty()) {
+            AppLog.w(TAG, "save root " + ROOT_DIR_NAME + " unavailable, refusing the copy");
+            return "";
+        }
+        String playFid = ensureChildDir(client, cookie, rootFid, PLAY_DIR_NAME);
+        if (playFid.isEmpty()) {
+            AppLog.w(
+                    TAG,
+                    "save dir " + ROOT_DIR_NAME + "/" + PLAY_DIR_NAME
+                            + " unavailable, falling back to " + ROOT_DIR_NAME);
+            return rootFid;
+        }
+        AppLog.w(TAG, "save dir " + ROOT_DIR_NAME + "/" + PLAY_DIR_NAME + " fid=" + playFid);
+        return playFid;
+    }
+
+    /**
+     * 幂等备好 {@code parentFid} 下名为 {@code name} 的子目录，返回它的 fid，失败返回 ""。
+     *
+     * <p>顺序照百度那边的教训：先 list，命中就用；不在才 create，create 之后**回读**确认名字没被
+     * 服务端改成别的（百度对同名路径会自己加 {@code _yyyyMMdd_HHmmss} 后缀；夸克是否也这样没测过，
+     * 所以只认回读到的同名目录）。
+     */
+    private static String ensureChildDir(
+            QuarkDriveClient client, String cookie, String parentFid, String name) {
         try {
-            for (NetdiskEntry entry : client.list(ROOT_FID)) {
-                if (entry.dir && SAVE_DIR_NAME.equals(text(entry.name).trim())) {
-                    AppLog.w(TAG, "save dir hit: " + SAVE_DIR_NAME + " fid=" + entry.fid);
+            for (NetdiskEntry entry : client.list(parentFid)) {
+                if (entry.dir && name.equals(text(entry.name).trim())) {
+                    AppLog.w(TAG, "dir hit " + name + " fid=" + entry.fid);
                     return entry.fid;
                 }
             }
         } catch (IOException error) {
-            AppLog.w(TAG, "save dir lookup failed, falling back to the root: " + describe(error));
-            return ROOT_FID;
+            AppLog.w(TAG, "dir lookup failed for " + name + "：" + describe(error));
+            return "";
         }
+        String created;
         try {
-            String fid = createSaveDir(cookie);
-            if (!fid.isEmpty()) {
-                AppLog.w(TAG, "save dir created: " + SAVE_DIR_NAME + " fid=" + fid);
-                return fid;
-            }
-            AppLog.w(TAG, "save dir create returned no fid, falling back to the root");
+            created = createDir(cookie, parentFid, name);
         } catch (IOException error) {
-            AppLog.w(TAG, "save dir create failed, falling back to the root: " + describe(error));
+            AppLog.w(TAG, "dir create failed for " + name + "：" + describe(error));
+            return "";
         }
-        return ROOT_FID;
+        if (created.isEmpty()) {
+            AppLog.w(TAG, "dir create returned no fid for " + name);
+            return "";
+        }
+        // 回读：夸克的目录列举有秒级延迟（2026-11-27 实测：create 成功后的下一次 list 里还没有它，
+        // 下一次解析才看到）。只回读一次会把「刚建好」误判成「没备好」，进而退化到盘根写文件——
+        // 那正是要消掉的老毛病。所以重试 3 次；仍看不到名字就信 create 给的 fid（名字是它回执里
+        // 的那一个），绝不因为列举慢就放弃。
+        for (int attempt = 1; attempt <= DIR_READBACK_TRIES; attempt++) {
+            try {
+                for (NetdiskEntry entry : client.list(parentFid)) {
+                    if (entry.dir && name.equals(text(entry.name).trim())) {
+                        AppLog.w(TAG, "dir created " + name + " fid=" + entry.fid);
+                        return entry.fid;
+                    }
+                }
+            } catch (IOException error) {
+                AppLog.w(TAG, "dir readback#" + attempt + " failed for " + name + "：" + describe(error));
+            }
+            if (attempt < DIR_READBACK_TRIES) sleep(DIR_READBACK_MS);
+        }
+        AppLog.w(
+                TAG,
+                "dir readback missed "
+                        + name
+                        + " x"
+                        + DIR_READBACK_TRIES
+                        + "，按 create 回的 fid 用："
+                        + created);
+        return created;
     }
 
     /**
-     * Creates {@link #SAVE_DIR_NAME} directly under the drive root.
+     * Creates {@code name} under {@code parentFid} and returns the new fid, or "" when the answer
+     * carries none.
      *
-     * <p><b>Unmeasured.</b> The body below follows the public 夸克 web contract for
-     * {@code POST /file} ({@code pdir_fid}, {@code file_name}, {@code dir_path},
-     * {@code dir_init_lock}, answer {@code data.fid}) but has never been run against the live
-     * service from this app; the raw answer is logged so the first real run pins the shape down.
-     *
-     * @return the new directory fid, or "" when the answer carries none
+     * <p><b>Unmeasured.</b> The body follows the public 夸克 web contract for {@code POST /file}
+     * ({@code pdir_fid}, {@code file_name}, {@code dir_path}, {@code dir_init_lock}, answer
+     * {@code data.fid}); the raw answer is logged so the shape stays pinned down on every run.
      */
-    private static String createSaveDir(String cookie) throws IOException {
+    private static String createDir(String cookie, String parentFid, String name) throws IOException {
         JsonObject payload = new JsonObject();
-        payload.addProperty("pdir_fid", ROOT_FID);
-        payload.addProperty("file_name", SAVE_DIR_NAME);
+        payload.addProperty("pdir_fid", parentFid);
+        payload.addProperty("file_name", name);
         payload.addProperty("dir_path", "");
         payload.addProperty("dir_init_lock", false);
-        // TODO(verify): the /file create contract (field names, whether dir_path/dir_init_lock are
-        // required, the response envelope and the location of the new fid) is unmeasured; this log
-        // line and the one in ensureSaveDir are what pins it down on the first real run.
         JsonObject created = call("POST", BASE + "/file?pr=ucpro&fr=pc", payload.toString(), cookie);
-        AppLog.w(TAG, "save dir create raw=" + created);
+        AppLog.w(TAG, "dir create raw=" + created);
         JsonElement data = created.get("data");
         return data != null && data.isJsonObject() ? optString(data.getAsJsonObject(), "fid") : "";
     }
@@ -461,7 +524,7 @@ final class QuarkShareResolver {
      * <p>A copy counts as this episode when its size is exactly {@code ident.size} <b>and</b> its
      * base name matches the share entry's once the duplicate suffixes 夸克 appends
      * ({@code 03.mp4}, {@code 03(1).mp4}, ...) are stripped from both sides. Nothing else in
-     * {@link #SAVE_DIR_NAME} is touched: other episodes of the show keep their files.
+     * {@code MarcoMovie/play} is touched: other episodes of the show keep their files.
      *
      * <p>Deleting is best effort. A lookup or delete failure is logged and the transfer goes ahead,
      * which may land the new copy as {@code name(1).mp4}; playback must not depend on this call.
@@ -590,7 +653,7 @@ final class QuarkShareResolver {
                         + "GB need="
                         + gibText(requiredBytes)
                         + "GB");
-        return "网盘空间不足（剩 " + gibText(freeBytes) + " GB），请先清理 MarcoPlayer 里的旧文件";
+        return "网盘空间不足（剩 " + gibText(freeBytes) + " GB），请先清理 MarcoMovie/play 里的旧文件";
     }
 
     /** One decimal of a byte count in GiB, used by the capacity log and the user-facing text. */

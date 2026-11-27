@@ -29,8 +29,9 @@ import java.util.Map;
  * <ol>
  *   <li><b>先转存到自己网盘、再取自己文件的直链（主路）</b>（2026-11-26 Boss 定的口径：分享就该先存
  *       到网盘再播，像夸克那样，播前清理）：{@code GET /api/gettemplatevariable} 换 {@code bdstoken}
- *       → {@code POST /api/create?a=commit} 备好 {@code /MarcoMovie} → {@code POST /api/filemanager?
- *       opera=delete} 清掉上一份副本 → {@code POST /share/transfer} 把这一集转存进去拿到
+ *       → 幂等备好 {@code /MarcoMovie/play}（先 list，不在才 create，建完回读）→ {@code POST
+ *       /api/filemanager?opera=delete} 清掉 {@code play/} 里的上一份副本 → {@code POST /share/transfer}
+ *       把这一集转存进 {@code play/} 拿到
  *       {@code to_fs_id} → {@code GET /api/filemetas?dlink=1&fsids=[to_fs_id]} 取直链。取直链只要
  *       账号 Cookie，**不需要 {@code sign} / {@code timestamp} / {@code access_token}**（2026-11-26
  *       深夜实测，见 {@link #filemetas}）。上一版误判成「网页接口要 sign」，是因为把参数名写成了
@@ -108,11 +109,16 @@ final class BaiduShareResolver {
     static final String UA_DLINK = "pan.baidu.com";
 
     /**
-     * 转存到自己网盘的固定目录（Boss 2026-11-26 定：目录就叫 {@code /MarcoMovie}，与夸克的
-     * {@code MarcoPlayer} 区分开；第一次用时不存在就建）。这个目录**只放本应用转存的临时副本**，
-     * 所以每次转存前可以整个清空（与 {@link QuarkShareResolver} 的清目录同一套口径）。
+     * 本应用在一个网盘里**唯一**的那个根目录（Boss 2026-11-27 定：每台盘只留一个根，名字统一成
+     * {@code MarcoMovie}）。根目录本身不放当前集的副本、也不许被整目录清空。
      */
-    static final String SAVE_DIR = "/MarcoMovie";
+    static final String SAVE_ROOT = "/MarcoMovie";
+
+    /**
+     * 当前这一集的临时副本落在这里：{@code /MarcoMovie/play}。播前只清这个子目录里的文件，根目录不动。
+     * 以后要放别的（下载 / 离线）另开子目录，不再回到网盘根。
+     */
+    static final String SAVE_DIR = SAVE_ROOT + "/play";
 
     /**
      * 「转存成功、但取直链那一步失败」留下的副本，这么多毫秒内重试直接复用，不重复转存
@@ -232,7 +238,7 @@ final class BaiduShareResolver {
                         + (ident.ticket.surl.isEmpty() ? "no" : "yes")
                         + ")");
         try {
-            // 主路：先转存到自己网盘的 /MarcoMovie（播前清理上一份副本），再用账号 Cookie 取自己文件
+            // 主路：先转存到自己网盘的 /MarcoMovie/play（播前清理上一份副本），再用账号 Cookie 取自己文件
             // 的直链。任何一步失败都往下走，不在这里把播放挡死。
             Attempt save = saveAttempt(credential, ident);
             if (save.ok()) return save.episode(lineName);
@@ -486,7 +492,7 @@ final class BaiduShareResolver {
         return first;
     }
 
-    // ---------------------------------- 主路：先转存到 /MarcoMovie，再取自己文件的直链
+    // ---------------------------------- 主路：先转存到 /MarcoMovie/play，再取自己文件的直链
 
     /**
      * 上一次「转存成功、但取直链那一步失败」留下的副本。重试时直接拿它的 {@code to_fs_id} 再取一次
@@ -549,9 +555,13 @@ final class BaiduShareResolver {
             AppLog.w(TAG, "save path stopped: " + out.error);
             return out;
         }
-        // 2) 目录 /MarcoMovie：不存在就建（已存在也算成功）。
-        ensureSaveDir(credential, vars.bdstoken);
-        // 3) 播前清理：这个目录只放本应用转存的临时副本，整个清空（与夸克清 MarcoPlayer 同一套口径）。
+        // 2) 目录 /MarcoMovie/play 备好（先 list，不在才 create，建完回读；已存在时绝不 create）。
+        if (!ensureSaveDir(credential, vars.bdstoken)) {
+            out.error = "临时目录 " + SAVE_DIR + " 没备好，这次不转存（免得在盘根留下带时间戳的目录）";
+            AppLog.w(TAG, "save path stopped: " + out.error);
+            return out;
+        }
+        // 3) 播前清理：这个子目录只放本应用转存的临时副本，整个清空（与夸克清 MarcoMovie/play 同一套口径）。
         int cleaned = clearSaveDir(credential, vars.bdstoken);
         // 3b) 删除是异步的（async=2）：等目录真的空了再转存，否则 transfer 会回 errno 4，并把**正在
         // 被删的那份**当成「已转存」复用，filemetas 拿到的 dlink 随后 404（2026-11-27 实测）。
@@ -563,6 +573,13 @@ final class BaiduShareResolver {
             out.show = copy.show;
             out.error = copy.error.isEmpty() ? "转存失败" : copy.error;
             AppLog.w(TAG, "transfer failed after clean=" + cleaned + "：" + out.describe());
+            return out;
+        }
+        // 4b) 落点必须是我们算好的那个子目录：百度自己改名 / 加后缀就算失败，不当成播放成功。
+        if (!copy.path.isEmpty() && !copy.path.startsWith(SAVE_DIR + "/")) {
+            out.errno = copy.errno;
+            out.error = "转存落点异常：百度给的是 " + copy.path + "，不是 " + SAVE_DIR;
+            AppLog.w(TAG, "transfer stray to=" + copy.path + " expected=" + SAVE_DIR);
             return out;
         }
         // 5) 用自己盘里那份的 fs_id 取直链（只要账号 Cookie，见 filemetas）。
@@ -666,20 +683,49 @@ final class BaiduShareResolver {
     }
 
     /**
-     * 备好 {@link #SAVE_DIR}：{@code POST /api/create?a=commit}，表单 {@code path=/MarcoMovie&isdir=1&
-     * block_list=[]}。已经存在时百度回 {@code errno -8}，同样算成功；失败只记日志（转存那一步会再报
-     * 一次真实的错），不在这里终止。
+     * 备好两级目录 {@link #SAVE_ROOT} → {@link #SAVE_DIR}（父目录先），成功才返回 true。
+     *
+     * <p><b>必须幂等</b>，因为百度的 {@code api/create?a=commit} 对**已存在**的路径不会回
+     * {@code errno -8}：它回 {@code errno 0}，然后把新目录建成 {@code <原名>_YYYYMMDD_HHMMSS} 的**兄弟
+     * 目录**。2026-11-27 两端各实测一次，同一个 {@code /MarcoMovie/play} 连建两次：
+     *
+     * <pre>
+     * create #1 -&gt; errno=0 name=/MarcoMovie/play
+     * create #2 -&gt; errno=0 name=/MarcoMovie/play_20261127_172101
+     * </pre>
+     *
+     * <p>百度根里那 9 个 {@code MarcoMovie_<时间戳>} 空目录就是这么来的：之前每次播放都盲建一次
+     * {@code /MarcoMovie}。所以这里的顺序是「先 list，不在才 create，create 之后回读确认」——
+     * create 的 {@code errno 0} 只说明请求成功，不说明路径就是你给的那个。
      */
     private static boolean ensureSaveDir(BaiduLogin.Credential credential, String bdstoken) {
+        return ensureDir(credential, bdstoken, SAVE_ROOT)
+                && ensureDir(credential, bdstoken, SAVE_DIR);
+    }
+
+    /**
+     * 幂等备好一个目录：{@code api/list} 说在就算在，不在才 {@code api/create} 一次，建完再 list 回读。
+     *
+     * @return true 表示 {@code dir} 现在确实是一个目录
+     */
+    private static boolean ensureDir(
+            BaiduLogin.Credential credential, String bdstoken, String dir) {
+        DirListing before = listDir(credential, bdstoken, dir);
+        if (before.ok()) {
+            AppLog.w(TAG, "dir ok " + dir + " n=" + before.entries.size());
+            return true;
+        }
+        AppLog.w(TAG, "dir missing " + dir + "（" + before.error + "），create 一次");
         String url =
                 "https://pan.baidu.com/api/create?a=commit&bdstoken="
                         + encodePart(bdstoken)
                         + "&channel=chunlei&web=1&app_id=250528&clienttype=0";
         String form =
                 "path="
-                        + encodePart(SAVE_DIR)
+                        + encodePart(dir)
                         + "&isdir=1&block_list="
                         + encodePart("[]");
+        String created = "-";
         try {
             Response answer =
                     fetch(
@@ -692,19 +738,23 @@ final class BaiduShareResolver {
                             accountCookie(credential, ""));
             JsonObject body = NetdiskShareHttp.parseObjectOrNull(answer.body);
             int errno = body == null ? -1 : NetdiskShareHttp.optInt(body, "errno", -1);
-            boolean ready = errno == 0 || errno == -8;
-            AppLog.w(
-                    TAG,
-                    "mkdir "
-                            + SAVE_DIR
-                            + " errno="
+            // create 回的名字不一定是我们给的那个（已存在时百度自己加时间戳后缀），原样记下来。
+            created =
+                    "errno="
                             + errno
-                            + (ready ? " ok" : "（建目录没成功，转存那步会报真错）"));
-            return ready;
+                            + " name="
+                            + (body == null ? "-" : NetdiskShareHttp.optString(body, "name").trim());
         } catch (IOException error) {
-            AppLog.w(TAG, "mkdir failed: " + NetdiskShareHttp.describe(error));
+            AppLog.w(TAG, "dir create failed " + dir + "：" + NetdiskShareHttp.describe(error));
             return false;
         }
+        DirListing after = listDir(credential, bdstoken, dir);
+        if (after.ok()) {
+            AppLog.w(TAG, "dir created " + dir + " create[" + created + "]");
+            return true;
+        }
+        AppLog.w(TAG, "dir prepare failed " + dir + " create[" + created + "] list[" + after.error + "]");
+        return false;
     }
 
     /** 一次目录列举的结果；失败时 {@code errno}/{@code error} 说原因，{@code entries} 为空。 */
@@ -825,10 +875,11 @@ final class BaiduShareResolver {
 
     /**
      * 播前清理：把 {@link #SAVE_DIR} 里的文件全删掉（{@code POST /api/filemanager?opera=delete&async=2}，
-     * 表单 {@code filelist=["/MarcoMovie/x.mp4", …]}，父会话已在盒子上实测 {@code errno 0}）。
+     * 表单 {@code filelist=["/MarcoMovie/play/x.mp4", …]}，父会话已在盒子上实测 {@code errno 0}）。
      *
-     * <p>为什么整个清空而不是只删同名：这个目录是本应用转存的临时区（与夸克清 {@code MarcoPlayer}
-     * 同一套口径），每次播放只留这一集，才不会堆出 {@code xxx(1).mp4}、{@code xxx(2).mp4}；而且转存前
+     * <p>为什么整个清空而不是只删同名：这个子目录是本应用转存的临时区（与夸克清
+     * {@code MarcoMovie/play} 同一套口径），每次播放只留这一集，才不会堆出 {@code xxx(1).mp4}、
+     * {@code xxx(2).mp4}；而且转存前
      * 我们还不知道文件叫什么（名字只在转存返回里才有）。子目录不动。删除失败只记日志 —— 转存与播放
      * 不依赖它。
      *
@@ -873,7 +924,7 @@ final class BaiduShareResolver {
                             accountCookie(credential, ""));
             JsonObject body = NetdiskShareHttp.parseObjectOrNull(answer.body);
             int errno = body == null ? -1 : NetdiskShareHttp.optInt(body, "errno", -1);
-            AppLog.w(TAG, "delete old copy n=" + paths.size() + " errno=" + errno);
+            AppLog.w(TAG, "delete old copy n=" + paths.size() + " errno=" + errno + " paths=" + paths);
             return errno == 0 ? paths.size() : 0;
         } catch (IOException error) {
             AppLog.w(TAG, "delete old copy failed: " + NetdiskShareHttp.describe(error));
@@ -904,7 +955,7 @@ final class BaiduShareResolver {
 
     /**
      * 转存本集到 {@link #SAVE_DIR}：{@code POST /share/transfer?shareid&from&sekey&bdstoken}，表单
-     * {@code fsidlist=[<fsid>]&path=/MarcoMovie}。2026-11-26 深夜复测：{@code errno 0} 时返回体里
+     * {@code fsidlist=[<fsid>]&path=/MarcoMovie/play}。2026-11-26 深夜复测：{@code errno 0} 时返回体里
      * **没有** {@code to_fs_id}（只有 {@code extra.list[].to}），所以下面那条「列目录取最新」不是兜底
      * 而是主路径；同一份再转一次会回 {@code errno 4}（已转存），带 {@code duplicated.list[].fs_id}。
      *
@@ -1011,13 +1062,23 @@ final class BaiduShareResolver {
         }
         out.errno = 0;
         JsonObject body = NetdiskShareHttp.parseObjectOrNull(answer.body);
-        AppLog.w(TAG, "transfer answer http=" + answer.http + " body=" + maskBody(answer.body));
+        AppLog.w(
+                TAG,
+                "transfer answer http="
+                        + answer.http
+                        + " to="
+                        + transferPath(body)
+                        + " body="
+                        + maskBody(answer.body));
         if (body == null) {
             out.error = "没有返回可用数据（HTTP " + answer.http + "）";
             return out;
         }
         out.errno = NetdiskShareHttp.optInt(body, "errno", 0);
         out.show = baiduMessage(body);
+        if (out.errno == 0 || out.errno == ERRNO_ALREADY_SAVED) {
+            logStraySiblings(credential, bdstoken);
+        }
         if (out.errno == ERRNO_ALREADY_SAVED) {
             // 目录里已经有同一份（上一次没清干净，或两个解析撞在一起）。百度把现成的 fs_id 放在
             // duplicated.list[] 里，但它可能正在被异步删除（2026-11-27 实测）：这里只记下来，
@@ -1111,6 +1172,44 @@ final class BaiduShareResolver {
             if (!path.isEmpty()) return path;
         }
         return "";
+    }
+
+    /**
+     * 转存之后扫一遍**两级目录**，把不该存在的同类目录打出来：
+     *
+     * <ul>
+     *   <li>网盘根里除 {@link #SAVE_ROOT} 之外的 {@code MarcoMovie*}（那 9 个 {@code MarcoMovie_<时间戳>}
+     *       就是这一类）；
+     *   <li>{@link #SAVE_ROOT} 里除 {@link #SAVE_DIR} 之外的 {@code play*}（create 撞名时百度会把
+     *       {@code play} 改成 {@code play_<时间戳>}）。
+     * </ul>
+     *
+     * <p>它是「收进一个根」的运行时护栏：日志里 {@code stray scan n=0} 就是干净，出现 n&gt;0 就说明又有
+     * 一跳在盘根造目录了。2026-11-27 定位时就是靠同一把尺子把锅扣到 {@code api/create} 上的。
+     */
+    private static void logStraySiblings(BaiduLogin.Credential credential, String bdstoken) {
+        DirListing root = listDir(credential, bdstoken, "/");
+        if (!root.ok()) {
+            AppLog.w(TAG, "stray scan root failed: " + root.error);
+            return;
+        }
+        List<String> stray = new ArrayList<>();
+        for (JsonObject row : root.entries) {
+            String name = NetdiskShareHttp.optString(row, "server_filename").trim();
+            if (name.startsWith("MarcoMovie") && !name.equals("MarcoMovie")) {
+                stray.add(name + "#" + NetdiskShareHttp.optString(row, "fs_id").trim());
+            }
+        }
+        DirListing inRoot = listDir(credential, bdstoken, SAVE_ROOT);
+        if (inRoot.ok()) {
+            for (JsonObject row : inRoot.entries) {
+                String name = NetdiskShareHttp.optString(row, "server_filename").trim();
+                if (name.startsWith("play") && !name.equals("play")) {
+                    stray.add(SAVE_ROOT + "/" + name);
+                }
+            }
+        }
+        AppLog.w(TAG, "stray scan n=" + stray.size() + (stray.isEmpty() ? "" : " " + stray));
     }
 
     /** 目录列举里 {@code server_mtime} 最大的那个文件（刚转存进来的就是它）；没有文件返回 null。 */
