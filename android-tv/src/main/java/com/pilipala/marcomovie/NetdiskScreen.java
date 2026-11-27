@@ -1,6 +1,7 @@
 package com.pilipala.marcomovie;
 
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
@@ -107,28 +108,66 @@ final class NetdiskScreen {
 
     // ------------------------------------------------------------------ header
 
+    /**
+     * 牌面上的盘与显示名。牌面、路径栏共用这一份，免得两处各写一套名字（2026-11-27 T-18）。
+     */
+    private static final String[][] DRIVES = {
+        {QuarkQrLogin.PROVIDER, "夸克"},
+        {UcLogin.PROVIDER, "UC"},
+        {BaiduLogin.PROVIDER, "百度"},
+        {AliLogin.PROVIDER, "阿里"},
+        {NetdiskWebLogin.PROVIDER_115, "115"},
+    };
+
+    /** 当前盘的显示名；未知盘回落到 provider 串本身。路径栏用它，避免只看路径分不清在哪个盘。 */
+    private static String driveLabel(String key) {
+        for (String[] drive : DRIVES) {
+            if (drive[0].equals(key)) return drive[1];
+        }
+        return key == null ? "" : key;
+    }
+
+    /**
+     * 当前盘牌面的常亮样式：强调色底 + 蓝边 + 亮字，**与「焦点白」分开**。
+     *
+     * <p>2026-11-27 T-18 现场：牌面原来只有「非当前盘 alpha .62」这一档明暗，而 TV 的焦点态是整块白底，
+     * 于是切到百度后焦点还停在第一个牌面（夸克），屏幕上就成了「白块在夸克、内容是百度」。现在当前盘
+     * 自己带一层强调色底，焦点跑到哪都不会把它盖回普通盘的样子。
+     */
+    private static final int PILL_CURRENT = 0xff153a63;
+    private static final int PILL_CURRENT_STROKE = 0xff0a84ff;
+
     /** One pill per drive: the account status and the way to change it, in a single line. */
     private void renderDriveStrip() {
         LinearLayout strip = a.row();
         strip.setClipChildren(false);
         strip.setPadding(0, a.dp(4), 0, a.dp(4));
-        String[][] drives = {
-            {QuarkQrLogin.PROVIDER, "夸克"},
-            {UcLogin.PROVIDER, "UC"},
-            {BaiduLogin.PROVIDER, "百度"},
-            {AliLogin.PROVIDER, "阿里"},
-            {NetdiskWebLogin.PROVIDER_115, "115"},
-        };
-        for (String[] drive : drives) {
+        Button currentPill = null;
+        for (String[] drive : DRIVES) {
             final String key = drive[0];
             boolean current = key.equals(driveKey);
             boolean logged = isLoggedIn(key);
             boolean nativeLogin =
                     QuarkQrLogin.PROVIDER.equals(key) || NetdiskWebLogin.supports(key);
             String label = drive[1] + (nativeLogin ? (logged ? " · 已登录" : " · 未登录") : "");
-            Button pill = a.navButton(label, "netdisk-drive:" + key, () -> onDrivePill(key));
+            final Button pill = a.navButton(label, "netdisk-drive:" + key, () -> onDrivePill(key));
             pill.setTextSize(13f);
-            if (!current) pill.setAlpha(.62f);
+            if (current) {
+                currentPill = pill;
+                paintCurrentPill(pill);
+                // 覆盖 navButton 的焦点样式：离开焦点后回到「当前盘」的样子，而不是普通盘的深灰。
+                pill.setOnFocusChangeListener(
+                        (v, focused) -> {
+                            if (focused) {
+                                pill.setBackground(a.bg(MainActivity.WHITE, 19));
+                                pill.setTextColor(MainActivity.DARK);
+                            } else {
+                                paintCurrentPill(pill);
+                            }
+                        });
+            } else {
+                pill.setAlpha(.55f);
+            }
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(36));
             lp.rightMargin = a.dp(10);
             strip.addView(pill, lp);
@@ -138,6 +177,21 @@ final class NetdiskScreen {
         Button more = a.navButton("更多", "netdisk-more", this::openMore);
         strip.addView(more, new LinearLayout.LayoutParams(a.dp(96), a.dp(36)));
         a.body.addView(strip, new LinearLayout.LayoutParams(-1, -2));
+        if (currentPill != null) {
+            // 切盘后把「初始焦点」指到当前盘：白框与「这一页是哪个盘」永远是同一个（2026-11-27 T-18）。
+            // 走 tvInitialFocus 而不是自己 post(requestFocus)，否则会被 MainActivity.restore() 的
+            // post 覆盖回「第一个可聚焦控件」（也就是夸克牌面）。
+            a.tvInitialFocus = currentPill;
+        }
+    }
+
+    /** 把「这就是当前盘」画到牌面上（底色/描边/字重），与焦点态互不覆盖。 */
+    private void paintCurrentPill(Button pill) {
+        GradientDrawable shape = a.bg(PILL_CURRENT, 19);
+        shape.setStroke(Math.max(1, a.dp(1.5f)), PILL_CURRENT_STROKE);
+        pill.setBackground(shape);
+        pill.setTextColor(0xffffffff);
+        pill.setTypeface(null, Typeface.BOLD);
     }
 
     /**
@@ -267,11 +321,16 @@ final class NetdiskScreen {
         }
     }
 
-    /** Breadcrumb + the only two verbs a browser needs: up, refresh. */
+    /**
+     * Breadcrumb + the only two verbs a browser needs: up, refresh.
+     *
+     * <p>2026-11-27 T-18：路径前面带上当前盘名（{@code 百度 · 我的网盘}）。光看「我的网盘」分不清在
+     * 哪个盘上，切盘后尤其容易看错。
+     */
     private void renderPathBar() {
         LinearLayout bar = a.row();
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        TextView path = a.text(rootPathLabel(), 15f, TvV17Theme.TEXT);
+        TextView path = a.text(driveLabel(driveKey) + " · " + rootPathLabel(), 15f, TvV17Theme.TEXT);
         path.setTypeface(null, Typeface.BOLD);
         path.setSingleLine(true);
         path.setEllipsize(TextUtils.TruncateAt.START);
