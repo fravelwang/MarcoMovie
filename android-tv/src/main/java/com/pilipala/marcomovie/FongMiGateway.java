@@ -71,10 +71,13 @@ final class FongMiGateway implements SourceGateway {
                     "home " + site.key + " returned an unparsable payload",
                     failure);
         }
+        boolean w2xProbe = site.key != null && site.key.startsWith("w2x_");
+        int feedCount = 0;
         if (listing.isEmpty()) {
             try {
                 List<Cms.Video> feed = Cms.listing(engine.homeVideos()).videos;
                 HomeScreen.clean(feed);
+                feedCount = feed.size();
                 listing = feed;
             } catch (Throwable ignored) {
                 // No video feed is normal; the category probes below are the fallback.
@@ -84,21 +87,63 @@ final class FongMiGateway implements SourceGateway {
         // check: CNTV 69 categories, opera 68, Bilibili collection 42) have no home videos at all.
         // Their first channel is often empty too, so try a few in order and take the first that
         // lists something; one empty channel is not evidence that the site is dead.
-        for (int index = 0;
-                listing.isEmpty()
-                        && index < Math.min(LibraryAggregator.MAX_CATEGORY_PROBES, categories.size());
+        StringBuilder probes = new StringBuilder();
+        String firstProbeHead = "";
+        int probeBudget =
+                w2xProbe
+                        ? Math.max(LibraryAggregator.MAX_CATEGORY_PROBES, 6)
+                        : LibraryAggregator.MAX_CATEGORY_PROBES;
+        for (int index = 0; listing.isEmpty() && index < Math.min(probeBudget, categories.size());
                 index++) {
             String categoryId = categories.get(index).id;
             try {
-                List<Cms.Video> probe = Cms.listing(engine.category(categoryId, 1)).videos;
+                String probeRaw = engine.category(categoryId, 1);
+                List<Cms.Video> probe = Cms.listing(probeRaw).videos;
                 HomeScreen.clean(probe);
                 listing = probe;
+                if (w2xProbe) {
+                    if (probes.length() > 0) probes.append(',');
+                    probes.append(categoryId).append(':').append(probe.size());
+                    if (firstProbeHead.isEmpty()) firstProbeHead = head(probeRaw, 200);
+                }
             } catch (Throwable failure) {
                 // Keep probing: one bad channel should not end the fallback, but it is logged.
+                if (w2xProbe) {
+                    if (probes.length() > 0) probes.append(',');
+                    probes.append(categoryId).append(":err(").append(describe(failure)).append(')');
+                }
                 AppLog.w(
                         "SourceGateway",
                         "home " + site.key + " probe " + categoryId + ": " + describe(failure));
             }
+        }
+        if (w2xProbe) {
+            // 一行就能看出「它的首页到底回没回东西」：home 原文字节数、分类数、第一个分类 id、
+            // 站内推荐条数、每个分类探到的条目数，以及第一条分类响应的开头（形状/错误信息）。
+            AppLog.w(
+                    "SourceGateway",
+                    "w2x home probe site="
+                            + site.key
+                            + " engine="
+                            + engine.getClass().getSimpleName()
+                            + " home="
+                            + (raw == null ? 0 : raw.trim().length())
+                            + " cats="
+                            + categories.size()
+                            + " cat[0]="
+                            + (categories.isEmpty() || categories.get(0) == null
+                                    ? "-"
+                                    : categories.get(0).id)
+                            + " feed="
+                            + feedCount
+                            + " probes=["
+                            + probes
+                            + "] items="
+                            + listing.size()
+                            + " homeHead="
+                            + head(raw, 200)
+                            + " catHead="
+                            + firstProbeHead);
         }
         List<MediaRef> picked = new ArrayList<>(Math.max(1, limit));
         for (Cms.Video video : listing) {
@@ -409,6 +454,13 @@ final class FongMiGateway implements SourceGateway {
             }
         }
         return GatewayException.Kind.OTHER;
+    }
+
+    /** First {@code max} characters of a payload, newlines flattened: log-safe and grep-friendly. */
+    private static String head(String payload, int max) {
+        String text = payload == null ? "" : payload.trim().replace('\n', ' ').replace('\r', ' ');
+        if (text.length() <= max) return text;
+        return text.substring(0, max) + "…";
     }
 
     private static String describe(Throwable failure) {

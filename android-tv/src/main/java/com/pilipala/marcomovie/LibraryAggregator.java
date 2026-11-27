@@ -241,9 +241,17 @@ final class LibraryAggregator {
             else untried.add(i);
         }
         final List<Integer> healthy = new ArrayList<>(MAX_WAVE1_SITES);
-        healthy.addAll(knownOk.size() > MAX_WAVE1_SITES
-                ? knownOk.subList(0, MAX_WAVE1_SITES)
-                : knownOk);
+        // 站点偏好/置顶的站先排进 wave 1：用户把它设成默认源，就是在说「片库先取它的片」。
+        // 之前这里只按 SiteHealth 排，一个慢站（w2x_ 的 Guard 首次 home 要 5 s 以上）第一次超时
+        // 就会被塞进 retry，之后很多轮都轮不到，墙上永远没有它的卡。
+        for (int index : preferenceFirst(a, result.targets)) {
+            if (healthy.size() >= MAX_WAVE1_SITES) break;
+            if (!healthy.contains(index)) healthy.add(index);
+        }
+        for (int index : knownOk) {
+            if (healthy.size() >= MAX_WAVE1_SITES) break;
+            if (!healthy.contains(index)) healthy.add(index);
+        }
         int room = MAX_WAVE1_SITES - healthy.size();
         if (room > 0 && !untried.isEmpty()) {
             int cursor = Math.max(0, a.prefs == null ? 0 : a.prefs.getInt(CURSOR_KEY, 0));
@@ -698,12 +706,19 @@ final class LibraryAggregator {
         final List<Cms.Video> videos;
         final long initMs;
         final long fetchMs;
+        /** The per-site budget this fetch was given; a slow Guard site gets more than the default. */
+        final long budgetMs;
 
         SiteOutcome(int index, List<Cms.Video> videos, long initMs, long fetchMs) {
+            this(index, videos, initMs, fetchMs, SITE_TIMEOUT_MS);
+        }
+
+        SiteOutcome(int index, List<Cms.Video> videos, long initMs, long fetchMs, long budgetMs) {
             this.index = index;
             this.videos = videos;
             this.initMs = initMs;
             this.fetchMs = fetchMs;
+            this.budgetMs = budgetMs <= 0 ? SITE_TIMEOUT_MS : budgetMs;
         }
 
         /**
@@ -712,7 +727,7 @@ final class LibraryAggregator {
          * cold netdisk plugin look dead.
          */
         boolean usable() {
-            return videos != null && fetchMs <= SITE_TIMEOUT_MS;
+            return videos != null && fetchMs <= budgetMs;
         }
     }
 
@@ -758,7 +773,8 @@ final class LibraryAggregator {
             if (watchdog != null) watchdog.cancel(false);
             long initMs = android.os.SystemClock.elapsedRealtime() - started;
             long fetchStarted = android.os.SystemClock.elapsedRealtime();
-            watchdog = arm(SITE_TIMEOUT_MS);
+            final long budget = fetchBudgetMs(site);
+            watchdog = arm(budget);
             List<Cms.Video> videos = null;
             try {
                 videos = fetch(activity, site, engine);
@@ -772,7 +788,8 @@ final class LibraryAggregator {
                             index,
                             videos,
                             initMs,
-                            android.os.SystemClock.elapsedRealtime() - fetchStarted);
+                            android.os.SystemClock.elapsedRealtime() - fetchStarted,
+                            budget);
             sink.offer(outcome);
             return outcome;
         }
@@ -793,6 +810,46 @@ final class LibraryAggregator {
                 return null;
             }
         }
+    }
+
+    /**
+     * 一次 fetch 允许占的时间。w2x_ 那批 Guard 站点的 {@code homeContent} 首调用要 5 s 以上（实测
+     * 5.5 s init + 5 s 以上 home），用普通站的 5 s 会稳定判死；给它们多一倍，但整轮
+     * {@link #TOTAL_TIMEOUT_MS} 不变，4 个 worker 里先跑偏好站，后面的站照旧排队。
+     */
+    private static long fetchBudgetMs(Cms.Site site) {
+        String key = site == null || site.key == null ? "" : site.key;
+        return key.startsWith("w2x_") ? SITE_TIMEOUT_MS * 2 : SITE_TIMEOUT_MS;
+    }
+
+    /**
+     * Indices of the sites the user pinned or set as the default preference, in that order.
+     * Empty when nothing is pinned, so the wall keeps its old ordering by default.
+     */
+    private static List<Integer> preferenceFirst(MainActivity a, List<Cms.Site> targets) {
+        List<Integer> out = new ArrayList<>();
+        if (a == null || targets == null || targets.isEmpty()) return out;
+        for (String key : SourcePreferences.order(a)) {
+            for (int index = 0; index < targets.size(); index++) {
+                Cms.Site site = targets.get(index);
+                if (site != null && key.equals(site.key) && !out.contains(index)) out.add(index);
+            }
+        }
+        for (int index = 0; index < targets.size(); index++) {
+            Cms.Site site = targets.get(index);
+            if (site != null && SourcePreferences.isPreferred(a, site) && !out.contains(index)) {
+                out.add(index);
+            }
+        }
+        if (!out.isEmpty()) {
+            StringBuilder keys = new StringBuilder();
+            for (int index : out) {
+                if (keys.length() > 0) keys.append(',');
+                keys.append(targets.get(index).key);
+            }
+            AppLog.w(TAG, "wave1 preference first: [" + keys + "]");
+        }
+        return out;
     }
 
     private static ThreadFactory daemonFactory(final String name) {

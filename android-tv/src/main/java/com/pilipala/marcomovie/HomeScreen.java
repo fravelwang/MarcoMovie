@@ -3020,6 +3020,11 @@ final class HomeScreen {
                         if (rightPin < 0) return -1;
                         return Integer.compare(leftPin, rightPin);
                     }
+                    // 源页第二层写的是「决定片库/分类/搜索默认用哪个站点」，所以偏好源排在手排
+                    // 顺序之后、网盘优先之前：设了偏好（例如虎斑4K）就该先开它那一页。
+                    boolean leftPreferred = SourcePreferences.isPreferred(a, left);
+                    boolean rightPreferred = SourcePreferences.isPreferred(a, right);
+                    if (leftPreferred != rightPreferred) return leftPreferred ? -1 : 1;
                     int leftRank = siteRank(left);
                     int rightRank = siteRank(right);
                     if (leftRank != rightRank) return Integer.compare(leftRank, rightRank);
