@@ -1004,41 +1004,23 @@ final class TvDetailHost {
                         if (!noPlayableNote.isEmpty()) ui.setLoadingStatus(noPlayableNote);
                     }
                     if (!playable) {
-                        WatchHistory.Entry fallbackBm = bm != null ? bm : a.historyFallbackBookmark;
-                        if (fallbackBm != null
-                                && !a.historyFallbackInFlight
-                                && fallbackBm.title != null
-                                && !fallbackBm.title.trim().isEmpty()
-                                && CatalogScreen.hasAlternativeHistorySources(a, site.key)) {
-                            CatalogScreen.resumeHistoryFromAlternativeSources(
-                                    a, fallbackBm, site.key, "原片源暂无可播放线路", true);
-                            return;
-                        }
-                        // 同站自救：网盘站详情页的下载区里挂着的夸克分享，本身就是线路。派发得出去就先
-                        // 等它（拿到就地重绑，见 rebindAfterShare）；拿不到（没链接 / 全失效 / 没登录
-                        // 夸克）再走下面的换源。这个先后顺序就是卡里定的"先试分享、再试自动换源"。
-                        // forceDefault 必须为 true：这个分支判成"没有可播线路"，但片子身上常常还挂着
-                        // 几条被标坏的线路（盒子上实测《两京十五日》虎斑：两条 UC、各 2 集），
-                        // initialSelection 会照样选中第一条；只有显式选分享线，「播放」才走它。
-                        if (NetdiskShareLines.buildAsync(
+                        // w2x（王二小系）兜底优先：插件把站点页抓到了、但回包没有任何可播线路时，
+                        // 先用那张页面走我们自己的网盘分享解析（百度分享等），再去「历史换源 /
+                        // 同站分享 / 自动换源」。放在最前面是因为历史换源会直接跳到别的站，
+                        // 那用户就看不到这次补出来的线路了。
+                        if (tryPageFallback(
                                 a,
                                 site,
                                 resolved,
+                                bm,
+                                ui,
                                 valid,
-                                shareLines ->
-                                        rebindAfterShare(
-                                                a,
-                                                site,
-                                                resolved,
-                                                bm,
-                                                ui,
-                                                valid,
-                                                shareLines,
-                                                true),
-                                () -> recoverWithoutLines(a, site, resolved, ui, valid, cardSources))) {
+                                () ->
+                                        recoverWithoutPlayableLines(
+                                                a, site, resolved, bm, ui, valid, cardSources))) {
                             return;
                         }
-                        recoverWithoutLines(a, site, resolved, ui, valid, cardSources);
+                        recoverWithoutPlayableLines(a, site, resolved, bm, ui, valid, cardSources);
                     } else {
                         // 有线路，但一条都不是夸克可解析 id（例如全是 UC 四段 id，本应用没有 UC 原生
                         // 解析器，插件又报"PC端未登录或Cookie失效"）：页面里有夸克分享就补一条，并把
@@ -1084,75 +1066,85 @@ final class TvDetailHost {
                 error -> {
                     if (!valid.get()) return;
                     detailSettled[0] = true;
-                    WatchHistory.Entry fallbackBm =
-                            activeBookmark[0] != null
-                                    ? activeBookmark[0]
-                                    : a.historyFallbackBookmark;
-                    if (fallbackBm != null
-                            && !a.historyFallbackInFlight
-                            && fallbackBm.title != null
-                            && !fallbackBm.title.trim().isEmpty()
-                            && CatalogScreen.hasAlternativeHistorySources(a, site.key)) {
-                        CatalogScreen.resumeHistoryFromAlternativeSources(
-                                a, fallbackBm, site.key, "原片源加载失败", true);
+                    // w2x 兜底优先：插件详情回空（SiteReplyException）时，插件抓过的那张站点页里仍可能
+                    // 有活的分享（花卷就是这样），先试页面补线路；补不到再走原来的历史换源 / 自动换源。
+                    Runnable afterPageFallback =
+                            () -> {
+                                WatchHistory.Entry fallbackBm =
+                                        activeBookmark[0] != null
+                                                ? activeBookmark[0]
+                                                : a.historyFallbackBookmark;
+                                if (fallbackBm != null
+                                        && !a.historyFallbackInFlight
+                                        && fallbackBm.title != null
+                                        && !fallbackBm.title.trim().isEmpty()
+                                        && CatalogScreen.hasAlternativeHistorySources(a, site.key)) {
+                                    CatalogScreen.resumeHistoryFromAlternativeSources(
+                                            a, fallbackBm, site.key, "原片源加载失败", true);
+                                    return;
+                                }
+                                // 卡片自带的来源池：首选站失败就立刻问池子里的下一个，不等自动换源那一轮探测
+                                // （那一轮要逐站问详情，用户看到的是"卡住"）。池子每跳一次就少一个站，跳完为止。
+                                if (hopCardSource(a, site, listing, cardSources)) return;
+                                // The source failed outright: same probe-and-switch fallback as the empty-lines
+                                // path, dispatched before the error state. This is the branch that runs instead
+                                // of the curated matching page when the ledger knows another source.
+                                String fallbackTitle =
+                                        initialVideo.title != null ? initialVideo.title.trim() : "";
+                                // 站点自己说的话（空列表回包里的 msg）；没有就空串，界面保持通用文案。
+                                final String siteReply = SourceController.siteReply(error);
+                                boolean switching =
+                                        SourceAutoSwitch.switchIfDefaultHasNoLines(
+                                                a,
+                                                site,
+                                                activeVideo[0],
+                                                valid,
+                                                detailExhaustedHint(a, ui, valid, fallbackTitle, siteReply),
+                                                false,
+                                                cardSources);
+                                // 提前探测这一轮已经排空了（它先于这次失败结束）：失败分支不再派发，这里直接
+                                // 落到「没有可播放线路 + 用户自己点的搜索按钮」，不再跳搜索页。
+                                boolean exhaustedBeforeFailure = !switching && probeAheadExhausted[0];
+                                final boolean autoSwitchOff = !autoSourceSwitchOn(a);
+                                if (switching) {
+                                    // 同样是"还可能有别的来源"：派发了探测就说正在尝试，别先报错。
+                                    ui.setLoadingStatus(SWITCHING_SOURCE_STATUS);
+                                } else if (exhaustedBeforeFailure) {
+                                    detailExhaustedHint(a, ui, valid, fallbackTitle, siteReply).run();
+                                } else if (autoSwitchOff) {
+                                    // 开关关着：没有探过任何别的站，停在死路页，搜索入口留给用户自己点。
+                                    ui.setLoadingStatus(deadEndStatus(siteReply));
+                                    ui.clearSourceSwitchInProgress(NO_PLAYABLE_LINES_PLAY_LABEL);
+                                    if (!fallbackTitle.isEmpty()) {
+                                        ui.setSourceSwitchAction(
+                                                SEARCH_OTHER_SOURCES_LABEL,
+                                                () -> a.openSearch(fallbackTitle));
+                                    }
+                                    a.toast(AUTO_SWITCH_OFF_SEARCH_HINT);
+                                } else if (!siteReply.isEmpty()) {
+                                    // 站点回的是空列表并给了原话：这是一条死路，不只是"加载失败"。
+                                    ui.setLoadingStatus(deadEndStatus(siteReply));
+                                } else {
+                                    ui.setLoadingStatus(a.message(error));
+                                }
+                                // A known alternative is the fastest recovery from a dead source; global
+                                // search stays the fallback when the ledger knows only this one.
+                                if (!autoSwitchOff
+                                        && !exhaustedBeforeFailure
+                                        && !ui.showKnownSourceSwitch()
+                                        && !fallbackTitle.isEmpty()) {
+                                    ui.setSourceSwitchAction(
+                                            SEARCH_OTHER_SOURCES_LABEL, () -> a.openSearch(fallbackTitle));
+                                }
+                                if (ui.switchSourceBtn.getVisibility() == android.view.View.VISIBLE) {
+                                    ui.switchSourceBtn.requestFocus();
+                                }
+                        };
+                    if (tryPageFallback(
+                            a, site, activeVideo[0], activeBookmark[0], ui, valid, afterPageFallback)) {
                         return;
                     }
-                    // 卡片自带的来源池：首选站失败就立刻问池子里的下一个，不等自动换源那一轮探测
-                    // （那一轮要逐站问详情，用户看到的是"卡住"）。池子每跳一次就少一个站，跳完为止。
-                    if (hopCardSource(a, site, listing, cardSources)) return;
-                    // The source failed outright: same probe-and-switch fallback as the empty-lines
-                    // path, dispatched before the error state. This is the branch that runs instead
-                    // of the curated matching page when the ledger knows another source.
-                    String fallbackTitle =
-                            initialVideo.title != null ? initialVideo.title.trim() : "";
-                    // 站点自己说的话（空列表回包里的 msg）；没有就空串，界面保持通用文案。
-                    final String siteReply = SourceController.siteReply(error);
-                    boolean switching =
-                            SourceAutoSwitch.switchIfDefaultHasNoLines(
-                                    a,
-                                    site,
-                                    activeVideo[0],
-                                    valid,
-                                    detailExhaustedHint(a, ui, valid, fallbackTitle, siteReply),
-                                    false,
-                                    cardSources);
-                    // 提前探测这一轮已经排空了（它先于这次失败结束）：失败分支不再派发，这里直接
-                    // 落到「没有可播放线路 + 用户自己点的搜索按钮」，不再跳搜索页。
-                    boolean exhaustedBeforeFailure = !switching && probeAheadExhausted[0];
-                    final boolean autoSwitchOff = !autoSourceSwitchOn(a);
-                    if (switching) {
-                        // 同样是"还可能有别的来源"：派发了探测就说正在尝试，别先报错。
-                        ui.setLoadingStatus(SWITCHING_SOURCE_STATUS);
-                    } else if (exhaustedBeforeFailure) {
-                        detailExhaustedHint(a, ui, valid, fallbackTitle, siteReply).run();
-                    } else if (autoSwitchOff) {
-                        // 开关关着：没有探过任何别的站，停在死路页，搜索入口留给用户自己点。
-                        ui.setLoadingStatus(deadEndStatus(siteReply));
-                        ui.clearSourceSwitchInProgress(NO_PLAYABLE_LINES_PLAY_LABEL);
-                        if (!fallbackTitle.isEmpty()) {
-                            ui.setSourceSwitchAction(
-                                    SEARCH_OTHER_SOURCES_LABEL,
-                                    () -> a.openSearch(fallbackTitle));
-                        }
-                        a.toast(AUTO_SWITCH_OFF_SEARCH_HINT);
-                    } else if (!siteReply.isEmpty()) {
-                        // 站点回的是空列表并给了原话：这是一条死路，不只是"加载失败"。
-                        ui.setLoadingStatus(deadEndStatus(siteReply));
-                    } else {
-                        ui.setLoadingStatus(a.message(error));
-                    }
-                    // A known alternative is the fastest recovery from a dead source; global
-                    // search stays the fallback when the ledger knows only this one.
-                    if (!autoSwitchOff
-                            && !exhaustedBeforeFailure
-                            && !ui.showKnownSourceSwitch()
-                            && !fallbackTitle.isEmpty()) {
-                        ui.setSourceSwitchAction(
-                                SEARCH_OTHER_SOURCES_LABEL, () -> a.openSearch(fallbackTitle));
-                    }
-                    if (ui.switchSourceBtn.getVisibility() == android.view.View.VISIBLE) {
-                        ui.switchSourceBtn.requestFocus();
-                    }
+                    afterPageFallback.run();
                 };
 
         if (ready != null) {
@@ -1328,6 +1320,112 @@ final class TvDetailHost {
             ui.setSourceSwitchAction(SEARCH_OTHER_SOURCES_LABEL, () -> a.openSearch(query));
             a.toast(EXHAUSTED_SEARCH_HINT);
         };
+    }
+
+    /**
+     * 「详情绑定了，但一条可播线路都没有」的原收尾（w2x 页面兜底之后的那一档）：先按历史换到别的
+     * 站，再试同站网盘分享，最后交给自动换源/死路页。w2x 页面兜底没派出去或没捞到时也回到这里，
+     * 行为与 T-24 之前一致。
+     */
+    private static void recoverWithoutPlayableLines(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video resolved,
+            WatchHistory.Entry bookmark,
+            TvV17DetailScreen ui,
+            Valid valid,
+            SourceLedger.Sources cardSources) {
+        if (a == null || resolved == null || ui == null) return;
+        String siteKey = site == null || site.key == null ? "" : site.key;
+        WatchHistory.Entry fallbackBm = bookmark != null ? bookmark : a.historyFallbackBookmark;
+        if (fallbackBm != null
+                && !a.historyFallbackInFlight
+                && fallbackBm.title != null
+                && !fallbackBm.title.trim().isEmpty()
+                && CatalogScreen.hasAlternativeHistorySources(a, siteKey)) {
+            CatalogScreen.resumeHistoryFromAlternativeSources(
+                    a, fallbackBm, siteKey, "原片源暂无可播放线路", true);
+            return;
+        }
+        // 同站自救：网盘站详情页的下载区里挂着的夸克分享，本身就是线路。派发得出去就先等它（拿到
+        // 就地重绑，见 rebindAfterShare）；拿不到（没链接 / 全失效 / 没登录夸克）再走下面的换源。
+        // 这个先后顺序就是卡里定的"先试分享、再试自动换源"。
+        // forceDefault 必须为 true：这个分支判成"没有可播线路"，但片子身上常常还挂着几条被标坏的
+        // 线路（盒子上实测《两京十五日》虎斑：两条 UC、各 2 集），initialSelection 会照样选中第一条；
+        // 只有显式选分享线，「播放」才走它。
+        if (NetdiskShareLines.buildAsync(
+                a,
+                site,
+                resolved,
+                valid,
+                shareLines ->
+                        rebindAfterShare(a, site, resolved, bookmark, ui, valid, shareLines, true),
+                () -> recoverWithoutLines(a, site, resolved, ui, valid, cardSources))) {
+            return;
+        }
+        recoverWithoutLines(a, site, resolved, ui, valid, cardSources);
+    }
+
+    /**
+     * w2x（王二小系）详情兜底：插件刚抓过的那张站点页里挂着活的网盘分享（《两京十五日》花卷 实测是
+     * 百度分享），但插件因为自己那条失效夸克 id 把整份详情回了空列表。这里把页面交给
+     * {@link NetdiskShareLines#buildPageAsync}，用我们自己的 provider 换出线路。
+     *
+     * <p>触发条件三条，缺一不试：站点 key 以 {@code w2x_} 开头；详情里一条视频线路都没有
+     * （{@link NetdiskLineLabels#hasVideoLine} 的口径）；页面地址是插件这次真抓过的
+     * （{@link DetailPageTrace}，先按影片 id 对，3 分钟内的最近一条兜底）。
+     *
+     * <p>拿到线路走 {@link #rebindAfterShare}（与同站分享线同一条路）；拿不到只记一行日志，然后由
+     * 调用方继续原来的「历史换源 → 同站分享 → 自动换源」链条，死路页不变。
+     *
+     * @return true 表示已经派发到后台，调用方先别继续走换源
+     */
+    private static boolean tryPageFallback(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video resolved,
+            WatchHistory.Entry bookmark,
+            TvV17DetailScreen ui,
+            Valid valid,
+            Runnable onNothing) {
+        if (a == null || site == null || resolved == null) return false;
+        String key = site.key == null ? "" : site.key;
+        if (!key.startsWith("w2x_")) return false;
+        if (NetdiskLineLabels.hasVideoLine(resolved)) return false;
+        String pageUrl = DetailPageTrace.forVideo(resolved.id);
+        String matched = "id";
+        if (pageUrl.isEmpty()) {
+            pageUrl = DetailPageTrace.latest();
+            matched = "latest";
+        }
+        if (pageUrl.isEmpty()) {
+            AppLog.w("Detail", "page fallback: no page url site=" + key + " id=" + resolved.id);
+            return false;
+        }
+        final String url = pageUrl;
+        boolean dispatched =
+                NetdiskShareLines.buildPageAsync(
+                        a,
+                        site,
+                        url,
+                        valid,
+                        shareLines -> {
+                            AppLog.w(
+                                    "Detail",
+                                    "page fallback: lines="
+                                            + (shareLines == null ? 0 : shareLines.size())
+                                            + " url="
+                                            + url);
+                            rebindAfterShare(a, site, resolved, bookmark, ui, valid, shareLines, true);
+                        },
+                        () -> {
+                            AppLog.w("Detail", "page fallback: no lines url=" + url);
+                            if (onNothing != null) onNothing.run();
+                        });
+        if (dispatched) {
+            AppLog.w("Detail", "page fallback: dispatch url=" + url + " match=" + matched);
+        }
+        return dispatched;
     }
 
     /**

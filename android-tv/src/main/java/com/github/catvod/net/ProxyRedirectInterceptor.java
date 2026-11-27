@@ -3,6 +3,7 @@ package com.github.catvod.net;
 import androidx.annotation.NonNull;
 
 import com.github.catvod.utils.Auth;
+import com.pilipala.marcomovie.DetailPageTrace;
 
 import java.io.IOException;
 import java.net.ProtocolException;
@@ -36,6 +37,8 @@ final class ProxyRedirectInterceptor implements Interceptor {
             request = withPolicy(request, policy, previousPolicy);
             Chain routed = policy == null ? chain : chain.withProxySelector(policy);
             Response response = routed.proceed(request);
+            // 插件自己抓的站内详情页：记下地址，详情回包没有可播线路时用它走我们自己的分享解析。
+            DetailPageTrace.record(request.method(), request.url().toString(), response.code());
             followUpCount += countFollowUps(response);
             response = withPriorResponse(response, previousResponse);
             checkFollowUps(response, followUpCount);

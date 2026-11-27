@@ -106,6 +106,12 @@ final class NetdiskShareLines {
     private static final long EMPTY_CACHE_TTL_MS = 60 * 1000L;
     private static final int CACHE_MAX_ENTRIES = 64;
 
+    /**
+     * 从「插件抓过的站点页」兜底补出来的线路，名字加这个后缀：同一个页面里的分享和站点自己给的
+     * 线路同名（都叫「百度分享」），用户要能看出来这条是谁补的。
+     */
+    static final String PAGE_SOURCE_SUFFIX = "（站点页）";
+
     /** 静态缓存，只为「同一部片反复进详情」省网络；过期或超量就先清。 */
     private static final Map<String, CacheEntry> CACHE = new ConcurrentHashMap<>();
 
@@ -153,14 +159,51 @@ final class NetdiskShareLines {
         if (!shouldTry(site, video)) return false;
         final String detailId = text(video.id).trim();
         if (detailId.isEmpty()) return false;
-        AppLog.w(TAG, "try " + text(site.key) + " " + detailId);
+        return dispatch(a, site, detailId, false, valid, done, onNothing);
+    }
+
+    /**
+     * 用「插件刚抓过的那张站点页」兜底补线路（w2x 王二小系）。
+     *
+     * <p>为什么不用 {@link #buildAsync}：w2x 站的站名大多不带「网盘」（花卷、虎斑…），
+     * {@link #shouldTry} 会直接拒；站点配置里也没有站根，{@code video.id} 拼不出页面地址。
+     * 这两个前提在这里都不成立 —— 地址是 {@link DetailPageTrace} 从插件真实请求里记下来的，
+     * 分享解析仍走同一套 provider（百度这个 provider 本身不依赖站点）。
+     *
+     * @param pageUrl 插件抓过的详情页地址（http/https）
+     */
+    static boolean buildPageAsync(
+            MainActivity a,
+            Cms.Site site,
+            String pageUrl,
+            TvDetailHost.Valid valid,
+            MainActivity.Done<List<Cms.Line>> done,
+            Runnable onNothing) {
+        if (a == null || site == null) return false;
+        String url = text(pageUrl).trim();
+        if (!isHttp(url)) return false;
+        return dispatch(a, site, url, true, valid, done, onNothing);
+    }
+
+    /**
+     * 两个入口共用的派发：后台跑 {@link #build}，结果回投主线程。{@code pageSourced} 只影响线路名。
+     */
+    private static boolean dispatch(
+            MainActivity a,
+            Cms.Site site,
+            String detailId,
+            boolean pageSourced,
+            TvDetailHost.Valid valid,
+            MainActivity.Done<List<Cms.Line>> done,
+            Runnable onNothing) {
+        AppLog.w(TAG, "try " + text(site.key) + " " + detailId + (pageSourced ? " (page)" : ""));
         // 走通用 worker 而不是 details：details 池要留给「换页/换站」的详情请求，这里只是顺手捞一趟。
         RequestScope.submit(
                 a.worker,
                 () -> {
                     List<Cms.Line> lines = null;
                     try {
-                        lines = build(a, site, detailId);
+                        lines = build(a, site, detailId, pageSourced);
                     } catch (Throwable error) {
                         AppLog.w(TAG, "build failed", error);
                     }
@@ -273,6 +316,14 @@ final class NetdiskShareLines {
      * @return 新造的线路；没分享 / 全失效 / 网络失败都返回 null（不抛）
      */
     static List<Cms.Line> build(MainActivity a, Cms.Site site, String detailId) {
+        return build(a, site, detailId, false);
+    }
+
+    /**
+     * 同上，{@code pageSourced} 为真时线路名加 {@link #PAGE_SOURCE_SUFFIX}（站点页兜底）。
+     */
+    static List<Cms.Line> build(
+            MainActivity a, Cms.Site site, String detailId, boolean pageSourced) {
         if (a == null || site == null) return null;
         String id = text(detailId).trim();
         if (id.isEmpty()) return null;
@@ -289,7 +340,7 @@ final class NetdiskShareLines {
         }
         Plan plan;
         try {
-            plan = plan(site, id);
+            plan = plan(site, id, pageSourced);
         } catch (RuntimeException error) {
             AppLog.w(TAG, "plan crashed", error);
             return null;
@@ -305,7 +356,7 @@ final class NetdiskShareLines {
      * 一次完整的计划：页面 → 分享 → 各 provider 的线路。返回 null 表示这次不该记进缓存（网络失败等），
      * {@link Plan#lines} 为空表示「看过了，没有可用的」。
      */
-    private static Plan plan(Cms.Site site, String detailId) {
+    private static Plan plan(Cms.Site site, String detailId, boolean pageSourced) {
         String pageUrl = detailUrl(site, detailId);
         if (pageUrl.isEmpty()) {
             AppLog.w(TAG, "skip: no site root in ext/api of " + text(site.key));
@@ -353,7 +404,7 @@ final class NetdiskShareLines {
                 if (files.isEmpty()) continue;
                 // 序号只按"真的并进去的线路"递进：一次分享全失效时不该把下一条挤成「夸克分享 2」。
                 int seq = perProvider.containsKey(provider.id()) ? perProvider.get(provider.id()) + 1 : 1;
-                String name = lineName(line.name, seq);
+                String name = lineName(line.name, seq, pageSourced);
                 perProvider.put(provider.id(), seq);
                 lines.add(new PlannedLine(name, files));
                 AppLog.w(
@@ -399,9 +450,10 @@ final class NetdiskShareLines {
      * 线路名：provider 给的基础名（{@code 夸克分享} / {@code UC分享}），同一家第 N 条追加
      * {@code " N"}，与本次重构前夸克那套写法一致（第一条不带序号）。
      */
-    private static String lineName(String base, int seq) {
+    private static String lineName(String base, int seq, boolean pageSourced) {
         String name = text(base).trim();
         if (name.isEmpty()) name = "网盘分享";
+        if (pageSourced) name = name + PAGE_SOURCE_SUFFIX;
         return seq <= 1 ? name : name + " " + seq;
     }
 
