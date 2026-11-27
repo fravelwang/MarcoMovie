@@ -290,6 +290,26 @@ final class BaiduShareProvider implements NetdiskShareProvider {
         return NetdiskShareHttp.text(answer == null ? null : answer.body);
     }
 
+    /**
+     * 给 Guard 蜘蛛的百度线路复用同一套验码流程：先匿名打开 {@code /s/1<surl>} 拿访问者 Cookie，
+     * 再调 {@code share/verify?surl=…} 换 {@code randsk}（即 sekey）。失败抛 IOException（消息里带
+     * 百度 errno），由调用方决定是报错还是退回 Cookie 里的 BDCLND。
+     *
+     * <p>2026-11-27 实测：Guard 内层 {@code e} 是短 id（{@code /s/1<e>} 会 302 到
+     * {@code /share/init?surl=<e>}），{@code f} 是提取码；{@code verify} 回来的 randsk 与内层
+     * {@code g} Cookie 里的 {@code BDCLND} 一致。
+     */
+    static String verifySekey(String surl, String passcode) throws IOException {
+        String shortId = NetdiskShareHttp.text(surl).trim();
+        String pwd = NetdiskShareHttp.text(passcode).trim();
+        if (shortId.isEmpty() || pwd.isEmpty()) {
+            throw new IOException("缺少分享短 id 或提取码，无法换取 sekey");
+        }
+        BaiduShareResolver.Jar jar = new BaiduShareResolver.Jar();
+        openSharePage("1" + shortId, pwd, jar);
+        return verify(shortId, pwd, jar);
+    }
+
     /** 验提取码换 {@code randsk}（即 sekey）；失败抛 IOException，只由上层记日志。 */
     private static String verify(String shortId, String passcode, BaiduShareResolver.Jar jar)
             throws IOException {

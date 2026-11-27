@@ -715,22 +715,22 @@ final class PlaybackController {
                                 }
                                 // Guard/CSP 站点的网盘线路（虎斑4K 那批 w2x_ 站）：episode url 是
                                 // base64 包着的 JSON，不是直链，也不是我们自己那几种分享 id 形状。
-                                // 115 我们还没有解析链路，先认出来给一句明确文案就停，不再落到
-                                // SpiderAsk（那边只会回一句笼统话然后把用户弹回详情页）。
-                                final GuardSpiderId guard115 = GuardSpiderId.decode(targetId);
-                                if (guard115 != null && guard115.isPan115()) {
+                                // 没接的盘（115/移动/天翼/123/迅雷…）先认出来给一句明确文案就停，
+                                // 不再落到 SpiderAsk（那边只会回一句笼统话然后把用户弹回详情页）。
+                                final GuardSpiderId guardLine = GuardSpiderId.decode(targetId);
+                                if (guardLine != null && !guardLine.canResolve()) {
                                     AppLog.w(
                                             GuardSpiderId.TAG,
-                                            "guard decode provider=pan115 fields=a,b,c,d label=["
-                                                    + guard115.label()
-                                                    + "] → 115 未接入，停在详情页");
+                                            "guard provider unsupported provider="
+                                                    + guardLine.provider);
+                                    final String unsupported = guardLine.unsupportedMessage();
                                     a.ui.post(
                                             () -> {
                                                 if (serial != a.playbackResolveSerial
                                                         || ticket != a.generation
                                                         || a.isFinishing()) return;
                                                 clearPlaybackLoading(a);
-                                                a.toast("115 盘还没接，先换夸克/UC 线路");
+                                                a.toast(unsupported);
                                             });
                                     return;
                                 }
@@ -1151,12 +1151,13 @@ final class PlaybackController {
             AppLog.w("QuarkShare", "skip: plugin returned url=[" + pluginUrl + "]");
             return null;
         }
-        // Guard/CSP 网盘线路：id 是一层 base64 JSON（外层 a=quark|uc|pan115，内层是那家分享的
-        // 坐标）。解出来按 a 分派到我们自己的夸克/UC 解析器；115 没有链路，调用方已经给过文案。
+        // Guard/CSP 网盘线路：id 是一层 base64 JSON（外层 a=quark|uc|baidu|pan115|pan139…，
+        // 内层是那家分享的坐标）。解出来按 a 分派到我们自己的夸克/UC/百度解析器；没接的盘
+        // 调用方已经给过文案，这里不再重试。
         // 第二次调用（插件答完之后）不再重试：第一遍已经试过两种字段映射，重复只会让用户多等。
         final GuardSpiderId guard = GuardSpiderId.decode(rawEp);
         if (guard != null) {
-            if (guard.isPan115()) return null;
+            if (!guard.canResolve()) return null;
             if (result != null) {
                 AppLog.w(GuardSpiderId.TAG, "guard retry skipped provider=" + guard.provider);
                 return null;
@@ -1248,13 +1249,18 @@ final class PlaybackController {
             return BaiduShareResolver.lastFailureReason();
         }
         // Guard/CSP 线路（base64 JSON）：夸克/UC 的解析器刚试过两种映射，最后一遍留下的原因
-        // 比插件那句笼统话准确；115 没有解析器，走调用方自己的文案。
+        // 比插件那句笼统话准确；百度失败原因收在 GuardSpiderId 里；没接的盘不走这里。
         GuardSpiderId guard = GuardSpiderId.decode(ep.url);
-        if (guard != null && !guard.isPan115()) {
+        if (guard != null && !guard.canResolve()) return guard.unsupportedMessage();
+        if (guard != null && guard.canResolve()) {
             // 两遍映射都失败时 GuardSpiderId 记住的是"第一句实话"（通常带 code=23018），
             // 解析器自己的 lastFailureReason 会被第二遍清空。
             String guardReason = GuardSpiderId.lastFailureReason();
             if (!guardReason.isEmpty()) return guardReason;
+            if (guard.isBaidu()) {
+                String baiduReason = BaiduShareResolver.lastFailureReason();
+                if (!baiduReason.isEmpty()) return baiduReason;
+            }
             return guard.isQuark()
                     ? QuarkShareResolver.lastFailureReason()
                     : UcShareResolver.lastFailureReason();
