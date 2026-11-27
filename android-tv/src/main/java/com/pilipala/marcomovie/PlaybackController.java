@@ -761,7 +761,12 @@ final class PlaybackController {
                                 // not match, nothing changes and the plugin answers as before.
                                 final Cms.Episode nativeFirst =
                                         nativeNetdiskCandidate(
-                                                targetSite, targetFlag, chosenEp, null, null);
+                                                targetSite,
+                                                targetFlag,
+                                                chosenEp,
+                                                null,
+                                                null,
+                                                TvDetailHost.autoSourceSwitchOn(a));
                                 if (nativeFirst != null) {
                                     final int nativeSerial = serial;
                                     final int nativeTicket = ticket;
@@ -781,7 +786,9 @@ final class PlaybackController {
                                     final String nativeRefusal = netdiskRefusalReason(chosenEp);
                                     final String refusal =
                                             nativeRefusal.isEmpty()
-                                                    ? "这条网盘线路没拿到播放地址，已换下一条"
+                                                    ? (TvDetailHost.autoSourceSwitchOn(a)
+                                                            ? "这条网盘线路没拿到播放地址，已换下一条"
+                                                            : "这条网盘线路没拿到播放地址，可以手动换下一条线路")
                                                     : nativeRefusal;
                                     AppLog.w(
                                             "PlaybackController",
@@ -937,7 +944,8 @@ final class PlaybackController {
                                                 targetFlag,
                                                 finalEp,
                                                 finalResult,
-                                                resolved);
+                                                resolved,
+                                                TvDetailHost.autoSourceSwitchOn(a));
                                 a.ui.post(
                                         () -> {
                                             if (serial != a.playbackResolveSerial
@@ -1158,7 +1166,8 @@ final class PlaybackController {
             String lineName,
             Cms.Episode ep,
             JSONObject result,
-            Cms.Episode resolved) {
+            Cms.Episode resolved,
+            boolean autoSwitch) {
         if (ep == null || ep.url == null) return null;
         String rawEp = ep.url.trim();
         if (rawEp.isEmpty() || Cms.isMedia(rawEp) || rawEp.startsWith("magnet:?")) return null;
@@ -1199,7 +1208,7 @@ final class PlaybackController {
         try {
             Cms.Episode nativeEp =
                     guard != null
-                            ? guard.resolve(site == null ? "" : site.api, lineName)
+                            ? guard.resolve(site == null ? "" : site.api, lineName, autoSwitch)
                             : aliShare
                                     ? AliShareResolver.resolve(
                                             site == null ? "" : site.api, lineName, rawEp)
@@ -1214,7 +1223,8 @@ final class PlaybackController {
                                                     : QuarkShareResolver.resolve(
                                                             site == null ? "" : site.api,
                                                             lineName,
-                                                            rawEp);
+                                                            rawEp,
+                                                            autoSwitch);
             if (nativeEp != null && nativeEp.url != null && !nativeEp.url.trim().isEmpty()) {
                 // The synthesized episode carries only the media address. Keep the share-id
                 // episode as its origin so auto-next advances through the real episode list and

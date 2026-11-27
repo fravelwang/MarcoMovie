@@ -617,10 +617,36 @@ final class CatalogScreen {
             a.notice("上次的线路或集数已变更，请在下方重新选集。");
             return;
         }
+        // 续播目标必须是能播的集：书签那一集是音频/压缩包时，顺延到这条线路第一条可播的集。
+        // 不这么做的话「继续播放」会对着一个必然失败的 mp3 集再失败一次（E03.mp3 现场）。
+        Cms.Episode target = matched.episode;
+        String nonVideoKind = NetdiskLineLabels.nonVideoKind(target);
+        boolean skippedNonVideo = !nonVideoKind.isEmpty();
+        if (skippedNonVideo) {
+            Cms.Episode playable = NetdiskLineLabels.firstPlayable(matched.line);
+            if (playable == null) {
+                a.notice(
+                        "上次那一集是"
+                                + nonVideoKind
+                                + "文件，这条线路没有可播放的视频集，请换一条线路。");
+                return;
+            }
+            target = playable;
+        }
         a.historyFallbackBookmark = WatchHistory.cloneEntry(bookmark);
         a.historyFallbackInFlight = false;
-        a.resumeAt = bookmark.resume();
-        a.resolvePlayer(site, video, matched.line, matched.episode);
+        a.resumeAt = skippedNonVideo ? 0 : bookmark.resume();
+        if (skippedNonVideo) {
+            int ordinal = TvSeriesScraper.extractEpisodeNumber(target.name);
+            if (ordinal <= 0) ordinal = matched.line.episodes.indexOf(target) + 1;
+            a.notice(
+                    "上次那一集是"
+                            + nonVideoKind
+                            + "文件，改从第 "
+                            + Math.max(1, ordinal)
+                            + " 集开始");
+        }
+        a.resolvePlayer(site, video, matched.line, target);
     }
 
     private static String historyProgressBadge(WatchHistory.Entry e) {

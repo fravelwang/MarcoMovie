@@ -31,7 +31,7 @@ import java.util.regex.Pattern;
  *
  * <p>Everything here is plain JDK + Gson on purpose (no Android APIs), like
  * {@link QuarkDriveClient}: the same code can be compiled and exercised on a desktop JDK first. The
- * single entry point {@link #resolve(String, String, String)} is synchronous and never throws - it
+ * single entry point {@link #resolve(String, String, String, boolean)} is synchronous and never throws - it
  * returns null so the caller keeps its original "no address" handling.
  *
  * <p>Episode id format, measured on device 2026-11-24: five {@code ++}-separated fields
@@ -142,7 +142,7 @@ final class QuarkShareResolver {
     private static final Pattern COPY_SUFFIX = Pattern.compile("\\s*\\(\\d{1,4}\\)\\s*$");
 
     /**
-     * Why the last {@link #resolve(String, String, String)} refused to play, empty when it did not
+     * Why the last {@link #resolve(String, String, String, boolean)} refused to play, empty when it did not
      * refuse. A plain volatile field rather than a {@code ThreadLocal} because the caller reads it
      * after hopping to the UI thread. Reason text only (no 【...】 prefix): the caller renders it
      * with {@code PlaybackFailure.Attribution.SOURCE.text(reason)}.
@@ -161,8 +161,10 @@ final class QuarkShareResolver {
      * @param siteKey the site api/key the episode came from (only used to spot a 夸克 line)
      * @param lineName the chosen line name, e.g. {@code quark原画12}
      * @param episodeId the episode url as the plugin received it, {@code ++}-separated
+     * @param autoSwitch 「自动换源」开关；关着时失败文案只说"可以手动换下一条线路"，不再承诺自动切换
      */
-    static Cms.Episode resolve(String siteKey, String lineName, String episodeId) {
+    static Cms.Episode resolve(
+            String siteKey, String lineName, String episodeId, boolean autoSwitch) {
         lastRefusalReason = "";
         Ident ident = parseIdent(episodeId);
         if (ident == null) return null;
@@ -189,7 +191,7 @@ final class QuarkShareResolver {
                         + " size="
                         + ident.size);
         try {
-            return resolve(credential, ident, lineName);
+            return resolve(credential, ident, lineName, autoSwitch);
         } catch (IOException error) {
             AppLog.w(TAG, "resolve failed: " + describe(error));
         } catch (RuntimeException error) {
@@ -205,7 +207,7 @@ final class QuarkShareResolver {
 
     /**
      * The refusal reason of the last resolution, empty when it did not refuse. Read it right after
-     * {@link #resolve(String, String, String)} returned null: the value is only valid for that
+     * {@link #resolve(String, String, String, boolean)} returned null: the value is only valid for that
      * resolution and every new one clears it.
      */
     static String lastFailureReason() {
@@ -214,18 +216,23 @@ final class QuarkShareResolver {
     }
 
     /** Steps 2-5 of the spec, in order. */
-    private static Cms.Episode resolve(QuarkQrLogin.Credential credential, Ident ident, String lineName)
+    private static Cms.Episode resolve(
+            QuarkQrLogin.Credential credential, Ident ident, String lineName, boolean autoSwitch)
             throws IOException {
         DEADLINE.set(Long.valueOf(System.currentTimeMillis() + TOTAL_BUDGET_MS));
         try {
-            return resolveWithinBudget(credential, ident, lineName);
+            return resolveWithinBudget(credential, ident, lineName, autoSwitch);
         } finally {
             DEADLINE.remove();
         }
     }
 
     private static Cms.Episode resolveWithinBudget(
-            QuarkQrLogin.Credential credential, Ident ident, String lineName) throws IOException {
+            QuarkQrLogin.Credential credential,
+            Ident ident,
+            String lineName,
+            boolean autoSwitch)
+            throws IOException {
         QuarkDriveClient client = new QuarkDriveClient(credential.cookie);
 
         // Step 2: the file may already sit in our own drive from an earlier save of this episode.
@@ -281,7 +288,8 @@ final class QuarkShareResolver {
         }
 
         // Steps 4-5: copy into our own drive, then swap the new fid for a playback URL.
-        PlayLink link = saveAndResolve(credential.cookie, client, ident, hit, saveDirFid);
+        PlayLink link =
+                saveAndResolve(credential.cookie, client, ident, hit, saveDirFid, autoSwitch);
         if (link.url.isEmpty()) {
             AppLog.w(TAG, "step4/5 failed: no playable url after the save");
             return null;
@@ -683,7 +691,8 @@ final class QuarkShareResolver {
             QuarkDriveClient client,
             Ident ident,
             ShareHit hit,
-            String saveDirFid)
+            String saveDirFid,
+            boolean autoSwitch)
             throws IOException {
         JsonObject payload = new JsonObject();
         JsonArray fidList = new JsonArray();
@@ -754,7 +763,7 @@ final class QuarkShareResolver {
         }
 
         // Step 5 on whatever the task handed us.
-        PlayLink link = playFirst(client, cookie, candidates);
+        PlayLink link = playFirst(client, cookie, candidates, autoSwitch);
         if (!link.url.isEmpty()) return link;
 
         // The fids above may be the share ones rather than the copies. Look the copy up in our own
@@ -786,7 +795,7 @@ final class QuarkShareResolver {
             }
         }
         if (!looked.isEmpty()) AppLog.w(TAG, "step4 own-drive hit: " + looked.get(0));
-        return playFirst(client, cookie, looked);
+        return playFirst(client, cookie, looked, autoSwitch);
     }
 
     /** A playback URL plus the cookie it has to be fetched with (the play call rotates it). */
@@ -801,7 +810,8 @@ final class QuarkShareResolver {
     }
 
     /** Swaps the first playable fid in {@code fids} for a URL; url "" when none of them plays. */
-    private static PlayLink playFirst(QuarkDriveClient client, String cookie, List<String> fids) {
+    private static PlayLink playFirst(
+            QuarkDriveClient client, String cookie, List<String> fids, boolean autoSwitch) {
         for (int i = 0; i < fids.size() && i < 3; i++) {
             String fid = fids.get(i);
             String url = "";
@@ -825,7 +835,7 @@ final class QuarkShareResolver {
                     if (!url.isEmpty()) AppLog.w(TAG, "step5 fid=" + fid + " download fallback");
                 } catch (IOException error) {
                     lastRefusalReason =
-                            "夸克这条线路没拿到播放地址（" + errorCode(error) + "），已换下一条";
+                            noAddressReason("夸克这条线路没拿到播放地址（" + errorCode(error) + "）", autoSwitch);
                     AppLog.w(TAG, "step5 fid=" + fid + " download fallback failed: " + describe(error));
                 }
             }
@@ -834,10 +844,19 @@ final class QuarkShareResolver {
                 return new PlayLink(url, refreshPlayCookie(cookie, fid));
             }
             if (lastRefusalReason.isEmpty()) {
-                lastRefusalReason = "夸克这条线路没拿到播放地址（服务端没有转码档），已换下一条";
+                lastRefusalReason =
+                        noAddressReason("夸克这条线路没拿到播放地址（服务端没有转码档）", autoSwitch);
             }
         }
         return new PlayLink("", cookie);
+    }
+
+    /**
+     * 失败文案的尾句跟「自动换源」开关走：开着才说"已换下一条"；关着就说可以手动换，不能承诺
+     * 一个我们不会做的自动切换（2026-11-27 盒子现场：开关关着，页面却写"已换下一条"）。
+     */
+    private static String noAddressReason(String base, boolean autoSwitch) {
+        return base + (autoSwitch ? "，已换下一条" : "，可以手动换下一条线路");
     }
 
     /** {@code code=23018} 这种接口错误码，日志/文案里要说实话；抓不到就写"接口未返回地址"。 */

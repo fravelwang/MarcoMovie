@@ -315,6 +315,20 @@ final class TvDetailHost {
                         }
                     }
                     if (foundIdx >= 0) {
+                        // 书签那一集是音频/压缩包时不把它当默认选中：顺延到这条线路第一条可播的集，
+                        // 选集面板也开在那一集所在的页。
+                        Cms.Episode found = candidate.episodes.get(foundIdx);
+                        if (found != null && !NetdiskLineLabels.isPlayableEpisode(found)) {
+                            int playableIdx = -1;
+                            for (int n = 0; n < candidate.episodes.size(); n++) {
+                                Cms.Episode ep = candidate.episodes.get(n);
+                                if (ep != null && NetdiskLineLabels.isPlayableEpisode(ep)) {
+                                    playableIdx = n;
+                                    break;
+                                }
+                            }
+                            if (playableIdx >= 0) foundIdx = playableIdx;
+                        }
                         page =
                                 (descending ? candidate.episodes.size() - 1 - foundIdx : foundIdx)
                                         / 50;
@@ -389,24 +403,86 @@ final class TvDetailHost {
 
     private static Cms.Episode resolveActiveEpisode(Cms.Line line, WatchHistory.Entry bookmark) {
         Cms.Episode bookmarked = bookmarkedEpisode(line, bookmark);
+        if (bookmarked != null && NetdiskLineLabels.isPlayableEpisode(bookmarked)) return bookmarked;
+        Cms.Episode playable = NetdiskLineLabels.firstPlayable(line);
+        if (playable != null) return playable;
         return bookmarked != null ? bookmarked : firstEpisode(line);
     }
 
-    /**
-     * 换站之后「该从哪一集开始」：书签优先（同一线路、同一集号，见 {@link #bookmarkedEpisode}），
-     * 其次是换站交接带来的第 N 集（{@link SiteSwitchHandover#resolve}，按集号再按集名），都没有
-     * 才从这条线路的第 1 集开始。
-     *
-     * <p>这一处就是"换站后选集状态以目标站为准"的落点：线路由 {@link #initialSelection} 按目标
-     * 站自己的规则选好了，集号在这里对，两边集合大小不同（虎斑 2 集、天堂 14 集）也不会拿错下标。
-     */
-    private static Cms.Episode handoverEpisode(
+    /** 书签/交接指向的那一集（原样，不判断能不能播）。 */
+    private static Cms.Episode wantedEpisode(
             Cms.Line line, WatchHistory.Entry bookmark, SiteSwitchHandover.Want handover) {
         Cms.Episode bookmarked = bookmarkedEpisode(line, bookmark);
         if (bookmarked != null) return bookmarked;
         Cms.Episode carried = SiteSwitchHandover.resolve(line, handover);
         if (carried != null) return carried;
         return firstEpisode(line);
+    }
+
+    /**
+     * 换站之后「该从哪一集开始」：书签优先（同一线路、同一集号，见 {@link #bookmarkedEpisode}），
+     * 其次是换站交接带来的第 N 集（{@link SiteSwitchHandover#resolve}，按集号再按集名）。
+     *
+     * <p>指向的那一集要是音频/压缩包（站点把视频改名成 {@code .mp3} 躲扫描），就顺延到这条线路
+     * 第一条可播的集 —— 「继续播放」不能指着一个必然失败的集。一条可播的都没有时返回 null。
+     *
+     * <p>这一处就是"换站后选集状态以目标站为准"的落点：线路由 {@link #initialSelection} 按目标
+     * 站自己的规则选好了，集号在这里对，两边集合大小不同（虎斑 2 集、天堂 14 集）也不会拿错下标。
+     */
+    private static Cms.Episode handoverEpisode(
+            Cms.Line line, WatchHistory.Entry bookmark, SiteSwitchHandover.Want handover) {
+        Cms.Episode wanted = wantedEpisode(line, bookmark, handover);
+        if (wanted != null && NetdiskLineLabels.isPlayableEpisode(wanted)) return wanted;
+        return NetdiskLineLabels.firstPlayable(line);
+    }
+
+    /** 这一条线路里，书签/交接目标被顺延到了第几集；没有可播集返回 -1。 */
+    private static int episodeOrdinal(Cms.Line line, Cms.Episode episode) {
+        if (episode == null) return -1;
+        int number = TvSeriesScraper.extractEpisodeNumber(episode.name);
+        if (number > 0) return number;
+        int index = line == null || line.episodes == null ? -1 : line.episodes.indexOf(episode);
+        return index >= 0 ? index + 1 : -1;
+    }
+
+    /**
+     * 播放按钮文案：书签/交接那一集能播就照旧「继续播放」；它明确是音频/压缩包、目标顺延到了
+     * 别的集，就改成「从第 N 集开始」，让按钮说的和点下去要播的是同一集。
+     */
+    static String playLabel(
+            Cms.Line line, WatchHistory.Entry bookmark, SiteSwitchHandover.Want handover) {
+        Cms.Episode wanted = wantedEpisode(line, bookmark, handover);
+        Cms.Episode target = handoverEpisode(line, bookmark, handover);
+        if (target == null) return "► 开始播放";
+        if (wanted != null && !NetdiskLineLabels.isPlayableEpisode(wanted)) {
+            int ordinal = episodeOrdinal(line, target);
+            if (ordinal > 0) return "► 从第 " + ordinal + " 集开始";
+        }
+        if (bookmark == null && handover == null) return "► 开始播放";
+        return "► 继续播放";
+    }
+
+    /**
+     * 详情页资源行写哪一集：有书签时写书签那一集（那行字是"上次播放：…"），书签是音频/压缩包也
+     * 照写；没有书签时写这次真正会播的集（换站交接顺延后的那一集）。
+     */
+    private static Cms.Episode captionEpisode(
+            Cms.Line line,
+            Cms.Episode active,
+            WatchHistory.Entry bookmark,
+            SiteSwitchHandover.Want handover) {
+        if (bookmark == null) return active;
+        Cms.Episode wanted = wantedEpisode(line, bookmark, handover);
+        return wanted == null ? active : wanted;
+    }
+
+    /** 书签/交接那一集不可播、这条线路又没有可播集时，页面上给一句实话；其余情况返回空串。 */
+    static String noPlayableEpisodeNote(
+            Cms.Line line, WatchHistory.Entry bookmark, SiteSwitchHandover.Want handover) {
+        Cms.Episode wanted = wantedEpisode(line, bookmark, handover);
+        if (wanted == null || NetdiskLineLabels.isPlayableEpisode(wanted)) return "";
+        if (NetdiskLineLabels.firstPlayable(line) != null) return "";
+        return "这条线路只有音频/压缩包文件，没有可播放的视频集，请换一条线路";
     }
 
     /**
@@ -687,7 +763,9 @@ final class TvDetailHost {
         final SiteSwitchHandover.Want handover = a.siteHandover.take(site, initialVideo);
         Cms.Line initLine = initiallyPlayable ? initialVideo.lines.get(initSel[0]) : null;
         Cms.Episode initEp = handoverEpisode(initLine, activeBookmark[0], handover);
-        String initFileCaption = TvV17DetailScreen.formatEpisodeFileCaption(initLine, initEp);
+        String initFileCaption =
+                TvV17DetailScreen.formatEpisodeFileCaption(
+                        initLine, captionEpisode(initLine, initEp, activeBookmark[0], handover));
         String initHistoryCaption = formatHistoryCaption(a, activeBookmark[0], initFileCaption);
         String initContinueCaption =
                 TvV17DetailScreen.formatContinuePlaySubtitle(
@@ -695,9 +773,7 @@ final class TvDetailHost {
         String initPlayLabel =
                 !initiallyPlayable
                         ? "正在获取线路…"
-                        : (activeBookmark[0] == null && handover == null
-                                ? "► 开始播放"
-                                : "► 继续播放");
+                        : playLabel(initLine, activeBookmark[0], handover);
 
         final TvV17DetailScreen[] holder = new TvV17DetailScreen[1];
         TvV17DetailScreen ui =
@@ -744,15 +820,29 @@ final class TvDetailHost {
                                                         Prefs.EPISODES_DESCENDING, false));
                                 Cms.Line playLine = v.lines.get(sel[0]);
                                 // 换站进来的那一次：书签对不上这页的线路时，接着看换站交接的
-                                // 第 N 集，而不是永远从第 1 集重开。
+                                // 第 N 集，而不是永远从第 1 集重开。书签/交接那一集是音频/压缩包
+                                // 时这里已经顺延到这条线路第一条可播的集。
                                 Cms.Episode playEp = handoverEpisode(playLine, bm, handover);
-                                if (bm != null
-                                        && (!screen.selection.selected
-                                                || Objects.equals(
-                                                        playLine == null ? null : playLine.name,
-                                                        bm.line))) {
+                                if (playEp == null) {
+                                    a.notice("这条线路只有音频/压缩包文件，没有可播放的视频集，请换一条线路");
+                                    return;
+                                }
+                                Cms.Episode bookmarked = bookmarkedEpisode(playLine, bm);
+                                boolean resumeBookmark =
+                                        bm != null
+                                                && bookmarked != null
+                                                && NetdiskLineLabels.isPlayableEpisode(bookmarked)
+                                                && (!screen.selection.selected
+                                                        || Objects.equals(
+                                                                playLine == null
+                                                                        ? null
+                                                                        : playLine.name,
+                                                                bm.line));
+                                if (resumeBookmark) {
                                     a.playBookmark(site, v, bm);
-                                } else if (playEp != null) {
+                                } else {
+                                    // 顺延到别的集：不能带着上一次的播放进度，从这一集开头播。
+                                    a.resumeAt = 0;
                                     a.resolvePlayer(site, v, playLine, playEp);
                                 }
                             }
@@ -819,7 +909,12 @@ final class TvDetailHost {
                                         resolveActiveEpisode(updatedLine, activeBookmark[0]);
                                 String fc =
                                         TvV17DetailScreen.formatEpisodeFileCaption(
-                                                updatedLine, updatedEp);
+                                                updatedLine,
+                                                captionEpisode(
+                                                        updatedLine,
+                                                        updatedEp,
+                                                        activeBookmark[0],
+                                                        handover));
                                 ui.bindResolvedVideo(
                                         site,
                                         v,
@@ -828,7 +923,7 @@ final class TvDetailHost {
                                                 a.prefs.getString(Prefs.FAVORITES, "[]"),
                                                 site != null ? site.key : "",
                                                 v.id),
-                                        activeBookmark[0] == null ? "► 开始播放" : "► 继续播放",
+                                        playLabel(updatedLine, activeBookmark[0], handover),
                                         buildEpisodesButtonLabel(v, sel[0]),
                                         fc,
                                         formatHistoryCaption(a, activeBookmark[0], fc));
@@ -850,6 +945,8 @@ final class TvDetailHost {
             }
         } else {
             bindSeasonPopupDiscovery(a, site, initialVideo, ui);
+            String noPlayableNote = noPlayableEpisodeNote(initLine, activeBookmark[0], handover);
+            if (!noPlayableNote.isEmpty()) ui.setLoadingStatus(noPlayableNote);
             if (screen.focus == null || "detail-back".equals(screen.focus)) {
                 screen.focus = "detail-play";
             }
@@ -886,7 +983,9 @@ final class TvDetailHost {
                     // 对不上线路时也走它）；没有交接时与以前一致（书签 → 第 1 集）。
                     Cms.Episode activeEpisode = handoverEpisode(activeLine, bm, handover);
                     String fileCap =
-                            TvV17DetailScreen.formatEpisodeFileCaption(activeLine, activeEpisode);
+                            TvV17DetailScreen.formatEpisodeFileCaption(
+                                    activeLine,
+                                    captionEpisode(activeLine, activeEpisode, bm, handover));
                     String histCap = formatHistoryCaption(a, bm, fileCap);
                     ui.bindResolvedVideo(
                             site,
@@ -896,10 +995,14 @@ final class TvDetailHost {
                                     a.prefs.getString(Prefs.FAVORITES, "[]"),
                                     site.key,
                                     resolved.id),
-                            bm == null && handover == null ? "► 开始播放" : "► 继续播放",
+                            playLabel(activeLine, bm, handover),
                             buildEpisodesButtonLabel(resolved, sel[0]),
                             fileCap,
                             histCap);
+                    if (playable) {
+                        String noPlayableNote = noPlayableEpisodeNote(activeLine, bm, handover);
+                        if (!noPlayableNote.isEmpty()) ui.setLoadingStatus(noPlayableNote);
+                    }
                     if (!playable) {
                         WatchHistory.Entry fallbackBm = bm != null ? bm : a.historyFallbackBookmark;
                         if (fallbackBm != null
@@ -1337,7 +1440,9 @@ final class TvDetailHost {
                         a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false));
         Cms.Line activeLine = resolved.lines.get(sel[0]);
         Cms.Episode activeEpisode = resolveActiveEpisode(activeLine, bookmark);
-        String fileCaption = TvV17DetailScreen.formatEpisodeFileCaption(activeLine, activeEpisode);
+        String fileCaption =
+                TvV17DetailScreen.formatEpisodeFileCaption(
+                        activeLine, captionEpisode(activeLine, activeEpisode, bookmark, null));
         ui.bindResolvedVideo(
                 site,
                 resolved,
@@ -1346,11 +1451,11 @@ final class TvDetailHost {
                         a.prefs.getString(Prefs.FAVORITES, "[]"),
                         site != null ? site.key : "",
                         resolved.id),
-                bookmark == null ? "► 开始播放" : "► 继续播放",
+                playLabel(activeLine, bookmark, null),
                 buildEpisodesButtonLabel(resolved, sel[0]),
                 fileCaption,
                 formatHistoryCaption(a, bookmark, fileCaption));
-        ui.setLoadingStatus("");
+        ui.setLoadingStatus(noPlayableEpisodeNote(activeLine, bookmark, null));
         bindSeasonPopupDiscovery(a, site, resolved, ui);
         View curFocus = a.getCurrentFocus();
         if (curFocus == null
@@ -1670,10 +1775,12 @@ final class TvDetailHost {
                                     a.playBookmark(s, v, bm);
                                 } else {
                                     Cms.Line line = v.lines.get(sel[0]);
-                                    if (line != null
-                                            && line.episodes != null
-                                            && !line.episodes.isEmpty()) {
-                                        a.resolvePlayer(s, v, line, line.episodes.get(0));
+                                    Cms.Episode first = NetdiskLineLabels.firstPlayable(line);
+                                    if (first != null) {
+                                        a.resumeAt = 0;
+                                        a.resolvePlayer(s, v, line, first);
+                                    } else if (line != null) {
+                                        a.notice("这条线路只有音频/压缩包文件，没有可播放的视频集，请换一条线路");
                                     }
                                 }
                             }
@@ -1747,11 +1854,16 @@ final class TvDetailHost {
                                                 a.prefs.getString(Prefs.FAVORITES, "[]"),
                                                 activeSite[0].key,
                                                 v.id),
-                                        activeBookmark[0] == null ? "► 开始播放" : "► 继续播放",
+                                        playLabel(curLine, activeBookmark[0], null),
                                         buildEpisodesButtonLabel(v, 0),
                                         TvV17DetailScreen.formatEpisodeFileCaption(
                                                 curLine,
-                                                resolveActiveEpisode(curLine, activeBookmark[0])),
+                                                captionEpisode(
+                                                        curLine,
+                                                        resolveActiveEpisode(
+                                                                curLine, activeBookmark[0]),
+                                                        activeBookmark[0],
+                                                        null)),
                                         "");
                             });
                 });
@@ -1871,7 +1983,9 @@ final class TvDetailHost {
                                     Cms.Line line = loaded.lines.get(sel[0]);
                                     Cms.Episode ep = resolveActiveEpisode(line, bm);
                                     String fileCap =
-                                            TvV17DetailScreen.formatEpisodeFileCaption(line, ep);
+                                            TvV17DetailScreen.formatEpisodeFileCaption(
+                                                    line,
+                                                    captionEpisode(line, ep, bm, null));
                                     String histCap = formatHistoryCaption(a, bm, fileCap);
                                     ui.bindResolvedVideo(
                                             picked.site,
@@ -1881,11 +1995,11 @@ final class TvDetailHost {
                                                     a.prefs.getString(Prefs.FAVORITES, "[]"),
                                                     picked.site.key,
                                                     loaded.id),
-                                            bm == null ? "► 开始播放" : "► 继续播放",
+                                            playLabel(line, bm, null),
                                             buildEpisodesButtonLabel(loaded, sel[0]),
                                             fileCap,
                                             histCap);
-                                    ui.setLoadingStatus("");
+                                    ui.setLoadingStatus(noPlayableEpisodeNote(line, bm, null));
                                     {
                                         // The switch list is the ledger's, never the search hits':
                                         // it must match the wall card's badge, the "来自 N 个站点"

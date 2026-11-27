@@ -276,10 +276,11 @@ final class GuardSpiderId {
      * {@code guard decode provider=quark fields=a,b,c,d → resolver id=... mapping=A|B}：token 与
      * stoken 打码，fid 与 pwd_id 留明文（分享列表那边的日志本来就会打 fid，便于两行对起来）。
      *
+     * @param autoSwitch 「自动换源」开关，只影响夸克失败文案的尾句（关着不承诺自动换下一条）
      * @return 成功返回带直链的剧集；失败返回 null（失败原因由解析器的 {@code lastFailureReason()}
      *     给出，{@link PlaybackController} 会去读）
      */
-    Cms.Episode resolve(String siteKey, String lineName) {
+    Cms.Episode resolve(String siteKey, String lineName, boolean autoSwitch) {
         lastFailureReason = "";
         if (isBaidu()) return resolveBaidu(siteKey, lineName);
         if (!canResolve()) {
@@ -300,7 +301,7 @@ final class GuardSpiderId {
                             + mapping);
             Cms.Episode episode =
                     isQuark()
-                            ? QuarkShareResolver.resolve(siteKey, lineName, ident)
+                            ? QuarkShareResolver.resolve(siteKey, lineName, ident, autoSwitch)
                             : UcShareResolver.resolve(siteKey, lineName, ident);
             if (episode != null && episode.url != null && !episode.url.trim().isEmpty()) {
                 return episode;

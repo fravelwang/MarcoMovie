@@ -274,8 +274,40 @@ final class DetailScreen {
                     final WatchHistory.Entry remembered = bookmark;
 
                     // 3d. Centered Prominent Play / Continue Stadium Button (Mobile Hero Style)
+                    Cms.Line rememberedLineObj = null;
+                    if (remembered != null)
+                        for (Cms.Line line : v.lines)
+                            if (remembered.line != null && remembered.line.equals(line.name)) {
+                                rememberedLineObj = line;
+                                break;
+                            }
                     String playLabel =
                             remembered == null ? "►  开始播放" : ("►  继续播放 · " + remembered.episode);
+                    if (rememberedLineObj != null) {
+                        // 书签那一集是音频/压缩包时不拿它当续播目标：顺延到这条线路第一条可播的集，
+                        // 按钮也改成「从第 N 集开始」，点下去和按钮说的是同一集。
+                        Cms.Episode bookmarkedEp = null;
+                        for (Cms.Episode ep : rememberedLineObj.episodes)
+                            if (ep != null
+                                    && remembered.episode != null
+                                    && remembered.episode.equals(ep.name)) {
+                                bookmarkedEp = ep;
+                                break;
+                            }
+                        if (bookmarkedEp != null
+                                && !NetdiskLineLabels.isPlayableEpisode(bookmarkedEp)) {
+                            Cms.Episode playable = NetdiskLineLabels.firstPlayable(rememberedLineObj);
+                            if (playable == null) {
+                                playLabel = "►  开始播放";
+                            } else {
+                                int ordinal = TvSeriesScraper.extractEpisodeNumber(playable.name);
+                                playLabel =
+                                        ordinal > 0
+                                                ? "►  从第 " + ordinal + " 集开始"
+                                                : "►  继续播放";
+                            }
+                        }
+                    }
                     final Button play =
                             heroPlayButton(
                                     a,
@@ -285,11 +317,16 @@ final class DetailScreen {
                                         if (remembered != null) a.playBookmark(s, v, remembered);
                                         else {
                                             int prefIdx = SourcePreferences.lineIndex(a, s, v);
-                                            a.resolvePlayer(
-                                                    s,
-                                                    v,
-                                                    v.lines.get(prefIdx),
-                                                    v.lines.get(prefIdx).episodes.get(0));
+                                            Cms.Line line = v.lines.get(prefIdx);
+                                            Cms.Episode first =
+                                                    NetdiskLineLabels.firstPlayable(line);
+                                            if (first == null) {
+                                                a.notice(
+                                                        "这条线路只有音频/压缩包文件，没有可播放的视频集，请换一条线路");
+                                                return;
+                                            }
+                                            a.resumeAt = 0;
+                                            a.resolvePlayer(s, v, line, first);
                                         }
                                     });
                     LinearLayout.LayoutParams playLp = new LinearLayout.LayoutParams(-2, a.dp(46));
@@ -318,16 +355,32 @@ final class DetailScreen {
                                             .episodes
                                             .get(n)
                                             .name
-                                            .equals(remembered.episode))
+                                            .equals(remembered.episode)) {
+                                        // 书签是音频/压缩包：默认选中顺延到第一条可播的集（见 renderEpisodes）。
+                                        int pageIndex = n;
+                                        if (!NetdiskLineLabels.isPlayableEpisode(
+                                                v.lines.get(i).episodes.get(n))) {
+                                            for (int k = 0;
+                                                    k < v.lines.get(i).episodes.size();
+                                                    k++) {
+                                                if (NetdiskLineLabels.isPlayableEpisode(
+                                                        v.lines.get(i).episodes.get(k))) {
+                                                    pageIndex = k;
+                                                    break;
+                                                }
+                                            }
+                                        }
                                         rememberedPage =
                                                 (a.prefs.getBoolean(
                                                                         Prefs.EPISODES_DESCENDING,
                                                                         false)
                                                                 ? v.lines.get(i).episodes.size()
                                                                         - 1
-                                                                        - n
-                                                                : n)
+                                                                        - pageIndex
+                                                                : pageIndex)
                                                         / 50;
+                                        break;
+                                    }
                                 break;
                             }
                     if (a.current != null && a.current.selection.selected)
@@ -733,6 +786,25 @@ final class DetailScreen {
         return b;
     }
 
+    /**
+     * 选集网格里「默认选中」的那一集：书签那一集能播就选它；书签是音频/压缩包时改选这条线路
+     * 第一条可播的集 —— 不可播的集不做默认选中。
+     */
+    private static String defaultBookmarkedEpisode(Cms.Line line, WatchHistory.Entry bookmark) {
+        if (line == null || line.episodes == null || bookmark == null) return "";
+        String episode = bookmark.episode == null ? "" : bookmark.episode.trim();
+        if (episode.isEmpty()) return "";
+        for (Cms.Episode candidate : line.episodes) {
+            if (candidate == null) continue;
+            String name = candidate.name == null ? "" : candidate.name.trim();
+            if (!episode.equals(name)) continue;
+            if (NetdiskLineLabels.isPlayableEpisode(candidate)) return name;
+            Cms.Episode playable = NetdiskLineLabels.firstPlayable(line);
+            return playable == null || playable.name == null ? "" : playable.name.trim();
+        }
+        return "";
+    }
+
     static void renderEpisodes(
             MainActivity a,
             Cms.Site site,
@@ -783,10 +855,22 @@ final class DetailScreen {
                 break;
             }
         }
-        final String bookmarkedEpisode =
+        // 默认选中：书签那一集能播就选它；书签是音频/压缩包、或压根没有书签而这条线路的第 1 集
+        // 就不可播时，选这条线路第一条可播的集（不可播的集不做默认选中）。
+        String bookmarkedEpisode =
                 currentBookmark != null && safeLineName.equals(currentBookmark.line)
-                        ? currentBookmark.episode
+                        ? defaultBookmarkedEpisode(line, currentBookmark)
                         : "";
+        if (bookmarkedEpisode.isEmpty()) {
+            Cms.Episode first = line.episodes.get(0);
+            Cms.Episode firstPlayable = NetdiskLineLabels.firstPlayable(line);
+            if (first != null
+                    && !NetdiskLineLabels.isPlayableEpisode(first)
+                    && firstPlayable != null
+                    && firstPlayable.name != null) {
+                bookmarkedEpisode = firstPlayable.name.trim();
+            }
+        }
 
         // 1. Minimalist Apple Line Switcher Header
         LinearLayout lineHeader = a.row();
@@ -1219,6 +1303,10 @@ final class DetailScreen {
             String label =
                     TvSeriesScraper.formatGridEpisodeLabel(
                             scrapedEp, isBookmarked, hasOverrideOrScrambled);
+            // 逐集标记：这一集本身是音频/压缩包时，名字后面跟上「 · 音频」/「 · 压缩包」。
+            // 整条线路的判据没动（T-19：整条每一集都非视频才算音频线路），这里只看这一集。
+            String episodeSuffix = NetdiskLineLabels.episodeSuffix(episode);
+            if (!episodeSuffix.isEmpty()) label = label + episodeSuffix;
             final Button button =
                     a.button(
                             label,
