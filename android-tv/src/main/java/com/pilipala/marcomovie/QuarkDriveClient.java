@@ -270,6 +270,27 @@ final class QuarkDriveClient implements NetdiskDrive {
         return best;
     }
 
+    /**
+     * {@code /file/v2/play} 的一条转码直链（按 {@code maxRank} 封顶），**不退回** {@code file/download}。
+     *
+     * <p>分享解析要用它把"有没有转码档"与"download 兜底"分开：转存刚完成时服务端可能还没有档，
+     * 调用方可以隔一会儿重试，而不是立刻掉进 {@code file/download}（那条对大文件回 23018）。
+     *
+     * @return null when the service lists no tier at all
+     */
+    PlayVariant transcodedVariant(String fileId, int maxRank) {
+        String id = fileId == null ? "" : fileId.trim();
+        if (id.isEmpty()) return null;
+        List<PlayVariant> variants = transcodedVariants(id);
+        if (variants.isEmpty()) return null;
+        PlayVariant best = null;
+        for (PlayVariant variant : variants) {
+            if (variant.rank > maxRank) continue;
+            if (best == null || variant.rank > best.rank) best = variant;
+        }
+        return best;
+    }
+
     /** Highest available tier from {@code /file/v2/play}; empty when the service offers none. */
     private String transcodedUrl(String id) throws IOException {
         PlayVariant best = null;

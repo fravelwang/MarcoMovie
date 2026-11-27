@@ -48,15 +48,72 @@ final class LineHealth {
                 kind);
     }
 
+    /**
+     * 一次失败只记数，不立刻把线路标坏：连续失败 {@link #BAD_AFTER_FAILURES} 次才算"坏"，而且这个
+     * 标记 {@link #BAD_TTL_MS} 后自动过期。以前一次失败就永久标坏，网盘线路（刚转存完第一次取直链
+     * 失败）会一直显示不可用，必须手删 prefs 才能恢复。
+     */
     static void markFailed(
             Context context, String siteKey, String lineName, PlaybackFailure.Attribution kind) {
         PlaybackFailure.Attribution attributed =
                 kind == null ? PlaybackFailure.Attribution.UNKNOWN : kind;
+        String key = key(siteKey, lineName);
+        if (context == null || key == null) return;
+        int count = 1;
+        try {
+            String previous = prefs(context).getString(key, "");
+            Failure previousFailure = Failure.parse(previous);
+            if (previousFailure != null
+                    && previousFailure.kind == attributed
+                    && !previousFailure.expired(System.currentTimeMillis())) {
+                count = previousFailure.count + 1;
+            }
+        } catch (RuntimeException ignored) {
+            // A malformed value just starts the count over.
+        }
         write(
                 context,
                 siteKey,
                 lineName,
-                attributed.name() + "|" + (System.currentTimeMillis() / 1000L));
+                attributed.name() + "|" + (System.currentTimeMillis() / 1000L) + "|" + count);
+    }
+
+    /** Failure marks are only trusted for this long; afterwards the line is "unknown" again. */
+    static final long BAD_TTL_MS = 10L * 60L * 1000L;
+
+    /** Consecutive failures needed before the picker calls a line broken. */
+    static final int BAD_AFTER_FAILURES = 2;
+
+    /** Parsed value of one failure mark: {@code KIND|epochSeconds|count}. */
+    private static final class Failure {
+        final PlaybackFailure.Attribution kind;
+        final long atMs;
+        final int count;
+
+        Failure(PlaybackFailure.Attribution kind, long atMs, int count) {
+            this.kind = kind;
+            this.atMs = atMs;
+            this.count = count;
+        }
+
+        boolean expired(long nowMs) {
+            return nowMs - atMs > BAD_TTL_MS;
+        }
+
+        static Failure parse(String value) {
+            String raw = value == null ? "" : value.trim();
+            if (raw.isEmpty() || OK.equals(raw)) return null;
+            String[] parts = raw.split("\\|", -1);
+            if (parts.length < 2) return null;
+            try {
+                PlaybackFailure.Attribution kind = PlaybackFailure.Attribution.valueOf(parts[0].trim());
+                long at = Long.parseLong(parts[1].trim()) * 1000L;
+                int count = parts.length >= 3 ? Math.max(1, Integer.parseInt(parts[2].trim())) : 1;
+                return new Failure(kind, at, count);
+            } catch (RuntimeException ignored) {
+                return null;
+            }
+        }
     }
 
     /** Short label for the picker; an empty string means "no recorded outcome yet". */
@@ -77,13 +134,12 @@ final class LineHealth {
         String value = raw == null ? "" : raw.trim();
         if (value.isEmpty()) return "";
         if (OK.equals(value)) return "可用";
-        int bar = value.indexOf('|');
-        String name = bar < 0 ? value : value.substring(0, bar);
-        try {
-            return label(PlaybackFailure.Attribution.valueOf(name.trim()));
-        } catch (IllegalArgumentException ignored) {
-            return "";
-        }
+        Failure failure = Failure.parse(value);
+        if (failure == null) return "";
+        // 一次失败不标坏；过期标记也不标坏（下一次失败会重新计数）。
+        if (failure.count < BAD_AFTER_FAILURES) return "";
+        if (failure.expired(System.currentTimeMillis())) return "";
+        return label(failure.kind);
     }
 
     /** One label per attribution class; UNKNOWN deliberately shows nothing. */

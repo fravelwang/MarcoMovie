@@ -190,6 +190,11 @@ final class QuarkShareResolver {
         return null;
     }
 
+    /** 这个 episode id 是不是夸克分享坐标（只读判据、不动网络）。 */
+    static boolean looksLikeShareId(String rawEpisodeId) {
+        return parseIdent(rawEpisodeId) != null;
+    }
+
     /**
      * The refusal reason of the last resolution, empty when it did not refuse. Read it right after
      * {@link #resolve(String, String, String)} returned null: the value is only valid for that
@@ -736,17 +741,52 @@ final class QuarkShareResolver {
     private static PlayLink playFirst(QuarkDriveClient client, String cookie, List<String> fids) {
         for (int i = 0; i < fids.size() && i < 3; i++) {
             String fid = fids.get(i);
-            try {
-                String url = client.playUrl(fid);
-                if (!url.isEmpty()) {
-                    AppLog.w(TAG, "step5 fid=" + fid + " url=" + url);
-                    return new PlayLink(url, refreshPlayCookie(cookie, fid));
+            String url = "";
+            // 先走 /file/v2/play（和网盘中心"自己盘播放"同一条接口）。转存刚完成时服务端可能还
+            // 没给出转码档，隔一会儿重试两次；只有确实没有档时才退回 file/download。
+            for (int attempt = 0; attempt < 3 && url.isEmpty(); attempt++) {
+                if (attempt > 0) sleep(1200L);
+                if (Thread.currentThread().isInterrupted()) break;
+                QuarkDriveClient.PlayVariant variant = client.transcodedVariant(fid, 6);
+                if (variant != null && variant.url != null && !variant.url.isEmpty()) {
+                    url = variant.url;
+                    AppLog.w(
+                            TAG,
+                            "step5 fid=" + fid + " v2/play rank=" + variant.rank
+                                    + " attempt=" + (attempt + 1));
                 }
-            } catch (IOException error) {
-                AppLog.w(TAG, "step5 fid=" + fid + " not playable: " + describe(error));
+            }
+            if (url.isEmpty()) {
+                try {
+                    url = client.directUrl(fid);
+                    if (!url.isEmpty()) AppLog.w(TAG, "step5 fid=" + fid + " download fallback");
+                } catch (IOException error) {
+                    lastRefusalReason =
+                            "夸克这条线路没拿到播放地址（" + errorCode(error) + "），已换下一条";
+                    AppLog.w(TAG, "step5 fid=" + fid + " download fallback failed: " + describe(error));
+                }
+            }
+            if (!url.isEmpty()) {
+                AppLog.w(TAG, "step5 fid=" + fid + " url=" + url);
+                return new PlayLink(url, refreshPlayCookie(cookie, fid));
+            }
+            if (lastRefusalReason.isEmpty()) {
+                lastRefusalReason = "夸克这条线路没拿到播放地址（服务端没有转码档），已换下一条";
             }
         }
         return new PlayLink("", cookie);
+    }
+
+    /** {@code code=23018} 这种接口错误码，日志/文案里要说实话；抓不到就写"接口未返回地址"。 */
+    private static String errorCode(IOException error) {
+        String message = error == null ? "" : error.getMessage();
+        if (message == null) message = "";
+        java.util.regex.Matcher matcher =
+                java.util.regex.Pattern.compile("code=(\\d{1,6})").matcher(message);
+        if (matcher.find()) return "code=" + matcher.group(1);
+        matcher = java.util.regex.Pattern.compile("HTTP (\\d{3})").matcher(message);
+        if (matcher.find()) return "HTTP " + matcher.group(1);
+        return "接口未返回地址";
     }
 
     /**

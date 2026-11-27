@@ -759,6 +759,34 @@ final class PlaybackController {
                                             });
                                     return;
                                 }
+                                // 这条 id 是我们自己的网盘分享/Guard 坐标：解析失败就是我们的实话，
+                                // 不再去问插件（它只会回"PC端未登录"，把用户引到登录上去）。
+                                if (isOwnNetdiskId(targetId)) {
+                                    final String nativeRefusal = netdiskRefusalReason(chosenEp);
+                                    final String refusal =
+                                            nativeRefusal.isEmpty()
+                                                    ? "这条网盘线路没拿到播放地址，已换下一条"
+                                                    : nativeRefusal;
+                                    AppLog.w(
+                                            "PlaybackController",
+                                            "native line failed, skip SpiderAsk id=["
+                                                    + targetId
+                                                    + "] reason="
+                                                    + refusal);
+                                    a.ui.post(
+                                            () -> {
+                                                if (serial != a.playbackResolveSerial
+                                                        || ticket != a.generation
+                                                        || a.isFinishing()) return;
+                                                clearPlaybackLoading(a);
+                                                failInPlaceSwitch(
+                                                        a,
+                                                        s,
+                                                        PlaybackFailure.Attribution.SOURCE,
+                                                        refusal);
+                                            });
+                                    return;
+                                }
                                 AppLog.w(
                                         "SpiderAsk",
                                         "site="
@@ -1194,6 +1222,19 @@ final class PlaybackController {
     }
 
     /**
+     * 这个 episode id 是不是"我们自己能解析的网盘线"：Guard 的 base64 JSON，或阿里/百度/UC/夸克
+     * 分享 id。命中时解析失败不再落回插件询问（见 {@code isOwnNetdiskId} 的调用点）。
+     */
+    private static boolean isOwnNetdiskId(String rawId) {
+        if (rawId == null || rawId.trim().isEmpty()) return false;
+        if (GuardSpiderId.decode(rawId) != null) return true;
+        return AliShareResolver.looksLikeShareId(rawId)
+                || BaiduShareResolver.looksLikeShareId(rawId)
+                || UcShareResolver.looksLikeShareId(rawId)
+                || QuarkShareResolver.looksLikeShareId(rawId);
+    }
+
+    /**
      * 网盘线路失败时给用户看的原因（阿里：分享失效 / 需要提取码 / 需要登录 / 登录失效 / 无直链；
      * UC：分享失效 / 需要提取码 / 需要登录 UC；百度：需要登录 / 登录失效 / 分享失效）。只有
      * episode id 真是对应那家的形状才去读它的 {@code lastFailureReason()}，免得把上一次解析留下的
@@ -1210,6 +1251,10 @@ final class PlaybackController {
         // 比插件那句笼统话准确；115 没有解析器，走调用方自己的文案。
         GuardSpiderId guard = GuardSpiderId.decode(ep.url);
         if (guard != null && !guard.isPan115()) {
+            // 两遍映射都失败时 GuardSpiderId 记住的是"第一句实话"（通常带 code=23018），
+            // 解析器自己的 lastFailureReason 会被第二遍清空。
+            String guardReason = GuardSpiderId.lastFailureReason();
+            if (!guardReason.isEmpty()) return guardReason;
             return guard.isQuark()
                     ? QuarkShareResolver.lastFailureReason()
                     : UcShareResolver.lastFailureReason();

@@ -40,6 +40,18 @@ final class GuardSpiderId {
     /** 日志标签，固定几行便于父会话 grep 复核。 */
     static final String TAG = "GuardDecode";
 
+    /**
+     * 两种映射都失败时留下的原因（优先保留第一条非空的）。夸克解析器每次尝试都会把自己的
+     * lastFailureReason 清空重写，第二遍 mapping=B 往往只留下一句空白，界面就丢了 code=23018
+     * 这种实话；这里替调用方记住"最好的一句"。
+     */
+    private static volatile String lastFailureReason = "";
+
+    /** 上一次两遍映射都失败时的原因；成功或未解析时为空。 */
+    static String lastFailureReason() {
+        return lastFailureReason;
+    }
+
     static final String QUARK = "quark";
     static final String UC = "uc";
     static final String PAN115 = "pan115";
@@ -141,6 +153,7 @@ final class GuardSpiderId {
      *     {@code lastFailureReason()} 给出，{@link PlaybackController} 会去读）
      */
     Cms.Episode resolve(String siteKey, String lineName) {
+        lastFailureReason = "";
         for (int pass = 0; pass < 2; pass++) {
             boolean swapped = pass == 1;
             String mapping = swapped ? "B" : "A";
@@ -164,6 +177,9 @@ final class GuardSpiderId {
                     isQuark()
                             ? QuarkShareResolver.lastFailureReason()
                             : UcShareResolver.lastFailureReason();
+            if (reason != null && !reason.trim().isEmpty() && lastFailureReason.isEmpty()) {
+                lastFailureReason = reason.trim();
+            }
             AppLog.w(
                     TAG,
                     "guard resolve failed provider="

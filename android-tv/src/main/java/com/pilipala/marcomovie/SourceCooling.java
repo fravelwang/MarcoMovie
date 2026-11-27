@@ -4,7 +4,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 短期冷却表：某个源这一轮被判成「接口已关闭或异常」之后，十分钟内不再拿它去探测。
+ * 短期冷却表：某个源这一轮被判成「接口已关闭或异常」之后，三分钟内不再拿它去探测。
  *
  * <p>为什么需要：虎斑/木偶/多多/小飒/欧哥 这些站的接口现在直接回 {@code closed}（6 字节非 JSON）
  * 或 520，自动换源和片库墙每次仍会挨个去问，白等一整轮。冷却只进内存、不落盘：重启或十分钟后
@@ -14,8 +14,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 final class SourceCooling {
 
-    /** 冷却时长：十分钟。 */
-    static final long COOLDOWN_MS = 10L * 60L * 1000L;
+    /** 冷却时长：三分钟。 */
+    static final long COOLDOWN_MS = 3L * 60L * 1000L;
 
     private static final Map<String, Long> UNTIL = new ConcurrentHashMap<>();
 

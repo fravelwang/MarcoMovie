@@ -102,6 +102,8 @@ final class NetdiskShareLines {
     private static final int MAX_SHARES = 4;
 
     private static final long CACHE_TTL_MS = 10 * 60 * 1000L;
+    /** 空结果只记 60 秒：刚转存/刚登录时的一次空结果不该让线路消失十分钟。 */
+    private static final long EMPTY_CACHE_TTL_MS = 60 * 1000L;
     private static final int CACHE_MAX_ENTRIES = 64;
 
     /** 静态缓存，只为「同一部片反复进详情」省网络；过期或超量就先清。 */
@@ -278,7 +280,8 @@ final class NetdiskShareLines {
         final String key = cacheKey(site, id);
         CacheEntry cached = CACHE.get(key);
         if (cached != null) {
-            if (now - cached.at <= CACHE_TTL_MS) {
+            long ttl = cached.lines.isEmpty() ? EMPTY_CACHE_TTL_MS : CACHE_TTL_MS;
+            if (now - cached.at <= ttl) {
                 AppLog.w(TAG, "cache hit lines=" + cached.lines.size() + " " + key);
                 return materialize(cached.lines);
             }
