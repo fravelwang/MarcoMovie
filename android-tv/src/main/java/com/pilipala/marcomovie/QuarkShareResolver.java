@@ -220,7 +220,8 @@ final class QuarkShareResolver {
             String existing = client.playUrl(ident.fid);
             if (!existing.isEmpty()) {
                 AppLog.w(TAG, "step2 hit: fid already in our own drive");
-                return episode(lineName, "", existing, credential.cookie);
+                return episode(
+                        lineName, "", existing, refreshPlayCookie(credential.cookie, ident.fid));
             }
         } catch (IOException miss) {
             AppLog.w(TAG, "step2 miss: " + describe(miss));
@@ -260,12 +261,12 @@ final class QuarkShareResolver {
         }
 
         // Steps 4-5: copy into our own drive, then swap the new fid for a playback URL.
-        String url = saveAndResolve(credential.cookie, client, ident, hit, saveDirFid);
-        if (url.isEmpty()) {
+        PlayLink link = saveAndResolve(credential.cookie, client, ident, hit, saveDirFid);
+        if (link.url.isEmpty()) {
             AppLog.w(TAG, "step4/5 failed: no playable url after the save");
             return null;
         }
-        Cms.Episode playable = episode(lineName, hit.name, url, credential.cookie);
+        Cms.Episode playable = episode(lineName, hit.name, link.url, link.cookie);
         if (playable != null) {
             String nextIdent = identFor(ident, hit.next);
             if (!nextIdent.isEmpty()) {
@@ -609,7 +610,7 @@ final class QuarkShareResolver {
      *
      * @param saveDirFid destination folder fid from {@link #ensureSaveDir}, or {@link #ROOT_FID}
      */
-    private static String saveAndResolve(
+    private static PlayLink saveAndResolve(
             String cookie,
             QuarkDriveClient client,
             Ident ident,
@@ -681,12 +682,12 @@ final class QuarkShareResolver {
 
         if (Thread.currentThread().isInterrupted()) {
             AppLog.w(TAG, "step4 cancelled while waiting for the save task");
-            return "";
+            return new PlayLink("", cookie);
         }
 
         // Step 5 on whatever the task handed us.
-        String url = playFirst(client, candidates);
-        if (!url.isEmpty()) return url;
+        PlayLink link = playFirst(client, cookie, candidates);
+        if (!link.url.isEmpty()) return link;
 
         // The fids above may be the share ones rather than the copies. Look the copy up in our own
         // drive instead: by name + size (measured search endpoint), then by size in the destination
@@ -717,24 +718,138 @@ final class QuarkShareResolver {
             }
         }
         if (!looked.isEmpty()) AppLog.w(TAG, "step4 own-drive hit: " + looked.get(0));
-        return playFirst(client, looked);
+        return playFirst(client, cookie, looked);
     }
 
-    /** Swaps the first playable fid in {@code fids} for a URL; "" when none of them plays. */
-    private static String playFirst(QuarkDriveClient client, List<String> fids) {
+    /** A playback URL plus the cookie it has to be fetched with (the play call rotates it). */
+    private static final class PlayLink {
+        final String url;
+        final String cookie;
+
+        PlayLink(String url, String cookie) {
+            this.url = url;
+            this.cookie = cookie;
+        }
+    }
+
+    /** Swaps the first playable fid in {@code fids} for a URL; url "" when none of them plays. */
+    private static PlayLink playFirst(QuarkDriveClient client, String cookie, List<String> fids) {
         for (int i = 0; i < fids.size() && i < 3; i++) {
             String fid = fids.get(i);
             try {
                 String url = client.playUrl(fid);
                 if (!url.isEmpty()) {
                     AppLog.w(TAG, "step5 fid=" + fid + " url=" + url);
-                    return url;
+                    return new PlayLink(url, refreshPlayCookie(cookie, fid));
                 }
             } catch (IOException error) {
                 AppLog.w(TAG, "step5 fid=" + fid + " not playable: " + describe(error));
             }
         }
-        return "";
+        return new PlayLink("", cookie);
+    }
+
+    /**
+     * 播放地址拿到之后还要补一次 Cookie：夸克 {@code /file/v2/play} 每次都在 Set-Cookie 里轮换
+     * {@code __puus} 并下发 {@code Video-Auth}，视频 CDN 缺了这两个就回 412（2026-11-27 实测：
+     * 只有保存的旧 Cookie 时 412，把同一次响应的 Set-Cookie 合进来后 206 video/mp4）。
+     *
+     * <p>为什么在这里而不是 DriveClient：网盘中心那条链路这次不归本卡改；分享解析拿到的直链同样
+     * 需要这份 Cookie，补在这里两条分享线都能播。失败只记日志，照旧用保存的 Cookie 去试。
+     *
+     * @return the saved cookie with {@code __puus} / {@code Video-Auth} replaced by the fresh ones
+     */
+    private static String refreshPlayCookie(String cookie, String fid) {
+        String base = text(cookie).trim();
+        String id = text(fid).trim();
+        if (base.isEmpty() || id.isEmpty()) return cookie;
+        JsonObject payload = new JsonObject();
+        payload.addProperty("fid", id);
+        payload.addProperty("resolutions", "normal,low,high,super,2k,4k");
+        payload.addProperty("supports", "fmp4,m3u8");
+        List<String> updates = new ArrayList<>();
+        HttpURLConnection conn = null;
+        try {
+            long remaining = remainingBudgetMs();
+            if (remaining <= 0) return cookie;
+            conn = (HttpURLConnection) new URL(BASE + "/file/v2/play?pr=ucpro&fr=pc").openConnection();
+            conn.setInstanceFollowRedirects(false);
+            conn.setConnectTimeout((int) Math.min(CONNECT_TIMEOUT_MS, remaining));
+            conn.setReadTimeout((int) Math.min(READ_TIMEOUT_MS, remaining));
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("User-Agent", UA);
+            conn.setRequestProperty("Accept", ACCEPT);
+            conn.setRequestProperty("Referer", REFERER);
+            conn.setRequestProperty("Cookie", base);
+            byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            conn.setFixedLengthStreamingMode(body.length);
+            OutputStream out = conn.getOutputStream();
+            try {
+                out.write(body);
+                out.flush();
+            } finally {
+                closeQuietly(out);
+            }
+            int http = conn.getResponseCode();
+            // The body is not needed here; draining it keeps the connection reusable.
+            readAll(http >= 400 ? conn.getErrorStream() : conn.getInputStream());
+            Map<String, List<String>> headers = conn.getHeaderFields();
+            if (headers != null) {
+                for (Map.Entry<String, List<String>> header : headers.entrySet()) {
+                    if (header.getKey() == null
+                            || !"set-cookie".equalsIgnoreCase(header.getKey())) {
+                        continue;
+                    }
+                    for (String raw : header.getValue()) {
+                        String pair = raw == null ? "" : raw.split(";", 2)[0].trim();
+                        if (pair.isEmpty()) continue;
+                        String name = pair.split("=", 2)[0].trim();
+                        if ("__puus".equals(name) || "Video-Auth".equals(name)) updates.add(pair);
+                    }
+                }
+            }
+        } catch (IOException error) {
+            AppLog.w(TAG, "play cookie refresh failed, keeping the saved cookie: " + describe(error));
+            return cookie;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+        if (updates.isEmpty()) return cookie;
+        AppLog.w(TAG, "play cookie refreshed names=" + cookieNames(updates));
+        return mergeCookie(base, updates);
+    }
+
+    /** {@code __puus,Video-Auth}: names only, the values are credentials. */
+    private static String cookieNames(List<String> pairs) {
+        StringBuilder sb = new StringBuilder();
+        for (String pair : pairs) {
+            String name = pair.split("=", 2)[0].trim();
+            if (sb.length() > 0) sb.append(',');
+            sb.append(name);
+        }
+        return sb.toString();
+    }
+
+    /** Replaces every pair whose name appears in {@code updates}, then appends the new pairs. */
+    private static String mergeCookie(String cookie, List<String> updates) {
+        List<String> pairs = new ArrayList<>();
+        for (String part : text(cookie).split(";")) {
+            String pair = part.trim();
+            if (pair.isEmpty()) continue;
+            String name = pair.split("=", 2)[0].trim();
+            boolean replaced = false;
+            for (String update : updates) {
+                if (update.split("=", 2)[0].trim().equals(name)) {
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) pairs.add(pair);
+        }
+        pairs.addAll(updates);
+        return String.join("; ", pairs);
     }
 
     // ---------------------------------------------------------------- episode

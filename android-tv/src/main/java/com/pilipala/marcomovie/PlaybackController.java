@@ -713,6 +713,27 @@ final class PlaybackController {
                                         }
                                     }
                                 }
+                                // Guard/CSP 站点的网盘线路（虎斑4K 那批 w2x_ 站）：episode url 是
+                                // base64 包着的 JSON，不是直链，也不是我们自己那几种分享 id 形状。
+                                // 115 我们还没有解析链路，先认出来给一句明确文案就停，不再落到
+                                // SpiderAsk（那边只会回一句笼统话然后把用户弹回详情页）。
+                                final GuardSpiderId guard115 = GuardSpiderId.decode(targetId);
+                                if (guard115 != null && guard115.isPan115()) {
+                                    AppLog.w(
+                                            GuardSpiderId.TAG,
+                                            "guard decode provider=pan115 fields=a,b,c,d label=["
+                                                    + guard115.label()
+                                                    + "] → 115 未接入，停在详情页");
+                                    a.ui.post(
+                                            () -> {
+                                                if (serial != a.playbackResolveSerial
+                                                        || ticket != a.generation
+                                                        || a.isFinishing()) return;
+                                                clearPlaybackLoading(a);
+                                                a.toast("115 盘还没接，先换夸克/UC 线路");
+                                            });
+                                    return;
+                                }
                                 JSONObject result = null;
                                 Cms.Episode resolvedCandidate = null;
                                 Exception primaryError = null;
@@ -1076,6 +1097,11 @@ final class PlaybackController {
      * it starts with {@code bd}, UC when it has four segments, 夸克 otherwise), or null so the
      * caller keeps its original "no address" handling (same toast, same cross-source failover).
      *
+     * <p>Guard/CSP spider lines ({@code w2x_} sites) arrive as a base64 JSON instead of an id:
+     * {@link GuardSpiderId} unwraps it and hands the inner share coordinates to the same 夸克/UC
+     * resolvers, so those lines play through the same native path. 115 has no resolver here; the
+     * caller refuses it with an explicit message before this method is even asked.
+     *
      * <p>Deliberately narrow: only when the plugin answered empty, did not ask for the web parser,
      * the episode url is not already a plain media link, and the id is a netdisk share id. Runs on
      * the player-resolve worker thread.
@@ -1097,30 +1123,50 @@ final class PlaybackController {
             AppLog.w("QuarkShare", "skip: plugin returned url=[" + pluginUrl + "]");
             return null;
         }
+        // Guard/CSP 网盘线路：id 是一层 base64 JSON（外层 a=quark|uc|pan115，内层是那家分享的
+        // 坐标）。解出来按 a 分派到我们自己的夸克/UC 解析器；115 没有链路，调用方已经给过文案。
+        // 第二次调用（插件答完之后）不再重试：第一遍已经试过两种字段映射，重复只会让用户多等。
+        final GuardSpiderId guard = GuardSpiderId.decode(rawEp);
+        if (guard != null) {
+            if (guard.isPan115()) return null;
+            if (result != null) {
+                AppLog.w(GuardSpiderId.TAG, "guard retry skipped provider=" + guard.provider);
+                return null;
+            }
+        }
         // 按 id 形状分派：第一段 al 的阿里四段、第一段 bd 的百度五段、四段是 UC 分享，其余（五段
         // 夸克分享等）仍走原来那条，夸克那边一行不改。判据只看形状，不看站名/线路名：虎斑的
         // 「UC原画13」这种线路名和四段 id 形状已经够用。
-        final boolean aliShare = AliShareResolver.looksLikeShareId(rawEp);
-        final boolean baiduShare = !aliShare && BaiduShareResolver.looksLikeShareId(rawEp);
+        final boolean aliShare = guard == null && AliShareResolver.looksLikeShareId(rawEp);
+        final boolean baiduShare =
+                guard == null && !aliShare && BaiduShareResolver.looksLikeShareId(rawEp);
         final boolean ucShare =
-                !aliShare && !baiduShare && UcShareResolver.looksLikeShareId(rawEp);
+                guard == null && !aliShare && !baiduShare && UcShareResolver.looksLikeShareId(rawEp);
         final String logTag =
-                aliShare
-                        ? "AliShare"
-                        : baiduShare ? "BaiduShare" : ucShare ? "UcShare" : "QuarkShare";
+                guard != null
+                        ? guard.logTag()
+                        : aliShare
+                                ? "AliShare"
+                                : baiduShare ? "BaiduShare" : ucShare ? "UcShare" : "QuarkShare";
         try {
             Cms.Episode nativeEp =
-                    aliShare
-                            ? AliShareResolver.resolve(
-                                    site == null ? "" : site.api, lineName, rawEp)
-                            : baiduShare
-                                    ? BaiduShareResolver.resolve(
+                    guard != null
+                            ? guard.resolve(site == null ? "" : site.api, lineName)
+                            : aliShare
+                                    ? AliShareResolver.resolve(
                                             site == null ? "" : site.api, lineName, rawEp)
-                                    : ucShare
-                                            ? UcShareResolver.resolve(
+                                    : baiduShare
+                                            ? BaiduShareResolver.resolve(
                                                     site == null ? "" : site.api, lineName, rawEp)
-                                            : QuarkShareResolver.resolve(
-                                                    site == null ? "" : site.api, lineName, rawEp);
+                                            : ucShare
+                                                    ? UcShareResolver.resolve(
+                                                            site == null ? "" : site.api,
+                                                            lineName,
+                                                            rawEp)
+                                                    : QuarkShareResolver.resolve(
+                                                            site == null ? "" : site.api,
+                                                            lineName,
+                                                            rawEp);
             if (nativeEp != null && nativeEp.url != null && !nativeEp.url.trim().isEmpty()) {
                 // The synthesized episode carries only the media address. Keep the share-id
                 // episode as its origin so auto-next advances through the real episode list and
@@ -1159,6 +1205,14 @@ final class PlaybackController {
         if (UcShareResolver.looksLikeShareId(ep.url)) return UcShareResolver.lastFailureReason();
         if (BaiduShareResolver.looksLikeShareId(ep.url)) {
             return BaiduShareResolver.lastFailureReason();
+        }
+        // Guard/CSP 线路（base64 JSON）：夸克/UC 的解析器刚试过两种映射，最后一遍留下的原因
+        // 比插件那句笼统话准确；115 没有解析器，走调用方自己的文案。
+        GuardSpiderId guard = GuardSpiderId.decode(ep.url);
+        if (guard != null && !guard.isPan115()) {
+            return guard.isQuark()
+                    ? QuarkShareResolver.lastFailureReason()
+                    : UcShareResolver.lastFailureReason();
         }
         return "";
     }
