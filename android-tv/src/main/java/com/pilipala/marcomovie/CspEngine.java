@@ -8,6 +8,8 @@ import android.os.Looper;
 import android.widget.Toast;
 import dalvik.system.DexClassLoader;
 import com.github.catvod.crawler.Spider;
+import com.github.catvod.net.Net;
+import com.github.catvod.utils.Local;
 import java.io.*;
 import java.net.*;
 import java.lang.reflect.*;
@@ -220,6 +222,7 @@ public final class CspEngine implements SourceEngine {
             if (!(candidate instanceof Spider)) throw new IOException("插件父接口与当前宿主不兼容");
             spider = (Spider) candidate;
             spider.siteKey = site.key == null ? "" : site.key;
+            attachSpiderServices(spider);
             synchronized (pluginLock) {
                 spider.init(app, site.ext == null ? "" : site.ext.toString());
             }
@@ -938,6 +941,58 @@ public final class CspEngine implements SourceEngine {
                 }
             }
         };
+    }
+
+    /**
+     * 补齐 FongMi {@code JarLoader.newSpider} 给插件的三样东西：{@code siteKey}、{@code net}、{@code local}。
+     *
+     * <p>上游在 {@code com.fongmi.android.tv.api.loader.JarLoader#newSpider} 里就是这几行：
+     * <pre>
+     * spider.siteKey = key;
+     * spider.net = new Net(JsHost.INSTANCE, key);
+     * spider.local = new Local(key);
+     * </pre>
+     * 少了 {@code net}/{@code local}，部分 Guard 插件（w2x 系）拿不到宿主 WebView 里的站点 Cookie、
+     * 也读不到自己的站点缓存，会退回插件内置的旧分享 id —— 表现为“详情回空/线路失效”，
+     * 而同一份 jar 在影视仓里正常。2026-11-28《两京十五日》花卷即此现象。
+     */
+    static void attachSpiderServices(Spider spider) {
+        if (spider == null) return;
+        String key = spider.siteKey == null ? "" : spider.siteKey.trim();
+        if (key.isEmpty()) return;
+        try {
+            if (spider.net == null) spider.net = new Net(new WebViewCookies(), key);
+        } catch (Throwable t) {
+            AppLog.w("Csp", "spider.net unavailable site=" + key, t);
+        }
+        try {
+            if (spider.local == null) spider.local = new Local(key);
+        } catch (Throwable t) {
+            AppLog.w("Csp", "spider.local unavailable site=" + key, t);
+        }
+    }
+
+    /** 插件通过 {@code Spider.net} 读写站点 Cookie；上游 JsHost 读的就是 WebView 的 CookieManager。 */
+    private static final class WebViewCookies implements Net.Cookies {
+        @Override
+        public String getCookie(String url) {
+            try {
+                String cookie = android.webkit.CookieManager.getInstance().getCookie(url);
+                return cookie == null ? "" : cookie;
+            } catch (Throwable t) {
+                return "";
+            }
+        }
+
+        @Override
+        public boolean setCookie(String url, String cookie) {
+            try {
+                android.webkit.CookieManager.getInstance().setCookie(url, cookie);
+                return true;
+            } catch (Throwable t) {
+                return false;
+            }
+        }
     }
 
     public static boolean eligible(Cms.Site s) {

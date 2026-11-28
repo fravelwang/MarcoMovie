@@ -107,10 +107,12 @@ final class NetdiskShareLines {
     private static final int CACHE_MAX_ENTRIES = 64;
 
     /**
-     * 从「插件抓过的站点页」兜底补出来的线路，名字加这个后缀：同一个页面里的分享和站点自己给的
-     * 线路同名（都叫「百度分享」），用户要能看出来这条是谁补的。
+     * 站点页兜底补出来的线路，沿用影视仓/FongMi 的「原画」叫法：{@code 百度分享 → 百度原画}。
+     *
+     * <p>为什么不加「（站点页）」后缀了：影视仓对同一张百度分享显示的就是「百度原画」；加后缀会让
+     * Boss 一眼看出"这条不是原线路"，而内容其实是同一张分享。来源仍记在日志里（{@code provider=…}）。
      */
-    static final String PAGE_SOURCE_SUFFIX = "（站点页）";
+    static final String PAGE_SOURCE_SUFFIX = "";
 
     /** 静态缓存，只为「同一部片反复进详情」省网络；过期或超量就先清。 */
     private static final Map<String, CacheEntry> CACHE = new ConcurrentHashMap<>();
@@ -449,12 +451,24 @@ final class NetdiskShareLines {
     /**
      * 线路名：provider 给的基础名（{@code 夸克分享} / {@code UC分享}），同一家第 N 条追加
      * {@code " N"}，与本次重构前夸克那套写法一致（第一条不带序号）。
+     *
+     * <p>站点页兜底出来的线用影视仓的叫法（{@code 百度分享 → 百度原画}），这样同一张分享在两边
+     * 显示的名字一致；来源只记日志，不再写进线路名。
      */
     private static String lineName(String base, int seq, boolean pageSourced) {
         String name = text(base).trim();
         if (name.isEmpty()) name = "网盘分享";
-        if (pageSourced) name = name + PAGE_SOURCE_SUFFIX;
+        if (pageSourced) name = pageSourcedName(name);
         return seq <= 1 ? name : name + " " + seq;
+    }
+
+    /** {@code 百度分享} → {@code 百度原画}；已经是「原画」或以别的名字来的保持原样。 */
+    static String pageSourcedName(String name) {
+        String value = text(name).trim();
+        if (value.isEmpty()) return value;
+        if (value.endsWith("分享")) return value.substring(0, value.length() - 2) + "原画";
+        if (value.endsWith("原画")) return value;
+        return value;
     }
 
     /** provider 给的线路 → 缓存用的计划（名字 + 每集 id）。空 episode 的线路丢掉。 */
